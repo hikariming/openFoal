@@ -57,14 +57,42 @@ export type CoreEvent =
       text: string;
     }
   | {
+      type: "tool_call_start";
+      runId: string;
+      toolCallId: string;
+      toolName: string;
+    }
+  | {
+      type: "tool_call_delta";
+      runId: string;
+      toolCallId: string;
+      toolName: string;
+      delta: string;
+    }
+  | {
       type: "tool_call";
       runId: string;
+      toolCallId: string;
       toolName: string;
       args: Record<string, unknown>;
     }
   | {
+      type: "tool_result_start";
+      runId: string;
+      toolCallId: string;
+      toolName: string;
+    }
+  | {
+      type: "tool_result_delta";
+      runId: string;
+      toolCallId: string;
+      toolName: string;
+      delta: string;
+    }
+  | {
       type: "tool_result";
       runId: string;
+      toolCallId: string;
       toolName: string;
       output: string;
     }
@@ -816,7 +844,7 @@ function createPiTools(
     label: publicToolName,
     description: `OpenFoal tool: ${publicToolName}`,
     parameters: Type.Object({}, { additionalProperties: true }),
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId, params, signal, onUpdate) => {
       const result = await toolExecutor.execute(
         {
           name: publicToolName,
@@ -826,6 +854,22 @@ function createPiTools(
           runId: ctx.runId,
           sessionId: ctx.sessionId,
           runtimeMode: ctx.runtimeMode
+        },
+        {
+          signal: signal as { aborted: boolean; addEventListener?: (...args: any[]) => void; removeEventListener?: (...args: any[]) => void } | undefined,
+          onUpdate: (update) => {
+            onUpdate?.({
+              content: [
+                {
+                  type: "text",
+                  text: update.delta
+                }
+              ],
+              details: {
+                at: update.at
+              }
+            });
+          }
         }
       );
 
@@ -985,25 +1029,82 @@ function asString(value: unknown): string | undefined {
 
 function mapPiEvent(event: AgentEvent, runId: string): CoreEvent[] {
   switch (event.type) {
-    case "message_update":
-      if (event.assistantMessageEvent.type === "text_delta") {
+    case "message_update": {
+      const assistantEvent = event.assistantMessageEvent;
+      if (assistantEvent.type === "text_delta") {
         return [
           {
             type: "delta",
             runId,
-            text: event.assistantMessageEvent.delta
+            text: assistantEvent.delta
           }
         ];
       }
+
+      if (assistantEvent.type === "toolcall_start") {
+        const call = extractToolCallFromPartial(runId, assistantEvent.partial, assistantEvent.contentIndex);
+        if (!call) {
+          return [];
+        }
+        return [
+          {
+            type: "tool_call_start",
+            runId,
+            toolCallId: call.toolCallId,
+            toolName: call.toolName
+          }
+        ];
+      }
+
+      if (assistantEvent.type === "toolcall_delta") {
+        const call = extractToolCallFromPartial(runId, assistantEvent.partial, assistantEvent.contentIndex);
+        if (!call) {
+          return [];
+        }
+        return [
+          {
+            type: "tool_call_delta",
+            runId,
+            toolCallId: call.toolCallId,
+            toolName: call.toolName,
+            delta: assistantEvent.delta
+          }
+        ];
+      }
+
+      if (assistantEvent.type === "toolcall_end") {
+        return [
+          {
+            type: "tool_call",
+            runId,
+            toolCallId: resolveToolCallId(assistantEvent.toolCall.id, runId, assistantEvent.toolCall.name, "call"),
+            toolName: toPublicToolName(assistantEvent.toolCall.name),
+            args: isRecord(assistantEvent.toolCall.arguments) ? assistantEvent.toolCall.arguments : {}
+          }
+        ];
+      }
+
       return [];
+    }
 
     case "tool_execution_start":
       return [
         {
-          type: "tool_call",
+          type: "tool_result_start",
           runId,
+          toolCallId: resolveToolCallId(event.toolCallId, runId, event.toolName, "result"),
+          toolName: toPublicToolName(event.toolName)
+        }
+      ];
+
+    case "tool_execution_update":
+      return [
+        {
+          type: "tool_result_delta",
+          runId,
+          toolCallId: resolveToolCallId(event.toolCallId, runId, event.toolName, "result"),
           toolName: toPublicToolName(event.toolName),
-          args: isRecord(event.args) ? event.args : {}
+          delta: extractToolExecutionDelta(event.partialResult)
         }
       ];
 
@@ -1012,6 +1113,7 @@ function mapPiEvent(event: AgentEvent, runId: string): CoreEvent[] {
         {
           type: "tool_result",
           runId,
+          toolCallId: resolveToolCallId(event.toolCallId, runId, event.toolName, "result"),
           toolName: toPublicToolName(event.toolName),
           output: extractToolExecutionOutput(event.result)
         }
@@ -1043,6 +1145,50 @@ function mapPiEvent(event: AgentEvent, runId: string): CoreEvent[] {
     default:
       return [];
   }
+}
+
+function extractToolCallFromPartial(
+  runId: string,
+  partial: unknown,
+  contentIndex: number
+): { toolCallId: string; toolName: string; args: Record<string, unknown> } | undefined {
+  if (!partial || typeof partial !== "object") {
+    return undefined;
+  }
+  const content = (partial as Record<string, unknown>).content;
+  if (!Array.isArray(content) || contentIndex < 0 || contentIndex >= content.length) {
+    return undefined;
+  }
+  const block = content[contentIndex];
+  if (!block || typeof block !== "object") {
+    return undefined;
+  }
+  const item = block as Record<string, unknown>;
+  if (item.type !== "toolCall") {
+    return undefined;
+  }
+  const toolName = typeof item.name === "string" && item.name.length > 0 ? item.name : "tool";
+  return {
+    toolCallId: resolveToolCallId(asString(item.id), runId, toolName, `idx_${contentIndex}`),
+    toolName: toPublicToolName(toolName),
+    args: isRecord(item.arguments) ? item.arguments : {}
+  };
+}
+
+function resolveToolCallId(
+  toolCallId: string | undefined,
+  runId: string,
+  toolName: string,
+  suffix: string
+): string {
+  if (typeof toolCallId === "string" && toolCallId.trim().length > 0) {
+    return toolCallId;
+  }
+  return `tc_${runId}_${sanitizeForId(toolName)}_${sanitizeForId(suffix)}`;
+}
+
+function sanitizeForId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, "_").replace(/_+/g, "_");
 }
 
 function extractLatestAssistantText(messages: Message[]): string {
@@ -1080,6 +1226,35 @@ function extractToolExecutionOutput(result: unknown): string {
     })
     .filter((item) => item.length > 0);
   return lines.join("\n");
+}
+
+function extractToolExecutionDelta(partialResult: unknown): string {
+  if (typeof partialResult === "string") {
+    return partialResult;
+  }
+  if (!partialResult || typeof partialResult !== "object") {
+    return "";
+  }
+  const content = (partialResult as Record<string, unknown>).content;
+  if (Array.isArray(content)) {
+    const lines = content
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return "";
+        }
+        const record = item as Record<string, unknown>;
+        return record.type === "text" && typeof record.text === "string" ? record.text : "";
+      })
+      .filter((item) => item.length > 0);
+    if (lines.length > 0) {
+      return lines.join("\n");
+    }
+  }
+  try {
+    return JSON.stringify(partialResult);
+  } catch {
+    return "";
+  }
 }
 
 function collectTrailingToolResults(messages: Message[]): Array<Extract<Message, { role: "toolResult" }>> {
@@ -1153,20 +1328,36 @@ async function executeLegacyToolLoop(input: {
     outputParts.push(baseText);
   }
 
-  for (const directive of input.parsed.directives) {
+  for (let index = 0; index < input.parsed.directives.length; index += 1) {
+    const directive = input.parsed.directives[index];
+    const toolCallId = `lc_${input.runId}_${index + 1}`;
     if (input.state.aborted) {
       events.push(makeAbortEvent(input.runId));
       return { events };
     }
 
     events.push({
+      type: "tool_call_start",
+      runId: input.runId,
+      toolCallId,
+      toolName: directive.name
+    });
+    events.push({
       type: "tool_call",
       runId: input.runId,
+      toolCallId,
       toolName: directive.name,
       args: directive.args
     });
+    events.push({
+      type: "tool_result_start",
+      runId: input.runId,
+      toolCallId,
+      toolName: directive.name
+    });
 
     let result: ToolResult;
+    const deltaParts: string[] = [];
     try {
       result = await input.toolExecutor.execute(
         {
@@ -1177,6 +1368,21 @@ async function executeLegacyToolLoop(input: {
           runId: input.runId,
           sessionId: input.sessionId,
           runtimeMode: input.runtimeMode
+        },
+        {
+          onUpdate: (update) => {
+            if (!update.delta) {
+              return;
+            }
+            deltaParts.push(update.delta);
+            events.push({
+              type: "tool_result_delta",
+              runId: input.runId,
+              toolCallId,
+              toolName: directive.name,
+              delta: update.delta
+            });
+          }
         }
       );
     } catch (error) {
@@ -1208,11 +1414,12 @@ async function executeLegacyToolLoop(input: {
     events.push({
       type: "tool_result",
       runId: input.runId,
+      toolCallId,
       toolName: directive.name,
-      output
+      output: output.length > 0 ? output : deltaParts.join("")
     });
 
-    outputParts.push(`${directive.name}: ${output}`);
+    outputParts.push(`${directive.name}: ${output.length > 0 ? output : deltaParts.join("")}`);
   }
 
   if (input.state.aborted) {

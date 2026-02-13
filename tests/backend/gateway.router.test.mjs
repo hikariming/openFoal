@@ -65,6 +65,31 @@ test("agent.run returns stream events", async () => {
   assert.equal(eventNames.includes("agent.completed"), true);
 });
 
+test("agent.run over HTTP keeps compatibility event set", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const run = await router.handle(
+    req("r_run", "agent.run", {
+      idempotencyKey: "idem_http_compat_1",
+      sessionId: "s_default",
+      input: "run [[tool:text.upper {\"text\": \"hello\"}]]",
+      runtimeMode: "local"
+    }),
+    state
+  );
+
+  assert.equal(run.response.ok, true);
+  const eventNames = run.events.map((event) => event.event);
+  assert.equal(eventNames.includes("agent.tool_call"), true);
+  assert.equal(eventNames.includes("agent.tool_result"), true);
+  assert.equal(eventNames.includes("agent.tool_call_start"), false);
+  assert.equal(eventNames.includes("agent.tool_call_delta"), false);
+  assert.equal(eventNames.includes("agent.tool_result_start"), false);
+  assert.equal(eventNames.includes("agent.tool_result_delta"), false);
+});
+
 test("idempotency replay and conflict", async () => {
   const router = createGatewayRouter();
   const state = createConnectionState();

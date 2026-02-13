@@ -85,6 +85,23 @@ export type GatewaySession = {
   updatedAt: string;
 };
 
+export interface RunAgentParams {
+  sessionId: string;
+  input: string;
+  runtimeMode: RuntimeMode;
+  llm?: {
+    provider?: string;
+    modelId?: string;
+    apiKey?: string;
+    baseUrl?: string;
+    streamMode?: "real" | "mock";
+  };
+}
+
+export interface RunAgentStreamHandlers {
+  onEvent?: (event: RpcEvent) => void;
+}
+
 export class GatewayHttpClient {
   private readonly baseUrl: string;
   private readonly connectionId: string;
@@ -144,18 +161,7 @@ export class GatewayHttpClient {
     });
   }
 
-  async runAgent(params: {
-    sessionId: string;
-    input: string;
-    runtimeMode: RuntimeMode;
-    llm?: {
-      provider?: string;
-      modelId?: string;
-      apiKey?: string;
-      baseUrl?: string;
-      streamMode?: "real" | "mock";
-    };
-  }): Promise<{ runId?: string; events: RpcEvent[] }> {
+  async runAgent(params: RunAgentParams): Promise<{ runId?: string; events: RpcEvent[] }> {
     await this.ensureConnected();
     const result = await this.request("agent.run", {
       sessionId: params.sessionId,
@@ -171,6 +177,163 @@ export class GatewayHttpClient {
       runId,
       events: result.events
     };
+  }
+
+  async runAgentStream(
+    params: RunAgentParams,
+    handlers: RunAgentStreamHandlers = {}
+  ): Promise<{ runId?: string; events: RpcEvent[]; transport: "ws" | "http" }> {
+    try {
+      const wsResult = await this.runAgentViaWs(params, handlers);
+      return {
+        ...wsResult,
+        transport: "ws"
+      };
+    } catch (error) {
+      if (!(error instanceof GatewayWsPreflightError)) {
+        throw error;
+      }
+
+      const fallback = await this.runAgent(params);
+      for (const event of fallback.events) {
+        handlers.onEvent?.(event);
+      }
+      return {
+        ...fallback,
+        transport: "http"
+      };
+    }
+  }
+
+  private async runAgentViaWs(
+    params: RunAgentParams,
+    handlers: RunAgentStreamHandlers
+  ): Promise<{ runId?: string; events: RpcEvent[] }> {
+    if (typeof WebSocket === "undefined") {
+      throw new GatewayWsPreflightError("WebSocket is unavailable");
+    }
+
+    const wsUrl = toWebSocketUrl(this.baseUrl);
+    const ws = await openWebSocket(wsUrl);
+    const collectedEvents: RpcEvent[] = [];
+    let runRequestSent = false;
+    const pending = new Map<
+      string,
+      {
+        resolve: (value: RpcResponse) => void;
+        reject: (error: Error) => void;
+      }
+    >();
+    let closed = false;
+
+    const cleanup = (): void => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      for (const waiter of pending.values()) {
+        waiter.reject(new GatewayRpcError("NETWORK_ERROR", "WebSocket closed"));
+      }
+      pending.clear();
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    };
+
+    ws.onmessage = (msg) => {
+      const parsed = parseWsJson(msg.data);
+      if (!parsed) {
+        return;
+      }
+      if (isRpcEvent(parsed)) {
+        collectedEvents.push(parsed);
+        handlers.onEvent?.(parsed);
+        return;
+      }
+      if (isRpcResponse(parsed)) {
+        const waiter = pending.get(parsed.id);
+        if (!waiter) {
+          return;
+        }
+        pending.delete(parsed.id);
+        waiter.resolve(parsed);
+      }
+    };
+
+    ws.onclose = () => {
+      cleanup();
+    };
+
+    ws.onerror = () => {
+      cleanup();
+    };
+
+    const requestOverWs = (method: GatewayMethod, params: Record<string, unknown>): Promise<RpcResponse> => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        throw new GatewayWsPreflightError("WebSocket is not open");
+      }
+      const id = `ws_r_${++this.requestCounter}`;
+      const frame: RpcRequestFrame = {
+        type: "req",
+        id,
+        method,
+        params: SIDE_EFFECT_METHODS.has(method)
+          ? {
+              ...params,
+              idempotencyKey: createIdempotencyKey(method)
+            }
+          : params
+      };
+
+      return new Promise<RpcResponse>((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify(frame));
+      });
+    };
+
+    try {
+      const connectRes = await requestOverWs("connect", {
+        client: {
+          name: "desktop",
+          version: "0.1.0"
+        },
+        workspaceId: "w_default"
+      });
+      if (!connectRes.ok) {
+        throw new GatewayWsPreflightError(connectRes.error.message);
+      }
+
+      runRequestSent = true;
+      const runRes = await requestOverWs("agent.run", {
+        sessionId: params.sessionId,
+        input: params.input,
+        runtimeMode: params.runtimeMode,
+        ...(params.llm ? { llm: params.llm } : {})
+      });
+
+      if (!runRes.ok) {
+        throw new GatewayRpcError(runRes.error.code, runRes.error.message);
+      }
+
+      const runId = asString(runRes.payload.runId);
+      cleanup();
+      return {
+        runId,
+        events: collectedEvents
+      };
+    } catch (error) {
+      cleanup();
+      if (error instanceof GatewayRpcError) {
+        throw error;
+      }
+      if (runRequestSent) {
+        throw new GatewayRpcError("NETWORK_ERROR", toErrorMessage(error));
+      }
+      throw new GatewayWsPreflightError(toErrorMessage(error));
+    }
   }
 
   async abortRun(runId: string): Promise<void> {
@@ -235,6 +398,13 @@ export function getGatewayClient(): GatewayHttpClient {
   return singletonClient;
 }
 
+class GatewayWsPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GatewayWsPreflightError";
+  }
+}
+
 function readDefaultBaseUrl(): string {
   const raw = import.meta.env.VITE_GATEWAY_BASE_URL;
   if (typeof raw === "string" && raw.trim().length > 0) {
@@ -248,6 +418,65 @@ function normalizeBaseUrl(baseUrl: string): string {
   return normalized;
 }
 
+function toWebSocketUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/ws";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function openWebSocket(url: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url);
+    } catch (error) {
+      reject(new GatewayWsPreflightError(toErrorMessage(error)));
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      ws.close();
+      reject(new GatewayWsPreflightError("WebSocket open timeout"));
+    }, 3000);
+
+    ws.onopen = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve(ws);
+    };
+    ws.onerror = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      reject(new GatewayWsPreflightError("WebSocket open failed"));
+    };
+  });
+}
+
+function parseWsJson(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return null;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 function createConnectionId(): string {
   const rand = Math.random().toString(16).slice(2, 10);
   return `desktop_${Date.now()}_${rand}`;
@@ -259,6 +488,28 @@ function createIdempotencyKey(method: GatewayMethod): string {
 
 function isRpcEnvelope(value: Partial<RpcEnvelope>): value is RpcEnvelope {
   return Boolean(value.response && typeof value.response === "object" && Array.isArray(value.events));
+}
+
+function isRpcResponse(value: unknown): value is RpcResponse {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const frame = value as Partial<RpcResponse>;
+  return frame.type === "res" && typeof frame.id === "string" && typeof frame.ok === "boolean";
+}
+
+function isRpcEvent(value: unknown): value is RpcEvent {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const frame = value as Partial<RpcEvent>;
+  return (
+    frame.type === "event" &&
+    typeof frame.event === "string" &&
+    typeof frame.seq === "number" &&
+    typeof frame.stateVersion === "number" &&
+    Boolean(frame.payload && typeof frame.payload === "object")
+  );
 }
 
 function isGatewaySession(value: unknown): value is GatewaySession {

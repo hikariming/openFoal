@@ -67,6 +67,8 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
     const transcriptRepo = new SqliteTranscriptRepository(dbPath);
     const transcript = await transcriptRepo.list("s_default", 100);
     assert.equal(transcript.length > 0, true);
+    assert.equal(transcript.some((item) => item.event === "agent.tool_call_start"), true);
+    assert.equal(transcript.some((item) => item.event === "agent.tool_result_start"), true);
     assert.equal(transcript.some((item) => item.event === "agent.completed"), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });

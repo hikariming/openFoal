@@ -42,8 +42,13 @@ export interface GatewayHandleResult {
   events: EventFrame[];
 }
 
+export interface GatewayHandleOptions {
+  transport?: "http" | "ws";
+  onEvent?: (event: EventFrame) => void;
+}
+
 export interface GatewayRouter {
-  handle(input: unknown, state: ConnectionState): Promise<GatewayHandleResult>;
+  handle(input: unknown, state: ConnectionState, options?: GatewayHandleOptions): Promise<GatewayHandleResult>;
 }
 
 export interface GatewayServerOptions {
@@ -91,7 +96,7 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const now = deps.now ?? (() => new Date());
 
   return {
-    async handle(input: unknown, state: ConnectionState): Promise<GatewayHandleResult> {
+    async handle(input: unknown, state: ConnectionState, options: GatewayHandleOptions = {}): Promise<GatewayHandleResult> {
       const validated = validateReqFrame(input);
       if (!validated.ok) {
         return {
@@ -120,11 +125,17 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
               events: []
             };
           }
-          return cloneResult(existing.result as GatewayHandleResult);
+          const replayed = cloneResult(existing.result as GatewayHandleResult);
+          if ((options.transport ?? "http") === "ws" && options.onEvent) {
+            for (const event of replayed.events) {
+              options.onEvent(event);
+            }
+          }
+          return replayed;
         }
       }
 
-      const result = await route(req, state, coreService, sessionRepo, transcriptRepo, now);
+      const result = await route(req, state, coreService, sessionRepo, transcriptRepo, now, options);
 
       if (idempotencyKey && result.response.ok) {
         await idempotencyRepo.set(idempotencyKey, {
@@ -194,7 +205,8 @@ async function route(
   coreService: CoreService,
   sessionRepo: SessionRepository,
   transcriptRepo: TranscriptRepository,
-  now: () => Date
+  now: () => Date,
+  options: GatewayHandleOptions
 ): Promise<GatewayHandleResult> {
   switch (req.method) {
     case "connect": {
@@ -304,8 +316,16 @@ async function route(
         }
       }
 
-      const events: EventFrame[] = [];
+      const allEvents: EventFrame[] = [];
+      const responseEvents: EventFrame[] = [];
       let acceptedRunId = "";
+      const emit = (event: EventFrame): void => {
+        allEvents.push(event);
+        options.onEvent?.(event);
+        if ((options.transport ?? "http") === "http" && isHttpCompatibleRunEvent(event.event)) {
+          responseEvents.push(event);
+        }
+      };
 
       state.runningSessionIds.add(sessionId);
       try {
@@ -322,7 +342,7 @@ async function route(
               acceptedRunId = runId;
             }
           }
-          events.push(createEvent(state, mapped.event, mapped.payload));
+          emit(createEvent(state, mapped.event, mapped.payload));
         }
       } finally {
         state.runningSessionIds.delete(sessionId);
@@ -333,33 +353,33 @@ async function route(
         state.queuedModeChanges.delete(sessionId);
         const updated = await sessionRepo.setRuntimeMode(sessionId, queuedMode);
         if (updated) {
-          events.push(
+          emit(
             createEvent(state, "runtime.mode_changed", {
               sessionId,
               runtimeMode: queuedMode,
               status: "applied"
             })
           );
-          events.push(createEvent(state, "session.updated", { session: updated }));
+          emit(createEvent(state, "session.updated", { session: updated }));
         }
       }
 
       if (!acceptedRunId) {
-        await persistTranscript(sessionId, transcriptRepo, undefined, events, now);
+        await persistTranscript(sessionId, transcriptRepo, undefined, allEvents, now);
         return {
           response: makeErrorRes(req.id, "INTERNAL_ERROR", "agent.run 未返回 runId"),
-          events
+          events: responseEvents
         };
       }
 
-      await persistTranscript(sessionId, transcriptRepo, acceptedRunId, events, now);
+      await persistTranscript(sessionId, transcriptRepo, acceptedRunId, allEvents, now);
 
       return {
         response: makeSuccessRes(req.id, {
           runId: acceptedRunId,
           status: "accepted"
         }),
-        events
+        events: responseEvents
       };
     }
 
@@ -461,7 +481,7 @@ async function persistTranscript(
   events: EventFrame[],
   now: () => Date
 ): Promise<void> {
-  for (const event of events) {
+  for (const event of filterEventsForTranscript(events)) {
     await transcriptRepo.append({
       sessionId,
       runId,
@@ -470,6 +490,23 @@ async function persistTranscript(
       createdAt: now().toISOString()
     });
   }
+}
+
+const TRANSCRIPT_KEY_EVENT_NAMES = new Set<EventFrame["event"]>([
+  "agent.accepted",
+  "agent.delta",
+  "agent.tool_call_start",
+  "agent.tool_call",
+  "agent.tool_result_start",
+  "agent.tool_result",
+  "agent.completed",
+  "agent.failed",
+  "runtime.mode_changed",
+  "session.updated"
+]);
+
+function filterEventsForTranscript(events: EventFrame[]): EventFrame[] {
+  return events.filter((event) => TRANSCRIPT_KEY_EVENT_NAMES.has(event.event));
 }
 
 async function handleHttpRequest(
@@ -501,7 +538,9 @@ async function handleHttpRequest(
     const body = await readJsonBody(req);
     const connectionId = readConnectionId(req.url, req.headers?.host, req.headers?.["x-openfoal-connection-id"]);
     const state = getOrCreateConnectionState(httpConnections, connectionId);
-    const result = await router.handle(body, state);
+    const result = await router.handle(body, state, {
+      transport: "http"
+    });
     writeJson(res, 200, result);
     return;
   }
@@ -576,7 +615,21 @@ async function handleUpgrade(req: any, socket: any, head: any, router: GatewayRo
               input = text;
             }
 
-            const result = await router.handle(input, state);
+            const method = readWsMethod(input);
+            if (method === "agent.run") {
+              const result = await router.handle(input, state, {
+                transport: "ws",
+                onEvent: (event) => {
+                  socket.write(encodeWsFrame(Buffer.from(JSON.stringify(event), "utf8"), 0x1));
+                }
+              });
+              socket.write(encodeWsFrame(Buffer.from(JSON.stringify(result.response), "utf8"), 0x1));
+              continue;
+            }
+
+            const result = await router.handle(input, state, {
+              transport: "ws"
+            });
             socket.write(encodeWsFrame(Buffer.from(JSON.stringify(result.response), "utf8"), 0x1));
             for (const event of result.events) {
               socket.write(encodeWsFrame(Buffer.from(JSON.stringify(event), "utf8"), 0x1));
@@ -711,6 +764,17 @@ function readConnectionId(rawUrl: string | undefined, host: string | undefined, 
   return fromQuery && fromQuery.trim().length > 0 ? fromQuery.trim() : "http_default";
 }
 
+function readWsMethod(input: unknown): MethodName | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+  const method = (input as Record<string, unknown>).method;
+  if (typeof method !== "string") {
+    return undefined;
+  }
+  return method as MethodName;
+}
+
 async function readJsonBody(req: any): Promise<unknown> {
   const chunks: any[] = [];
   await new Promise<void>((resolve, reject) => {
@@ -814,13 +878,52 @@ function mapCoreEvent(coreEvent: CoreEvent): { event: EventFrame["event"]; paylo
           delta: coreEvent.text
         }
       };
+    case "tool_call_start":
+      return {
+        event: "agent.tool_call_start",
+        payload: {
+          runId: coreEvent.runId,
+          toolCallId: coreEvent.toolCallId,
+          toolName: coreEvent.toolName
+        }
+      };
+    case "tool_call_delta":
+      return {
+        event: "agent.tool_call_delta",
+        payload: {
+          runId: coreEvent.runId,
+          toolCallId: coreEvent.toolCallId,
+          toolName: coreEvent.toolName,
+          delta: coreEvent.delta
+        }
+      };
     case "tool_call":
       return {
         event: "agent.tool_call",
         payload: {
           runId: coreEvent.runId,
+          toolCallId: coreEvent.toolCallId,
           toolName: coreEvent.toolName,
           args: coreEvent.args
+        }
+      };
+    case "tool_result_start":
+      return {
+        event: "agent.tool_result_start",
+        payload: {
+          runId: coreEvent.runId,
+          toolCallId: coreEvent.toolCallId,
+          toolName: coreEvent.toolName
+        }
+      };
+    case "tool_result_delta":
+      return {
+        event: "agent.tool_result_delta",
+        payload: {
+          runId: coreEvent.runId,
+          toolCallId: coreEvent.toolCallId,
+          toolName: coreEvent.toolName,
+          delta: coreEvent.delta
         }
       };
     case "tool_result":
@@ -828,6 +931,7 @@ function mapCoreEvent(coreEvent: CoreEvent): { event: EventFrame["event"]; paylo
         event: "agent.tool_result",
         payload: {
           runId: coreEvent.runId,
+          toolCallId: coreEvent.toolCallId,
           toolName: coreEvent.toolName,
           output: coreEvent.output
         }
@@ -869,6 +973,15 @@ function createEvent(
   };
   state.nextSeq += 1;
   return frame;
+}
+
+function isHttpCompatibleRunEvent(eventName: EventFrame["event"]): boolean {
+  return (
+    eventName !== "agent.tool_call_start" &&
+    eventName !== "agent.tool_call_delta" &&
+    eventName !== "agent.tool_result_start" &&
+    eventName !== "agent.tool_result_delta"
+  );
 }
 
 function invalidParams(id: string, message: string): GatewayHandleResult {

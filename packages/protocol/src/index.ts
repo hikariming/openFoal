@@ -16,7 +16,11 @@ export const METHODS = [
 export const EVENTS = [
   "agent.accepted",
   "agent.delta",
+  "agent.tool_call_start",
+  "agent.tool_call_delta",
   "agent.tool_call",
+  "agent.tool_result_start",
+  "agent.tool_result_delta",
   "agent.tool_result",
   "agent.completed",
   "agent.failed",

@@ -68,6 +68,7 @@ export const enUS = {
     roleSystem: "System",
     toolCall: "Call",
     toolResult: "Result",
+    toolViewFull: "View full content",
     skillsTitle: "Skills",
     skillsDesc: "Skills are the new software",
     automationsTitle: "Automations",

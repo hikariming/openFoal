@@ -1,5 +1,5 @@
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
@@ -11,6 +11,12 @@ import { request as httpsRequest } from "node:https";
 
 declare const process: any;
 declare const Buffer: any;
+
+interface AbortSignalLike {
+  aborted: boolean;
+  addEventListener?(type: "abort", listener: () => void, options?: { once?: boolean }): void;
+  removeEventListener?(type: "abort", listener: () => void): void;
+}
 
 export interface ToolCall {
   name: string;
@@ -32,8 +38,13 @@ export interface ToolResult {
   };
 }
 
+export interface ToolExecutionHooks {
+  onUpdate?: (update: { delta: string; at: string }) => void;
+  signal?: AbortSignalLike;
+}
+
 export interface ToolExecutor {
-  execute(call: ToolCall, ctx: ToolContext): Promise<ToolResult>;
+  execute(call: ToolCall, ctx: ToolContext, hooks?: ToolExecutionHooks): Promise<ToolResult>;
 }
 
 export interface LocalToolExecutorOptions {
@@ -48,14 +59,14 @@ export function createLocalToolExecutor(options: LocalToolExecutorOptions = {}):
   const defaultTimeoutMs = toPositiveInt(options.defaultTimeoutMs) ?? 15_000;
 
   return {
-    async execute(call: ToolCall): Promise<ToolResult> {
+    async execute(call: ToolCall, _ctx: ToolContext, hooks?: ToolExecutionHooks): Promise<ToolResult> {
       switch (call.name) {
         case "bash.exec":
-          return executeBash(call.args, {
+          return await executeBash(call.args, {
             workspaceRoot,
             bashShell,
             defaultTimeoutMs
-          });
+          }, hooks);
         case "file.read":
           return executeFileRead(call.args, workspaceRoot);
         case "file.write":
@@ -63,7 +74,7 @@ export function createLocalToolExecutor(options: LocalToolExecutorOptions = {}):
         case "file.list":
           return executeFileList(call.args, workspaceRoot);
         case "http.request":
-          return executeHttpRequest(call.args, defaultTimeoutMs);
+          return await executeHttpRequest(call.args, defaultTimeoutMs, hooks);
         case "math.add":
           return executeMathAdd(call.args);
         case "text.upper":
@@ -80,14 +91,15 @@ export function createLocalToolExecutor(options: LocalToolExecutorOptions = {}):
   };
 }
 
-function executeBash(
+async function executeBash(
   args: Record<string, unknown>,
   options: {
     workspaceRoot: string;
     bashShell: string;
     defaultTimeoutMs: number;
-  }
-): ToolResult {
+  },
+  hooks?: ToolExecutionHooks
+): Promise<ToolResult> {
   const cmd = typeof args.cmd === "string" ? args.cmd.trim() : "";
   if (cmd.length === 0) {
     return fail("bash.exec 需要 cmd");
@@ -100,28 +112,117 @@ function executeBash(
   }
 
   const timeoutMs = toPositiveInt(args.timeoutMs) ?? options.defaultTimeoutMs;
-  const result = spawnSync(options.bashShell, ["-lc", cmd], {
-    cwd: safeCwd.value,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    maxBuffer: 4 * 1024 * 1024
+  try {
+    const result = await runBashProcess({
+      cmd,
+      shell: options.bashShell,
+      cwd: safeCwd.value,
+      timeoutMs,
+      hooks
+    });
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || "").trim() || `exit code ${String(result.status)}`;
+      return fail(`bash.exec failed: ${detail}`);
+    }
+    return {
+      ok: true,
+      output: result.stdout
+    };
+  } catch (error) {
+    return fail(`bash.exec error: ${toErrorMessage(error)}`);
+  }
+}
+
+async function runBashProcess(input: {
+  cmd: string;
+  shell: string;
+  cwd: string;
+  timeoutMs: number;
+  hooks?: ToolExecutionHooks;
+}): Promise<{ status: number; stdout: string; stderr: string }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(input.shell, ["-lc", input.cmd], {
+      cwd: input.cwd,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    let aborted = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, input.timeoutMs);
+
+    const signal = input.hooks?.signal;
+    const abortHandler = () => {
+      aborted = true;
+      child.kill("SIGKILL");
+    };
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timeout);
+        reject(new Error("aborted"));
+        return;
+      }
+      signal.addEventListener?.("abort", abortHandler, { once: true });
+    }
+
+    const finalize = (result: { status: number; stdout: string; stderr: string } | Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      if (signal) {
+        signal.removeEventListener?.("abort", abortHandler);
+      }
+      if (result instanceof Error) {
+        reject(result);
+        return;
+      }
+      resolve(result);
+    };
+
+    child.stdout?.on("data", (chunk: any) => {
+      const text = String(chunk);
+      stdout += text;
+      input.hooks?.onUpdate?.({
+        delta: text,
+        at: nowIso()
+      });
+    });
+    child.stderr?.on("data", (chunk: any) => {
+      const text = String(chunk);
+      stderr += text;
+      input.hooks?.onUpdate?.({
+        delta: text,
+        at: nowIso()
+      });
+    });
+
+    child.once("error", (error: Error) => {
+      finalize(error);
+    });
+
+    child.once("close", (code: number | null) => {
+      if (timedOut) {
+        finalize(new Error(`timeout after ${input.timeoutMs}ms`));
+        return;
+      }
+      if (aborted) {
+        finalize(new Error("aborted"));
+        return;
+      }
+      finalize({
+        status: typeof code === "number" ? code : 1,
+        stdout,
+        stderr
+      });
+    });
   });
-
-  if (result.error) {
-    return fail(`bash.exec error: ${result.error.message}`);
-  }
-
-  const stdout = typeof result.stdout === "string" ? result.stdout : "";
-  const stderr = typeof result.stderr === "string" ? result.stderr : "";
-  if (result.status !== 0) {
-    const detail = (stderr || stdout || "").trim() || `exit code ${String(result.status)}`;
-    return fail(`bash.exec failed: ${detail}`);
-  }
-
-  return {
-    ok: true,
-    output: stdout
-  };
 }
 
 function executeFileRead(args: Record<string, unknown>, workspaceRoot: string): ToolResult {
@@ -238,7 +339,11 @@ function walkDir(base: string, current: string, recursive: boolean, limit: numbe
   }
 }
 
-async function executeHttpRequest(args: Record<string, unknown>, defaultTimeoutMs: number): Promise<ToolResult> {
+async function executeHttpRequest(
+  args: Record<string, unknown>,
+  defaultTimeoutMs: number,
+  hooks?: ToolExecutionHooks
+): Promise<ToolResult> {
   const urlText = typeof args.url === "string" ? args.url.trim() : "";
   if (urlText.length === 0) {
     return fail("http.request 需要 url");
@@ -276,7 +381,8 @@ async function executeHttpRequest(args: Record<string, unknown>, defaultTimeoutM
       method,
       headers,
       body: bodyText,
-      timeoutMs
+      timeoutMs,
+      hooks
     });
 
     const output = JSON.stringify({
@@ -324,6 +430,7 @@ async function requestHttp(input: {
   headers: Record<string, string>;
   body?: string;
   timeoutMs: number;
+  hooks?: ToolExecutionHooks;
 }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
   const client = input.url.protocol === "https:" ? httpsRequest : httpRequest;
 
@@ -340,7 +447,13 @@ async function requestHttp(input: {
       },
       (res: any) => {
         const chunks: any[] = [];
-        res.on("data", (chunk: any) => chunks.push(chunk));
+        res.on("data", (chunk: any) => {
+          chunks.push(chunk);
+          input.hooks?.onUpdate?.({
+            delta: String(chunk),
+            at: nowIso()
+          });
+        });
         res.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf8");
           const headers: Record<string, string> = {};
@@ -357,6 +470,20 @@ async function requestHttp(input: {
     );
 
     req.on("error", reject);
+    const signal = input.hooks?.signal;
+    const abortHandler = () => {
+      req.destroy(new Error("aborted"));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        reject(new Error("aborted"));
+        return;
+      }
+      signal.addEventListener?.("abort", abortHandler, { once: true });
+      req.on("close", () => {
+        signal.removeEventListener?.("abort", abortHandler);
+      });
+    }
     req.on("timeout", () => {
       req.destroy(new Error("request timeout"));
     });
@@ -419,6 +546,10 @@ function fail(message: string): ToolResult {
       message
     }
   };
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
 }
 
 function toErrorMessage(error: unknown): string {

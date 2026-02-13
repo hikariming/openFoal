@@ -85,10 +85,18 @@ test("gateway WS handles connect and agent.run stream", async () => {
     );
 
     const messages = [];
-    while (messages.length < 10) {
+    let hasCompleted = false;
+    let hasRunResponse = false;
+    while (messages.length < 40) {
       const frame = await ws.readJson();
       messages.push(frame);
       if (frame.type === "event" && frame.event === "agent.completed") {
+        hasCompleted = true;
+      }
+      if (frame.type === "res" && frame.id === "r_run") {
+        hasRunResponse = true;
+      }
+      if (hasCompleted && hasRunResponse) {
         break;
       }
     }
@@ -96,11 +104,19 @@ test("gateway WS handles connect and agent.run stream", async () => {
     const runRes = messages.find((frame) => frame.type === "res" && frame.id === "r_run");
     assert.equal(runRes?.ok, true);
 
-    const eventNames = messages.filter((frame) => frame.type === "event").map((frame) => frame.event);
+    const eventFrames = messages.filter((frame) => frame.type === "event");
+    const eventNames = eventFrames.map((frame) => frame.event);
     assert.equal(eventNames.includes("agent.accepted"), true);
+    assert.equal(eventNames.includes("agent.tool_call_start"), true);
     assert.equal(eventNames.includes("agent.tool_call"), true);
+    assert.equal(eventNames.includes("agent.tool_result_start"), true);
     assert.equal(eventNames.includes("agent.tool_result"), true);
     assert.equal(eventNames.includes("agent.completed"), true);
+
+    for (let i = 1; i < eventFrames.length; i += 1) {
+      assert.equal(eventFrames[i].seq > eventFrames[i - 1].seq, true);
+      assert.equal(eventFrames[i].stateVersion > eventFrames[i - 1].stateVersion, true);
+    }
   } finally {
     ws.close();
     await server.close();

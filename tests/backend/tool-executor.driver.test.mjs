@@ -15,18 +15,25 @@ const TOOL_CTX = {
 
 test("tool executor supports bash.exec", async () => {
   const executor = createLocalToolExecutor();
+  const updates = [];
   const result = await executor.execute(
     {
       name: "bash.exec",
       args: {
-        cmd: "printf 'hello-tool-exec'"
+        cmd: "for i in 1 2 3; do printf \"hello-tool-exec-$i\\n\"; sleep 0.01; done"
       }
     },
-    TOOL_CTX
+    TOOL_CTX,
+    {
+      onUpdate: (update) => {
+        updates.push(update.delta);
+      }
+    }
   );
 
   assert.equal(result.ok, true);
-  assert.equal(result.output, "hello-tool-exec");
+  assert.match(result.output ?? "", /hello-tool-exec-1/);
+  assert.equal(updates.length >= 2, true);
 });
 
 test("tool executor supports file.write/file.read/file.list", async () => {

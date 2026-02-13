@@ -68,6 +68,7 @@ export const zhCN = {
     roleSystem: "系统",
     toolCall: "调用",
     toolResult: "返回",
+    toolViewFull: "查看完整内容",
     skillsTitle: "技能",
     skillsDesc: "技能就是新的软件",
     automationsTitle: "自动化",

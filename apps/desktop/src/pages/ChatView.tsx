@@ -1,4 +1,4 @@
-import { Button, Card, Input, Space, Typography } from "@douyinfe/semi-ui";
+import { Button, Card, Input, MarkdownRender, Space, Typography } from "@douyinfe/semi-ui";
 import {
   IconApps,
   IconArrowUp,
@@ -24,6 +24,19 @@ type ChatMessage = {
   id: string;
   role: ChatRole;
   text: string;
+  toolMeta?: {
+    toolCallId: string;
+    kind: "call" | "result";
+    toolName: string;
+    detail: string;
+    preview: string;
+    inProgress?: boolean;
+  };
+};
+
+type RunRenderState = {
+  assistantMessageId?: string;
+  toolMessageIds: Record<string, string>;
 };
 
 const MAX_MESSAGES_PER_SESSION = 120;
@@ -34,6 +47,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   const llmConfig = useAppStore((state) => state.llmConfig);
   const gatewayClient = useMemo(() => getGatewayClient(), []);
   const historyCache = useRef<Record<string, ChatMessage[]>>({});
+  const runRenderRef = useRef<RunRenderState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [gatewayReady, setGatewayReady] = useState(false);
@@ -73,6 +87,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
 
   useEffect(() => {
     setMessages(historyCache.current[sessionId] ?? []);
+    runRenderRef.current = null;
     setRuntimeError("");
   }, [sessionId]);
 
@@ -108,6 +123,194 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
     applyMessages((prev) => [...prev, message]);
   };
 
+  const updateMessage = (messageId: string, updater: (message: ChatMessage) => ChatMessage) => {
+    applyMessages((prev) => prev.map((message) => (message.id === messageId ? updater(message) : message)));
+  };
+
+  const getRunRenderState = (): RunRenderState => {
+    if (!runRenderRef.current) {
+      runRenderRef.current = {
+        toolMessageIds: {}
+      };
+    }
+    return runRenderRef.current;
+  };
+
+  const ensureAssistantMessage = (initialText: string): string => {
+    const state = getRunRenderState();
+    if (state.assistantMessageId) {
+      return state.assistantMessageId;
+    }
+    const id = createMessageId();
+    pushMessage({
+      id,
+      role: "assistant",
+      text: initialText
+    });
+    state.assistantMessageId = id;
+    return id;
+  };
+
+  const ensureToolMessage = (kind: "call" | "result", toolCallId: string, toolName: string): string => {
+    const state = getRunRenderState();
+    const key = `${kind}:${toolCallId}`;
+    const existing = state.toolMessageIds[key];
+    if (existing) {
+      return existing;
+    }
+    const id = createMessageId();
+    pushMessage({
+      id,
+      role: "tool",
+      text: "",
+      toolMeta: {
+        toolCallId,
+        kind,
+        toolName,
+        detail: "",
+        preview: "(streaming...)",
+        inProgress: true
+      }
+    });
+    state.toolMessageIds[key] = id;
+    return id;
+  };
+
+  const appendToolDetail = (
+    kind: "call" | "result",
+    toolCallId: string,
+    toolName: string,
+    delta: string,
+    inProgress: boolean
+  ): void => {
+    const id = ensureToolMessage(kind, toolCallId, toolName);
+    updateMessage(id, (message) => {
+      const current = message.toolMeta;
+      if (!current) {
+        return message;
+      }
+      const nextDetail = `${current.detail}${delta}`;
+      return {
+        ...message,
+        toolMeta: {
+          ...current,
+          toolName,
+          detail: nextDetail,
+          preview: summarizeForPreview(nextDetail),
+          inProgress
+        }
+      };
+    });
+  };
+
+  const setToolDetail = (
+    kind: "call" | "result",
+    toolCallId: string,
+    toolName: string,
+    detail: string,
+    inProgress: boolean
+  ): void => {
+    const id = ensureToolMessage(kind, toolCallId, toolName);
+    updateMessage(id, (message) => {
+      const current = message.toolMeta;
+      if (!current) {
+        return message;
+      }
+      return {
+        ...message,
+        toolMeta: {
+          ...current,
+          toolName,
+          detail,
+          preview: summarizeForPreview(detail),
+          inProgress
+        }
+      };
+    });
+  };
+
+  const applyRunEvent = (event: RpcEvent): void => {
+    if (event.event === "agent.delta") {
+      const delta = asString(event.payload.delta) ?? "";
+      if (delta.length === 0) {
+        return;
+      }
+      const messageId = ensureAssistantMessage("");
+      updateMessage(messageId, (message) => ({
+        ...message,
+        text: `${message.text}${delta}`
+      }));
+      return;
+    }
+
+    if (event.event === "agent.completed") {
+      const output = asString(event.payload.output) ?? "";
+      if (output.trim().length === 0) {
+        return;
+      }
+      const messageId = ensureAssistantMessage(output);
+      updateMessage(messageId, (message) => ({
+        ...message,
+        text: output
+      }));
+      return;
+    }
+
+    if (event.event === "agent.tool_call_start") {
+      const toolName = asString(event.payload.toolName) ?? "tool";
+      const toolCallId = asString(event.payload.toolCallId) ?? `call_${toolName}`;
+      ensureToolMessage("call", toolCallId, toolName);
+      return;
+    }
+
+    if (event.event === "agent.tool_call_delta") {
+      const toolName = asString(event.payload.toolName) ?? "tool";
+      const toolCallId = asString(event.payload.toolCallId) ?? `call_${toolName}`;
+      const delta = asString(event.payload.delta) ?? "";
+      appendToolDetail("call", toolCallId, toolName, delta, true);
+      return;
+    }
+
+    if (event.event === "agent.tool_call") {
+      const toolName = asString(event.payload.toolName) ?? "tool";
+      const toolCallId = asString(event.payload.toolCallId) ?? `call_${toolName}`;
+      setToolDetail("call", toolCallId, toolName, formatToolDetail(event.payload.args), false);
+      return;
+    }
+
+    if (event.event === "agent.tool_result_start") {
+      const toolName = asString(event.payload.toolName) ?? "tool";
+      const toolCallId = asString(event.payload.toolCallId) ?? `result_${toolName}`;
+      ensureToolMessage("result", toolCallId, toolName);
+      return;
+    }
+
+    if (event.event === "agent.tool_result_delta") {
+      const toolName = asString(event.payload.toolName) ?? "tool";
+      const toolCallId = asString(event.payload.toolCallId) ?? `result_${toolName}`;
+      const delta = asString(event.payload.delta) ?? "";
+      appendToolDetail("result", toolCallId, toolName, delta, true);
+      return;
+    }
+
+    if (event.event === "agent.tool_result") {
+      const toolName = asString(event.payload.toolName) ?? "tool";
+      const toolCallId = asString(event.payload.toolCallId) ?? `result_${toolName}`;
+      setToolDetail("result", toolCallId, toolName, formatToolDetail(event.payload.output), false);
+      return;
+    }
+
+    if (event.event === "agent.failed") {
+      const code = asString(event.payload.code) ?? "INTERNAL_ERROR";
+      const message = asString(event.payload.message) ?? "Unknown error";
+      pushMessage({
+        id: createMessageId(),
+        role: "system",
+        text: `[${code}] ${message}`
+      });
+    }
+  };
+
   const handleSend = async (rawInput?: string): Promise<void> => {
     if (busy) {
       return;
@@ -128,32 +331,29 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
     });
 
     setBusy(true);
+    runRenderRef.current = {
+      toolMessageIds: {}
+    };
     try {
-      await gatewayClient.ensureConnected();
-      setGatewayReady(true);
-
-      const result = await gatewayClient.runAgent({
-        sessionId,
-        input: userText,
-        runtimeMode,
-        llm: {
-          ...(llmConfig.provider.trim() ? { provider: llmConfig.provider.trim() } : {}),
-          ...(llmConfig.modelId.trim() ? { modelId: llmConfig.modelId.trim() } : {}),
-          ...(llmConfig.apiKey.trim() ? { apiKey: llmConfig.apiKey.trim() } : {}),
-          ...(llmConfig.baseUrl.trim() ? { baseUrl: llmConfig.baseUrl.trim() } : {})
+      await gatewayClient.runAgentStream(
+        {
+          sessionId,
+          input: userText,
+          runtimeMode,
+          llm: {
+            ...(llmConfig.provider.trim() ? { provider: llmConfig.provider.trim() } : {}),
+            ...(llmConfig.modelId.trim() ? { modelId: llmConfig.modelId.trim() } : {}),
+            ...(llmConfig.apiKey.trim() ? { apiKey: llmConfig.apiKey.trim() } : {}),
+            ...(llmConfig.baseUrl.trim() ? { baseUrl: llmConfig.baseUrl.trim() } : {})
+          }
+        },
+        {
+          onEvent: (event) => {
+            applyRunEvent(event);
+          }
         }
-      });
-
-      const rendered = renderAssistantMessages(result.events, t);
-      if (rendered.length === 0) {
-        pushMessage({
-          id: createMessageId(),
-          role: "assistant",
-          text: "(empty output)"
-        });
-      } else {
-        applyMessages((prev) => [...prev, ...rendered]);
-      }
+      );
+      setGatewayReady(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setGatewayReady(false);
@@ -164,6 +364,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
         text: message
       });
     } finally {
+      runRenderRef.current = null;
       setBusy(false);
     }
   };
@@ -228,7 +429,24 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
               {messages.map((message) => (
                 <div key={message.id} className={`message-row ${message.role}`}>
                   <Typography.Text className="message-role">{renderRole(message.role, t)}</Typography.Text>
-                  <Typography.Text className="message-text">{message.text}</Typography.Text>
+                  {message.toolMeta ? (
+                    <div className="tool-message-card">
+                      <Typography.Text className="tool-message-head">
+                        {message.toolMeta.kind === "call" ? t("chat.toolCall") : t("chat.toolResult")}{" "}
+                        <span className="tool-message-name">{message.toolMeta.toolName}</span>
+                        {message.toolMeta.inProgress ? <span className="tool-message-live"> · streaming</span> : null}
+                      </Typography.Text>
+                      <Typography.Text className="tool-message-preview">{message.toolMeta.preview}</Typography.Text>
+                      <details className="tool-message-details">
+                        <summary>{t("chat.toolViewFull")}</summary>
+                        <pre>{message.toolMeta.detail}</pre>
+                      </details>
+                    </div>
+                  ) : (
+                    <div className="message-text">
+                      <MarkdownRender raw={message.text} format="md" />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -302,61 +520,6 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   );
 }
 
-function renderAssistantMessages(events: RpcEvent[], t: (key: string) => string): ChatMessage[] {
-  const messages: ChatMessage[] = [];
-  let deltaText = "";
-  let completedOutput = "";
-  for (const event of events) {
-    if (event.event === "agent.delta") {
-      deltaText += asString(event.payload.delta) ?? "";
-      continue;
-    }
-    if (event.event === "agent.completed") {
-      completedOutput = asString(event.payload.output) ?? completedOutput;
-      continue;
-    }
-    if (event.event === "agent.tool_call") {
-      const toolName = asString(event.payload.toolName) ?? "tool";
-      const argsText = safeJson(event.payload.args);
-      messages.push({
-        id: createMessageId(),
-        role: "tool",
-        text: `${t("chat.toolCall")} ${toolName} ${argsText}`
-      });
-      continue;
-    }
-    if (event.event === "agent.tool_result") {
-      const toolName = asString(event.payload.toolName) ?? "tool";
-      const output = asString(event.payload.output) ?? "";
-      messages.push({
-        id: createMessageId(),
-        role: "tool",
-        text: `${t("chat.toolResult")} ${toolName} ${output}`
-      });
-      continue;
-    }
-    if (event.event === "agent.failed") {
-      const code = asString(event.payload.code) ?? "INTERNAL_ERROR";
-      const message = asString(event.payload.message) ?? "Unknown error";
-      messages.push({
-        id: createMessageId(),
-        role: "system",
-        text: `[${code}] ${message}`
-      });
-    }
-  }
-
-  const finalOutput = completedOutput || deltaText;
-  if (finalOutput.trim().length > 0) {
-    messages.push({
-      id: createMessageId(),
-      role: "assistant",
-      text: finalOutput.trim()
-    });
-  }
-  return messages;
-}
-
 function renderRole(role: ChatRole, t: (key: string) => string): string {
   if (role === "user") {
     return t("chat.roleUser");
@@ -376,10 +539,28 @@ function asString(value: unknown): string | undefined {
 
 function safeJson(value: unknown): string {
   try {
-    return JSON.stringify(value ?? {});
+    return JSON.stringify(value ?? {}, null, 2);
   } catch {
     return "{}";
   }
+}
+
+function formatToolDetail(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  return safeJson(value);
+}
+
+function summarizeForPreview(detail: string): string {
+  const compact = detail.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return "(empty)";
+  }
+  if (compact.length <= 180) {
+    return compact;
+  }
+  return `${compact.slice(0, 180)}...`;
 }
 
 function createMessageId(): string {
