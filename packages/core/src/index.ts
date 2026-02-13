@@ -30,6 +30,13 @@ export interface CoreRunInput {
   sessionId: string;
   input: string;
   runtimeMode: RuntimeMode;
+  llm?: {
+    provider?: string;
+    modelId?: string;
+    apiKey?: string;
+    baseUrl?: string;
+    streamMode?: "real" | "mock";
+  };
 }
 
 export interface CoreContinueInput {
@@ -85,6 +92,7 @@ export interface PiCoreOptions {
   provider?: string;
   modelId?: string;
   apiKey?: string;
+  baseUrl?: string;
   systemPrompt?: string;
   streamMode?: "real" | "mock";
   streamFn?: StreamFn;
@@ -132,6 +140,16 @@ interface ParsedInput {
 
 const TOOL_DIRECTIVE_PATTERN = /\[\[tool:([a-zA-Z0-9._-]+)(?:\s+([\s\S]*?))?\]\]/g;
 const DEFAULT_SYSTEM_PROMPT = "You are OpenFoal assistant.";
+const PUBLIC_TOOL_NAMES = [
+  "bash.exec",
+  "file.read",
+  "file.write",
+  "file.list",
+  "http.request",
+  "math.add",
+  "text.upper",
+  "echo"
+] as const;
 
 let piProvidersRegistered = false;
 
@@ -153,7 +171,6 @@ export function createRuntimeCoreService(options: RuntimeCoreOptions = {}): Core
 export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreService {
   const toolExecutor = options.toolExecutor ?? createBuiltinToolExecutor();
   const piOptions = options.pi ?? {};
-  const runtimeSettings = resolvePiRuntimeSettings(piOptions);
   const running = new Map<string, ActiveRun>();
   let runCounter = 0;
 
@@ -189,6 +206,10 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
       let outputText = "";
 
       try {
+        const runtimeSettings = resolvePiRuntimeSettings({
+          ...piOptions,
+          ...(input.llm ?? {})
+        });
         const streamFn = resolvePiStreamFn(piOptions, runtimeSettings.streamMode);
         const tools = createPiTools(toolExecutor, {
           runId,
@@ -513,7 +534,10 @@ export function resolvePiRuntimeSettings(options: PiRuntimeSettingsOptions = {})
   });
   const provider = firstNonEmpty(options.provider, config.llm?.defaultProvider, env.OPENFOAL_PI_PROVIDER);
   const modelId = firstNonEmpty(options.modelId, config.llm?.defaultModel, env.OPENFOAL_PI_MODEL);
-  const providerConfig = provider ? config.llm?.providers?.[provider] : undefined;
+  const providerConfig = mergeProviderConfig(
+    provider ? config.llm?.providers?.[provider] : undefined,
+    firstNonEmpty(options.baseUrl, env.OPENFOAL_PI_BASE_URL)
+  );
 
   return {
     config,
@@ -522,6 +546,22 @@ export function resolvePiRuntimeSettings(options: PiRuntimeSettingsOptions = {})
     model: resolvePiModel(provider, modelId, providerConfig),
     streamMode: resolvePiStreamMode(options.streamMode, env),
     apiKeys: collectApiKeys(config, env, options.apiKey, provider)
+  };
+}
+
+function mergeProviderConfig(
+  providerConfig: OpenFoalLlmProviderConfig | undefined,
+  baseUrl: string | undefined
+): OpenFoalLlmProviderConfig | undefined {
+  if (!providerConfig && !baseUrl) {
+    return undefined;
+  }
+  if (!baseUrl) {
+    return providerConfig;
+  }
+  return {
+    ...(providerConfig ?? {}),
+    baseUrl
   };
 }
 
@@ -691,7 +731,7 @@ function buildMockAssistantMessage(model: Model<any>, context: Context): Assista
 
   if (lastMessage.role === "toolResult") {
     const trailing = collectTrailingToolResults(context.messages);
-    const lines = trailing.map((item) => `${item.toolName}: ${extractToolResultContent(item)}`);
+    const lines = trailing.map((item) => `${toPublicToolName(item.toolName)}: ${extractToolResultContent(item)}`);
     return makeAssistantMessage(
       model,
       [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(tool results)" }],
@@ -719,7 +759,7 @@ function buildMockAssistantMessage(model: Model<any>, context: Context): Assista
       content.push({
         type: "toolCall",
         id: `tc_${Date.now()}_${i + 1}`,
-        name: directive.name,
+        name: toPiToolName(directive.name),
         arguments: directive.args
       });
     }
@@ -771,26 +811,15 @@ function createPiTools(
     runtimeMode: RuntimeMode;
   }
 ): AgentTool<any>[] {
-  const toolNames = [
-    "bash.exec",
-    "file.read",
-    "file.write",
-    "file.list",
-    "http.request",
-    "math.add",
-    "text.upper",
-    "echo"
-  ];
-
-  return toolNames.map((toolName) => ({
-    name: toolName,
-    label: toolName,
-    description: `OpenFoal tool: ${toolName}`,
+  return PUBLIC_TOOL_NAMES.map((publicToolName) => ({
+    name: toPiToolName(publicToolName),
+    label: publicToolName,
+    description: `OpenFoal tool: ${publicToolName}`,
     parameters: Type.Object({}, { additionalProperties: true }),
     execute: async (_toolCallId, params) => {
       const result = await toolExecutor.execute(
         {
-          name: toolName,
+          name: publicToolName,
           args: (params ?? {}) as Record<string, unknown>
         },
         {
@@ -817,6 +846,19 @@ function createPiTools(
       };
     }
   }));
+}
+
+function toPiToolName(name: string): string {
+  const sanitized = name.replace(/[^A-Za-z0-9_-]/g, "_").replace(/_+/g, "_");
+  if (/^[A-Za-z]/.test(sanitized)) {
+    return sanitized;
+  }
+  return `tool_${sanitized}`;
+}
+
+function toPublicToolName(piToolName: string): string {
+  const matched = PUBLIC_TOOL_NAMES.find((name) => toPiToolName(name) === piToolName);
+  return matched ?? piToolName;
 }
 
 function createConfiguredModel(
@@ -960,7 +1002,7 @@ function mapPiEvent(event: AgentEvent, runId: string): CoreEvent[] {
         {
           type: "tool_call",
           runId,
-          toolName: event.toolName,
+          toolName: toPublicToolName(event.toolName),
           args: isRecord(event.args) ? event.args : {}
         }
       ];
@@ -970,7 +1012,7 @@ function mapPiEvent(event: AgentEvent, runId: string): CoreEvent[] {
         {
           type: "tool_result",
           runId,
-          toolName: event.toolName,
+          toolName: toPublicToolName(event.toolName),
           output: extractToolExecutionOutput(event.result)
         }
       ];

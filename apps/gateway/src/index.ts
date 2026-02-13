@@ -279,6 +279,7 @@ async function route(
       const sessionId = requireString(req.params, "sessionId");
       const input = requireString(req.params, "input");
       const reqRuntimeMode = asRuntimeMode(req.params.runtimeMode);
+      const llm = asLlmOptions(req.params.llm);
       if (!sessionId || !input) {
         return invalidParams(req.id, "agent.run 需要 sessionId 和 input");
       }
@@ -311,7 +312,8 @@ async function route(
         for await (const coreEvent of coreService.run({
           sessionId,
           input,
-          runtimeMode: session.runtimeMode
+          runtimeMode: session.runtimeMode,
+          ...(llm ? { llm } : {})
         })) {
           const mapped = mapCoreEvent(coreEvent);
           if (mapped.event === "agent.accepted") {
@@ -478,6 +480,13 @@ async function handleHttpRequest(
 ): Promise<void> {
   const method = typeof req.method === "string" ? req.method.toUpperCase() : "";
   const pathname = readPathname(req.url, req.headers?.host);
+
+  if (method === "OPTIONS") {
+    writeCorsHeaders(res);
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
 
   if (method === "GET" && pathname === "/health") {
     writeJson(res, 200, {
@@ -733,9 +742,16 @@ async function readJsonBody(req: any): Promise<unknown> {
 function writeJson(res: any, statusCode: number, payload: unknown): void {
   const text = JSON.stringify(payload);
   res.statusCode = statusCode;
+  writeCorsHeaders(res);
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("content-length", String(Buffer.byteLength(text)));
   res.end(text);
+}
+
+function writeCorsHeaders(res: any): void {
+  res.setHeader("access-control-allow-origin", "*");
+  res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+  res.setHeader("access-control-allow-headers", "content-type,x-openfoal-connection-id");
 }
 
 function getOrCreateConnectionState(
@@ -873,6 +889,40 @@ function requireString(params: Record<string, unknown>, key: string): string | u
 
 function asRuntimeMode(value: unknown): RuntimeMode | undefined {
   return value === "local" || value === "cloud" ? value : undefined;
+}
+
+function asLlmOptions(
+  value: unknown
+):
+  | {
+      provider?: string;
+      modelId?: string;
+      apiKey?: string;
+      baseUrl?: string;
+      streamMode?: "real" | "mock";
+    }
+  | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const data = value as Record<string, unknown>;
+  const provider = requireString(data, "provider");
+  const modelId = requireString(data, "modelId");
+  const apiKey = requireString(data, "apiKey");
+  const baseUrl = requireString(data, "baseUrl");
+  const streamMode = data.streamMode === "real" || data.streamMode === "mock" ? data.streamMode : undefined;
+
+  if (!provider && !modelId && !apiKey && !baseUrl && !streamMode) {
+    return undefined;
+  }
+
+  return {
+    ...(provider ? { provider } : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(apiKey ? { apiKey } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(streamMode ? { streamMode } : {})
+  };
 }
 
 function getIdempotencyKey(req: ReqFrame): string | undefined {

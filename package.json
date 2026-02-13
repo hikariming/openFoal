@@ -5,6 +5,7 @@
   "scripts": {
     "dev:web": "pnpm --filter @openfoal/web-console dev",
     "dev:desktop": "pnpm --filter @openfoal/desktop dev",
+    "dev:gateway": "npm run build:backend && node scripts/gateway-dev.mjs",
     "build:web": "pnpm --filter @openfoal/web-console build",
     "build:desktop": "pnpm --filter @openfoal/desktop build",
     "build:backend": "node scripts/backend-build.mjs",

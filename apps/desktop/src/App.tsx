@@ -28,7 +28,7 @@ function DesktopLayout() {
 
       <Layout.Content className="desktop-main-wrap">
         <Routes>
-          <Route path="/chat" element={<ChatView sessionTitle={activeSession.title} />} />
+          <Route path="/chat" element={<ChatView sessionId={activeSession.id} sessionTitle={activeSession.title} />} />
           <Route path="/skills" element={<SkillStoreView />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>

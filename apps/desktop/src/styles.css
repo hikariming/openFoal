@@ -456,6 +456,18 @@ body {
   gap: 12px;
 }
 
+.llm-config-wrap {
+  margin-top: 6px;
+  display: grid;
+  gap: 8px;
+}
+
+.llm-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .runtime-mode-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -563,6 +575,72 @@ body {
   padding: 18px;
   display: grid;
   gap: 20px;
+}
+
+.gateway-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #ddd8d5;
+  border-radius: 12px;
+  background: #fdfcfa;
+}
+
+.chat-feed {
+  border: 1px solid #ddd8d5;
+  border-radius: 16px;
+  background: #fcfbfa;
+  min-height: 260px;
+  padding: 14px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.message-list {
+  display: grid;
+  gap: 10px;
+}
+
+.message-row {
+  border: 1px solid #e7e2de;
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.message-row.user {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.message-row.assistant {
+  background: #f8fafc;
+}
+
+.message-row.tool {
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.message-row.system {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.message-role {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6b625d;
+}
+
+.message-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #2f2a27;
 }
 
 .feature-grid {

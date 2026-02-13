@@ -1,4 +1,4 @@
-import { Avatar, Button, Layout, Modal, Nav, Popover, Space, Tag, Typography } from "@douyinfe/semi-ui";
+import { Avatar, Button, Input, Layout, Modal, Nav, Popover, Select, Space, Tag, Typography } from "@douyinfe/semi-ui";
 import {
   IconBolt,
   IconChevronDown,
@@ -20,15 +20,15 @@ import {
   IconSidebar,
   IconUserStroked
 } from "@douyinfe/semi-icons";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { useAppStore } from "../store/app-store";
+import { getGatewayClient } from "../lib/gateway-client";
+import { useAppStore, type RuntimeMode } from "../store/app-store";
 
 type SideMenu = "new" | "skills" | "automations";
 type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "subscription" | "referral" | "experimental";
-type RuntimeMode = "local" | "cloud";
 
 export function AppSidebar() {
   const navigate = useNavigate();
@@ -37,8 +37,12 @@ export function AppSidebar() {
   const [userMenuVisible, setUserMenuVisible] = useState(false);
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [activeSettingsMenu, setActiveSettingsMenu] = useState<SettingsMenu>("account");
-  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("local");
-  const { sessions, activeSessionId, setActiveSession } = useAppStore();
+  const [runtimePending, setRuntimePending] = useState(false);
+  const [runtimeError, setRuntimeError] = useState("");
+  const [llmSavedNotice, setLlmSavedNotice] = useState("");
+  const { sessions, activeSessionId, setActiveSession, runtimeMode, setRuntimeMode, llmConfig, setLlmConfig } =
+    useAppStore();
+  const [llmDraft, setLlmDraft] = useState(llmConfig);
 
   const activeMenu = useMemo<SideMenu>(() => {
     if (location.pathname === "/skills") {
@@ -55,6 +59,64 @@ export function AppSidebar() {
     { key: "referral", label: t("sidebar.referral"), icon: <IconLink /> },
     { key: "experimental", label: t("sidebar.experimental"), icon: <IconGiftStroked /> }
   ];
+  const providerOptions = [
+    { label: "Kimi", value: "kimi" },
+    { label: "OpenAI", value: "openai" },
+    { label: "Anthropic", value: "anthropic" }
+  ];
+  const baseUrlOptionsByProvider: Record<string, Array<{ label: string; value: string }>> = {
+    kimi: [
+      { label: "Kimi CN · api.moonshot.cn", value: "https://api.moonshot.cn/v1" },
+      { label: "Kimi Global · api.moonshot.ai", value: "https://api.moonshot.ai/v1" }
+    ],
+    openai: [{ label: "OpenAI · api.openai.com", value: "https://api.openai.com/v1" }],
+    anthropic: [{ label: "Anthropic · api.anthropic.com", value: "https://api.anthropic.com" }]
+  };
+  const baseUrlOptions = baseUrlOptionsByProvider[llmDraft.provider] ?? [];
+  const isLlmDirty =
+    llmDraft.provider !== llmConfig.provider ||
+    llmDraft.modelId !== llmConfig.modelId ||
+    llmDraft.apiKey !== llmConfig.apiKey ||
+    llmDraft.baseUrl !== llmConfig.baseUrl;
+
+  useEffect(() => {
+    setLlmDraft(llmConfig);
+  }, [llmConfig, settingsModalVisible]);
+
+  const applyRuntimeMode = async (nextMode: RuntimeMode): Promise<void> => {
+    if (nextMode === runtimeMode || runtimePending) {
+      return;
+    }
+    setRuntimeError("");
+    setRuntimePending(true);
+    const prevMode = runtimeMode;
+    setRuntimeMode(nextMode);
+    try {
+      await getGatewayClient().setRuntimeMode(activeSessionId, nextMode);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("未知会话")) {
+        return;
+      }
+      setRuntimeMode(prevMode);
+      setRuntimeError(message);
+    } finally {
+      setRuntimePending(false);
+    }
+  };
+
+  const saveLlm = () => {
+    setLlmConfig({
+      provider: llmDraft.provider.trim(),
+      modelId: llmDraft.modelId.trim(),
+      apiKey: llmDraft.apiKey.trim(),
+      baseUrl: llmDraft.baseUrl.trim()
+    });
+    setLlmSavedNotice(t("sidebar.llmSaved"));
+    setTimeout(() => {
+      setLlmSavedNotice("");
+    }, 1200);
+  };
 
   return (
     <Layout.Sider className="desktop-sidebar">
@@ -289,7 +351,9 @@ export function AppSidebar() {
                     <button
                       type="button"
                       className={runtimeMode === "local" ? "runtime-mode-card active" : "runtime-mode-card"}
-                      onClick={() => setRuntimeMode("local")}
+                      onClick={() => {
+                        void applyRuntimeMode("local");
+                      }}
                     >
                       <div className="runtime-mode-head">
                         <IconDesktop />
@@ -302,7 +366,9 @@ export function AppSidebar() {
                     <button
                       type="button"
                       className={runtimeMode === "cloud" ? "runtime-mode-card active" : "runtime-mode-card"}
-                      onClick={() => setRuntimeMode("cloud")}
+                      onClick={() => {
+                        void applyRuntimeMode("cloud");
+                      }}
                     >
                       <div className="runtime-mode-head">
                         <IconCloudStroked />
@@ -312,6 +378,95 @@ export function AppSidebar() {
                         {t("sidebar.runtimeCloudDesc")}
                       </Typography.Text>
                     </button>
+                  </div>
+                  {runtimePending ? <Typography.Text type="tertiary">Syncing runtime mode...</Typography.Text> : null}
+                  {runtimeError ? (
+                    <Typography.Text type="danger">Runtime mode sync failed: {runtimeError}</Typography.Text>
+                  ) : null}
+
+                  <div className="llm-config-wrap">
+                    <Typography.Text className="settings-label">{t("sidebar.llmProvider")}</Typography.Text>
+                    <Select
+                      value={llmDraft.provider}
+                      optionList={providerOptions}
+                      placeholder="Select provider"
+                      onChange={(value) => {
+                        if (typeof value !== "string") {
+                          return;
+                        }
+                        setLlmDraft((prev) => ({
+                          ...prev,
+                          provider: value
+                        }));
+                      }}
+                    />
+                    <Typography.Text className="settings-label">{t("sidebar.llmModelId")}</Typography.Text>
+                    <Input
+                      value={llmDraft.modelId}
+                      placeholder="k2p5"
+                      onChange={(value) => {
+                        setLlmDraft((prev) => ({
+                          ...prev,
+                          modelId: value
+                        }));
+                      }}
+                    />
+                    <Typography.Text className="settings-label">{t("sidebar.llmBasePreset")}</Typography.Text>
+                    <Select
+                      optionList={baseUrlOptions}
+                      placeholder={t("sidebar.llmBasePreset")}
+                      value={
+                        baseUrlOptions.some((item) => item.value === llmDraft.baseUrl) ? llmDraft.baseUrl : undefined
+                      }
+                      onChange={(value) => {
+                        if (typeof value !== "string") {
+                          return;
+                        }
+                        setLlmDraft((prev) => ({
+                          ...prev,
+                          baseUrl: value
+                        }));
+                      }}
+                    />
+                    <Typography.Text className="settings-label">{t("sidebar.llmBaseUrl")}</Typography.Text>
+                    <Input
+                      value={llmDraft.baseUrl}
+                      placeholder="https://api.example.com/v1"
+                      onChange={(value) => {
+                        setLlmDraft((prev) => ({
+                          ...prev,
+                          baseUrl: value
+                        }));
+                      }}
+                    />
+                    <Typography.Text className="settings-label">{t("sidebar.llmApiKey")}</Typography.Text>
+                    <Input
+                      value={llmDraft.apiKey}
+                      mode="password"
+                      placeholder="sk-***"
+                      onChange={(value) => {
+                        setLlmDraft((prev) => ({
+                          ...prev,
+                          apiKey: value
+                        }));
+                      }}
+                    />
+                    <div className="llm-config-actions">
+                      <Button theme="solid" onClick={saveLlm} disabled={!isLlmDirty}>
+                        {t("sidebar.llmSave")}
+                      </Button>
+                      <Button
+                        theme="light"
+                        disabled={!isLlmDirty}
+                        onClick={() => {
+                          setLlmDraft(llmConfig);
+                        }}
+                      >
+                        {t("sidebar.llmReset")}
+                      </Button>
+                    </div>
+                    {llmSavedNotice ? <Typography.Text type="success">{llmSavedNotice}</Typography.Text> : null}
+                    <Typography.Text type="tertiary">{t("sidebar.llmConfigHint")}</Typography.Text>
                   </div>
                 </div>
               ) : (
