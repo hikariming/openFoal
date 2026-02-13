@@ -19,6 +19,7 @@ import {
   loadOpenFoalCoreConfig,
   type EnvMap,
   type OpenFoalCoreConfig,
+  type OpenFoalLlmModelConfig,
   type OpenFoalLlmProviderConfig
 } from "./config.js";
 
@@ -31,6 +32,7 @@ export interface CoreRunInput {
   input: string;
   runtimeMode: RuntimeMode;
   llm?: {
+    modelRef?: string;
     provider?: string;
     modelId?: string;
     apiKey?: string;
@@ -117,6 +119,7 @@ export interface CoreService {
 export type { ToolCall, ToolContext, ToolExecutor, ToolResult } from "../../../packages/tool-executor/dist/index.js";
 
 export interface PiCoreOptions {
+  modelRef?: string;
   provider?: string;
   modelId?: string;
   apiKey?: string;
@@ -134,6 +137,7 @@ export interface PiRuntimeSettingsOptions extends PiCoreOptions {
 
 export interface PiRuntimeSettings {
   config: OpenFoalCoreConfig;
+  modelRef?: string;
   provider?: string;
   modelId?: string;
   model?: Model<any>;
@@ -552,6 +556,13 @@ function ensurePiProviders(): void {
 }
 
 export { MissingConfigEnvVarError, loadOpenFoalCoreConfig } from "./config.js";
+export type {
+  EnvMap,
+  OpenFoalCoreConfig,
+  OpenFoalLlmModelConfig,
+  OpenFoalLlmProviderConfig,
+  OpenFoalModelApi
+} from "./config.js";
 
 export function resolvePiRuntimeSettings(options: PiRuntimeSettingsOptions = {}): PiRuntimeSettings {
   const env = options.env ?? (process.env as EnvMap);
@@ -560,37 +571,76 @@ export function resolvePiRuntimeSettings(options: PiRuntimeSettingsOptions = {})
     policyPath: options.policyPath,
     env
   });
-  const provider = firstNonEmpty(options.provider, config.llm?.defaultProvider, env.OPENFOAL_PI_PROVIDER);
-  const modelId = firstNonEmpty(options.modelId, config.llm?.defaultModel, env.OPENFOAL_PI_MODEL);
+  const modelRef = firstNonEmpty(options.modelRef, config.llm?.defaultModelRef, env.OPENFOAL_PI_MODEL_REF);
+  const modelConfig = modelRef ? config.llm?.models?.[modelRef] : undefined;
+  const provider = firstNonEmpty(modelConfig?.provider, options.provider, config.llm?.defaultProvider, env.OPENFOAL_PI_PROVIDER);
+  const modelId = firstNonEmpty(modelConfig?.modelId, options.modelId, config.llm?.defaultModel, env.OPENFOAL_PI_MODEL);
   const providerConfig = mergeProviderConfig(
     provider ? config.llm?.providers?.[provider] : undefined,
+    modelConfig,
     firstNonEmpty(options.baseUrl, env.OPENFOAL_PI_BASE_URL)
   );
 
   return {
     config,
+    modelRef,
     provider,
     modelId,
     model: resolvePiModel(provider, modelId, providerConfig),
     streamMode: resolvePiStreamMode(options.streamMode, env),
-    apiKeys: collectApiKeys(config, env, options.apiKey, provider)
+    apiKeys: collectApiKeys(config, env, options.apiKey, provider, firstNonEmpty(modelConfig?.apiKey))
   };
 }
 
 function mergeProviderConfig(
   providerConfig: OpenFoalLlmProviderConfig | undefined,
+  modelConfig: OpenFoalLlmModelConfig | undefined,
   baseUrl: string | undefined
 ): OpenFoalLlmProviderConfig | undefined {
-  if (!providerConfig && !baseUrl) {
+  const modelOverride = toProviderConfig(modelConfig);
+  if (!providerConfig && !modelOverride && !baseUrl) {
     return undefined;
   }
-  if (!baseUrl) {
-    return providerConfig;
-  }
-  return {
+  const merged: OpenFoalLlmProviderConfig = {
     ...(providerConfig ?? {}),
-    baseUrl
+    ...(modelOverride ?? {})
   };
+  if (baseUrl) {
+    merged.baseUrl = baseUrl;
+  }
+  return merged;
+}
+
+function toProviderConfig(modelConfig: OpenFoalLlmModelConfig | undefined): OpenFoalLlmProviderConfig | undefined {
+  if (!modelConfig) {
+    return undefined;
+  }
+  const out: OpenFoalLlmProviderConfig = {};
+  if (modelConfig.api) {
+    out.api = modelConfig.api;
+  }
+  if (modelConfig.baseUrl) {
+    out.baseUrl = modelConfig.baseUrl;
+  }
+  if (modelConfig.apiKey) {
+    out.apiKey = modelConfig.apiKey;
+  }
+  if (modelConfig.headers) {
+    out.headers = modelConfig.headers;
+  }
+  if (modelConfig.reasoning !== undefined) {
+    out.reasoning = modelConfig.reasoning;
+  }
+  if (modelConfig.input) {
+    out.input = modelConfig.input;
+  }
+  if (modelConfig.contextWindow !== undefined) {
+    out.contextWindow = modelConfig.contextWindow;
+  }
+  if (modelConfig.maxTokens !== undefined) {
+    out.maxTokens = modelConfig.maxTokens;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function resolvePiModel(
@@ -947,7 +997,8 @@ function collectApiKeys(
   config: OpenFoalCoreConfig,
   env: EnvMap,
   explicitApiKey: string | undefined,
-  activeProvider: string | undefined
+  activeProvider: string | undefined,
+  activeModelApiKey: string | undefined
 ): Record<string, string> {
   const keys: Record<string, string> = {};
   const providers = config.llm?.providers ?? {};
@@ -955,6 +1006,24 @@ function collectApiKeys(
     const key = firstNonEmpty(providerConfig.apiKey);
     if (key) {
       keys[providerName] = key;
+    }
+  }
+
+  const models = config.llm?.models ?? {};
+  for (const modelConfig of Object.values(models)) {
+    const providerName = firstNonEmpty(modelConfig.provider);
+    const key = firstNonEmpty(modelConfig.apiKey);
+    if (providerName && key && !keys[providerName]) {
+      keys[providerName] = key;
+    }
+  }
+
+  const modelKey = firstNonEmpty(activeModelApiKey);
+  if (modelKey) {
+    if (activeProvider) {
+      keys[activeProvider] = modelKey;
+    } else {
+      keys._default = modelKey;
     }
   }
 

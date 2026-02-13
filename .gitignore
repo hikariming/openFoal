@@ -7,4 +7,4 @@ node_modules/
 apps/desktop/src-tauri/target/
 .openfoal/
 .openfoal/gateway.sqlite
-
+.openfoal

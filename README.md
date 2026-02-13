@@ -67,11 +67,11 @@ Model Layer
 - 覆盖路径：`OPENFOAL_CONFIG_PATH=/path/to/openfoal.json`
 - 企业策略覆盖：`OPENFOAL_POLICY_PATH=/path/to/policy.json`
 
-`provider/model` 解析优先级：
+`modelRef/provider/model` 解析优先级：
 
-1. 代码显式传入（`pi.provider`/`pi.modelId`）
-2. 配置文件（`llm.defaultProvider`/`llm.defaultModel`，含 policy merge）
-3. 环境变量 fallback（`OPENFOAL_PI_PROVIDER`/`OPENFOAL_PI_MODEL`）
+1. 代码显式传入（`pi.modelRef` > `pi.provider`/`pi.modelId`）
+2. 配置文件（`llm.defaultModelRef` > `llm.defaultProvider`/`llm.defaultModel`，含 policy merge）
+3. 环境变量 fallback（`OPENFOAL_PI_MODEL_REF` > `OPENFOAL_PI_PROVIDER`/`OPENFOAL_PI_MODEL`）
 
 示例（Kimi，openai-compatible）：
 
@@ -79,13 +79,25 @@ Model Layer
 {
   "version": 1,
   "llm": {
-    "defaultProvider": "kimi",
-    "defaultModel": "k2p5",
-    "providers": {
-      "kimi": {
-        "api": "openai-completions",
+    "defaultModelRef": "kimi-default",
+    "models": {
+      "kimi-default": {
+        "provider": "kimi",
+        "modelId": "k2p5",
         "baseUrl": "https://api.moonshot.cn/v1",
         "apiKey": "${KIMI_API_KEY}"
+      },
+      "openai-fast": {
+        "provider": "openai",
+        "modelId": "gpt-4o-mini"
+      }
+    },
+    "providers": {
+      "kimi": {
+        "api": "openai-completions"
+      },
+      "openai": {
+        "api": "openai-completions"
       }
     }
   }

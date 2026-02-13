@@ -1,5 +1,7 @@
 import { createRuntimeCoreService, type CoreEvent, type CoreService } from "../../../packages/core/dist/index.js";
 import {
+  DEFAULT_SESSION_PREVIEW,
+  DEFAULT_SESSION_TITLE,
   InMemoryIdempotencyRepository,
   InMemorySessionRepository,
   InMemoryTranscriptRepository,
@@ -220,10 +222,21 @@ async function route(
       };
     }
 
-    case "sessions.list": {
-      const sessions = await sessionRepo.list();
+    case "sessions.create": {
+      const titleParam = requireString(req.params, "title");
+      const runtimeMode = asRuntimeMode(req.params.runtimeMode) ?? "local";
+      const session = createSession(createSessionId(), runtimeMode, titleParam ?? DEFAULT_SESSION_TITLE);
+      await sessionRepo.upsert(session);
       return {
-        response: makeSuccessRes(req.id, { sessions }),
+        response: makeSuccessRes(req.id, { session }),
+        events: [createEvent(state, "session.updated", { session })]
+      };
+    }
+
+    case "sessions.list": {
+      const items = await sessionRepo.list();
+      return {
+        response: makeSuccessRes(req.id, { items }),
         events: []
       };
     }
@@ -236,6 +249,40 @@ async function route(
       const session = await sessionRepo.get(sessionId);
       return {
         response: makeSuccessRes(req.id, { session: session ?? null }),
+        events: []
+      };
+    }
+
+    case "sessions.history": {
+      const sessionId = requireString(req.params, "sessionId");
+      if (!sessionId) {
+        return invalidParams(req.id, "sessions.history 需要 sessionId");
+      }
+
+      const session = await sessionRepo.get(sessionId);
+      if (!session) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", `未知会话: ${sessionId}`),
+          events: []
+        };
+      }
+
+      const rawLimit = req.params.limit;
+      const parsedLimit = rawLimit === undefined ? 200 : asPositiveInt(rawLimit);
+      if (rawLimit !== undefined && !parsedLimit) {
+        return invalidParams(req.id, "sessions.history 的 limit 必须是正整数");
+      }
+      const limit = Math.min(parsedLimit ?? 200, 500);
+
+      const rawBeforeId = req.params.beforeId;
+      const beforeId = rawBeforeId === undefined ? undefined : asPositiveInt(rawBeforeId);
+      if (rawBeforeId !== undefined && !beforeId) {
+        return invalidParams(req.id, "sessions.history 的 beforeId 必须是正整数");
+      }
+
+      const items = await transcriptRepo.list(sessionId, limit, beforeId);
+      return {
+        response: makeSuccessRes(req.id, { items }),
         events: []
       };
     }
@@ -326,6 +373,21 @@ async function route(
           responseEvents.push(event);
         }
       };
+
+      await transcriptRepo.append({
+        sessionId,
+        event: "user.input",
+        payload: { input },
+        createdAt: now().toISOString()
+      });
+
+      const sessionWithInput = withSessionInput(session, input);
+      if (sessionWithInput.title !== session.title || sessionWithInput.preview !== session.preview) {
+        await sessionRepo.upsert(sessionWithInput);
+        const refreshed = await sessionRepo.get(sessionId);
+        session = refreshed ?? sessionWithInput;
+        emit(createEvent(state, "session.updated", { session }));
+      }
 
       state.runningSessionIds.add(sessionId);
       try {
@@ -849,14 +911,55 @@ async function closeServer(server: any): Promise<void> {
   });
 }
 
-function createSession(id: string, runtimeMode: RuntimeMode): SessionRecord {
+function createSession(id: string, runtimeMode: RuntimeMode, title = DEFAULT_SESSION_TITLE): SessionRecord {
   return {
     id,
     sessionKey: `workspace:w_default/agent:a_default/main:thread:${id}`,
+    title: normalizeSessionTitle(title),
+    preview: DEFAULT_SESSION_PREVIEW,
     runtimeMode,
     syncState: "local_only",
     updatedAt: new Date().toISOString()
   };
+}
+
+function createSessionId(): string {
+  return `s_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function withSessionInput(session: SessionRecord, input: string): SessionRecord {
+  const nextTitle =
+    session.title === DEFAULT_SESSION_TITLE ? normalizeSessionTitle(summarizeInputForTitle(input)) : session.title;
+  const nextPreview = summarizeInputForPreview(input);
+  return {
+    ...session,
+    title: nextTitle,
+    preview: nextPreview
+  };
+}
+
+function summarizeInputForTitle(input: string): string {
+  const compact = input.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return DEFAULT_SESSION_TITLE;
+  }
+  return compact.slice(0, 32);
+}
+
+function summarizeInputForPreview(input: string): string {
+  const compact = input.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return DEFAULT_SESSION_PREVIEW;
+  }
+  return compact.slice(0, 80);
+}
+
+function normalizeSessionTitle(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return DEFAULT_SESSION_TITLE;
+  }
+  return compact.slice(0, 32);
 }
 
 function mapCoreEvent(coreEvent: CoreEvent): { event: EventFrame["event"]; payload: Record<string, unknown> } {
@@ -1004,10 +1107,22 @@ function asRuntimeMode(value: unknown): RuntimeMode | undefined {
   return value === "local" || value === "cloud" ? value : undefined;
 }
 
+function asPositiveInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const floored = Math.floor(value);
+  if (floored <= 0) {
+    return undefined;
+  }
+  return floored;
+}
+
 function asLlmOptions(
   value: unknown
 ):
   | {
+      modelRef?: string;
       provider?: string;
       modelId?: string;
       apiKey?: string;
@@ -1019,17 +1134,19 @@ function asLlmOptions(
     return undefined;
   }
   const data = value as Record<string, unknown>;
+  const modelRef = requireString(data, "modelRef");
   const provider = requireString(data, "provider");
   const modelId = requireString(data, "modelId");
   const apiKey = requireString(data, "apiKey");
   const baseUrl = requireString(data, "baseUrl");
   const streamMode = data.streamMode === "real" || data.streamMode === "mock" ? data.streamMode : undefined;
 
-  if (!provider && !modelId && !apiKey && !baseUrl && !streamMode) {
+  if (!modelRef && !provider && !modelId && !apiKey && !baseUrl && !streamMode) {
     return undefined;
   }
 
   return {
+    ...(modelRef ? { modelRef } : {}),
     ...(provider ? { provider } : {}),
     ...(modelId ? { modelId } : {}),
     ...(apiKey ? { apiKey } : {}),

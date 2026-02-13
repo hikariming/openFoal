@@ -24,8 +24,15 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { getGatewayClient } from "../lib/gateway-client";
-import { useAppStore, type RuntimeMode } from "../store/app-store";
+import { getGatewayClient, type GatewaySession } from "../lib/gateway-client";
+import {
+  createLlmProfile,
+  getSessionRuntimeMode,
+  useAppStore,
+  type LlmConfig,
+  type LlmProfile,
+  type RuntimeMode
+} from "../store/app-store";
 
 type SideMenu = "new" | "skills" | "automations";
 type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "subscription" | "referral" | "experimental";
@@ -40,9 +47,11 @@ export function AppSidebar() {
   const [runtimePending, setRuntimePending] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
   const [llmSavedNotice, setLlmSavedNotice] = useState("");
-  const { sessions, activeSessionId, setActiveSession, runtimeMode, setRuntimeMode, llmConfig, setLlmConfig } =
+  const { sessions, activeSessionId, setSessions, upsertSession, setActiveSession, setRuntimeMode, llmConfig, setLlmConfig } =
     useAppStore();
+  const runtimeMode = useAppStore((state) => getSessionRuntimeMode(state.sessions, state.activeSessionId));
   const [llmDraft, setLlmDraft] = useState(llmConfig);
+  const [editingLlmProfileId, setEditingLlmProfileId] = useState(llmConfig.activeProfileId);
 
   const activeMenu = useMemo<SideMenu>(() => {
     if (location.pathname === "/skills") {
@@ -72,19 +81,43 @@ export function AppSidebar() {
     openai: [{ label: "OpenAI · api.openai.com", value: "https://api.openai.com/v1" }],
     anthropic: [{ label: "Anthropic · api.anthropic.com", value: "https://api.anthropic.com" }]
   };
-  const baseUrlOptions = baseUrlOptionsByProvider[llmDraft.provider] ?? [];
-  const isLlmDirty =
-    llmDraft.provider !== llmConfig.provider ||
-    llmDraft.modelId !== llmConfig.modelId ||
-    llmDraft.apiKey !== llmConfig.apiKey ||
-    llmDraft.baseUrl !== llmConfig.baseUrl;
+  const activeLlmProfile =
+    llmDraft.profiles.find((item) => item.id === llmDraft.activeProfileId) ?? llmDraft.profiles[0];
+  const editingLlmProfile = llmDraft.profiles.find((item) => item.id === editingLlmProfileId) ?? activeLlmProfile;
+  const baseUrlOptions = baseUrlOptionsByProvider[editingLlmProfile?.provider ?? ""] ?? [];
+  const isLlmDirty = !sameLlmConfig(llmDraft, llmConfig);
 
   useEffect(() => {
     setLlmDraft(llmConfig);
+    setEditingLlmProfileId(llmConfig.activeProfileId);
   }, [llmConfig, settingsModalVisible]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const client = getGatewayClient();
+        let listed = await client.listSessions();
+        if (listed.length === 0) {
+          const created = await client.createSession();
+          listed = [created];
+        }
+        if (!cancelled) {
+          setSessions(listed.map(mapGatewaySessionToStoreSession));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRuntimeError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [setSessions]);
+
   const applyRuntimeMode = async (nextMode: RuntimeMode): Promise<void> => {
-    if (nextMode === runtimeMode || runtimePending) {
+    if (!activeSessionId || nextMode === runtimeMode || runtimePending) {
       return;
     }
     setRuntimeError("");
@@ -92,7 +125,12 @@ export function AppSidebar() {
     const prevMode = runtimeMode;
     setRuntimeMode(nextMode);
     try {
-      await getGatewayClient().setRuntimeMode(activeSessionId, nextMode);
+      const client = getGatewayClient();
+      await client.setRuntimeMode(activeSessionId, nextMode);
+      const refreshed = await client.getSession(activeSessionId);
+      if (refreshed) {
+        upsertSession(mapGatewaySessionToStoreSession(refreshed));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("未知会话")) {
@@ -106,16 +144,81 @@ export function AppSidebar() {
   };
 
   const saveLlm = () => {
-    setLlmConfig({
-      provider: llmDraft.provider.trim(),
-      modelId: llmDraft.modelId.trim(),
-      apiKey: llmDraft.apiKey.trim(),
-      baseUrl: llmDraft.baseUrl.trim()
-    });
+    setLlmConfig(llmDraft);
     setLlmSavedNotice(t("sidebar.llmSaved"));
     setTimeout(() => {
       setLlmSavedNotice("");
     }, 1200);
+  };
+
+  const updateEditingProfile = (patch: Partial<LlmProfile>) => {
+    if (!editingLlmProfile) {
+      return;
+    }
+    setLlmDraft((prev) => ({
+      ...prev,
+      profiles: prev.profiles.map((profile) =>
+        profile.id === editingLlmProfile.id
+          ? {
+              ...profile,
+              ...patch
+            }
+          : profile
+      )
+    }));
+  };
+
+  const addLlmProfile = () => {
+    const base = editingLlmProfile ?? activeLlmProfile;
+    const nextProfile = createLlmProfile({
+      provider: base?.provider ?? "kimi",
+      modelId: base?.modelId ?? "k2p5",
+      baseUrl: base?.baseUrl ?? ""
+    });
+    setLlmDraft((prev) => ({
+      ...prev,
+      activeProfileId: nextProfile.id,
+      profiles: [...prev.profiles, nextProfile]
+    }));
+    setEditingLlmProfileId(nextProfile.id);
+  };
+
+  const removeEditingProfile = () => {
+    if (!editingLlmProfile || llmDraft.profiles.length <= 1) {
+      return;
+    }
+    const rest = llmDraft.profiles.filter((profile) => profile.id !== editingLlmProfile.id);
+    const nextActiveId =
+      llmDraft.activeProfileId === editingLlmProfile.id ? rest[0]?.id ?? llmDraft.activeProfileId : llmDraft.activeProfileId;
+    setLlmDraft((prev) => {
+      return {
+        ...prev,
+        activeProfileId: nextActiveId,
+        profiles: rest
+      };
+    });
+    setEditingLlmProfileId(nextActiveId);
+  };
+
+  const handleSideNavAction = (itemKey: string | number | undefined): void => {
+    if (itemKey === "skills") {
+      navigate("/skills");
+      return;
+    }
+    if (itemKey === "new") {
+      void (async () => {
+        try {
+          const created = await getGatewayClient().createSession();
+          upsertSession(mapGatewaySessionToStoreSession(created));
+          setActiveSession(created.id);
+          navigate("/chat");
+        } catch (error) {
+          setRuntimeError(error instanceof Error ? error.message : String(error));
+        }
+      })();
+      return;
+    }
+    navigate("/chat");
   };
 
   return (
@@ -135,12 +238,8 @@ export function AppSidebar() {
       <Nav
         className="side-nav"
         selectedKeys={[activeMenu]}
-        onSelect={(data) => {
-          if (data.itemKey === "skills") {
-            navigate("/skills");
-            return;
-          }
-          navigate("/chat");
+        onClick={(data) => {
+          handleSideNavAction(data.itemKey);
         }}
         items={[
           { itemKey: "new", text: t("sidebar.newDesktop"), icon: <IconPlusCircle /> },
@@ -173,12 +272,6 @@ export function AppSidebar() {
             }}
           >
             <Typography.Text className="session-title">{session.title}</Typography.Text>
-            <Typography.Text type="tertiary" className="session-meta">
-              {session.updatedAt}
-            </Typography.Text>
-            <Typography.Text type="tertiary" className="session-preview">
-              {session.preview}
-            </Typography.Text>
           </button>
         ))}
       </div>
@@ -351,6 +444,7 @@ export function AppSidebar() {
                     <button
                       type="button"
                       className={runtimeMode === "local" ? "runtime-mode-card active" : "runtime-mode-card"}
+                      disabled={!activeSessionId}
                       onClick={() => {
                         void applyRuntimeMode("local");
                       }}
@@ -366,6 +460,7 @@ export function AppSidebar() {
                     <button
                       type="button"
                       className={runtimeMode === "cloud" ? "runtime-mode-card active" : "runtime-mode-card"}
+                      disabled={!activeSessionId}
                       onClick={() => {
                         void applyRuntimeMode("cloud");
                       }}
@@ -385,30 +480,95 @@ export function AppSidebar() {
                   ) : null}
 
                   <div className="llm-config-wrap">
-                    <Typography.Text className="settings-label">{t("sidebar.llmProvider")}</Typography.Text>
+                    <Typography.Text className="settings-label">{t("sidebar.llmProfileActive")}</Typography.Text>
                     <Select
-                      value={llmDraft.provider}
-                      optionList={providerOptions}
-                      placeholder="Select provider"
+                      value={llmDraft.activeProfileId}
+                      optionList={llmDraft.profiles.map((profile) => ({
+                        label: profile.name,
+                        value: profile.id
+                      }))}
+                      placeholder={t("sidebar.llmProfileActive")}
                       onChange={(value) => {
                         if (typeof value !== "string") {
                           return;
                         }
                         setLlmDraft((prev) => ({
                           ...prev,
-                          provider: value
+                          activeProfileId: value
                         }));
+                        setEditingLlmProfileId(value);
+                      }}
+                    />
+                    <div className="llm-profile-actions">
+                      <Button theme="light" onClick={addLlmProfile}>
+                        {t("sidebar.llmAddProfile")}
+                      </Button>
+                      <Button
+                        theme="borderless"
+                        type="danger"
+                        disabled={llmDraft.profiles.length <= 1}
+                        onClick={removeEditingProfile}
+                      >
+                        {t("sidebar.llmDeleteProfile")}
+                      </Button>
+                    </div>
+                    <Typography.Text className="settings-label">{t("sidebar.llmProfileEdit")}</Typography.Text>
+                    <Select
+                      value={editingLlmProfile?.id}
+                      optionList={llmDraft.profiles.map((profile) => ({
+                        label: profile.name,
+                        value: profile.id
+                      }))}
+                      placeholder={t("sidebar.llmProfileEdit")}
+                      onChange={(value) => {
+                        if (typeof value !== "string") {
+                          return;
+                        }
+                        setEditingLlmProfileId(value);
+                      }}
+                    />
+                    <Typography.Text className="settings-label">{t("sidebar.llmProfileName")}</Typography.Text>
+                    <Input
+                      value={editingLlmProfile?.name ?? ""}
+                      placeholder="Kimi · k2p5"
+                      onChange={(value) => {
+                        updateEditingProfile({
+                          name: value
+                        });
+                      }}
+                    />
+                    <Typography.Text className="settings-label">{t("sidebar.llmModelRef")}</Typography.Text>
+                    <Input
+                      value={editingLlmProfile?.modelRef ?? ""}
+                      placeholder="kimi-default"
+                      onChange={(value) => {
+                        updateEditingProfile({
+                          modelRef: value
+                        });
+                      }}
+                    />
+                    <Typography.Text className="settings-label">{t("sidebar.llmProvider")}</Typography.Text>
+                    <Select
+                      value={editingLlmProfile?.provider}
+                      optionList={providerOptions}
+                      placeholder="Select provider"
+                      onChange={(value) => {
+                        if (typeof value !== "string") {
+                          return;
+                        }
+                        updateEditingProfile({
+                          provider: value
+                        });
                       }}
                     />
                     <Typography.Text className="settings-label">{t("sidebar.llmModelId")}</Typography.Text>
                     <Input
-                      value={llmDraft.modelId}
+                      value={editingLlmProfile?.modelId ?? ""}
                       placeholder="k2p5"
                       onChange={(value) => {
-                        setLlmDraft((prev) => ({
-                          ...prev,
+                        updateEditingProfile({
                           modelId: value
-                        }));
+                        });
                       }}
                     />
                     <Typography.Text className="settings-label">{t("sidebar.llmBasePreset")}</Typography.Text>
@@ -416,39 +576,38 @@ export function AppSidebar() {
                       optionList={baseUrlOptions}
                       placeholder={t("sidebar.llmBasePreset")}
                       value={
-                        baseUrlOptions.some((item) => item.value === llmDraft.baseUrl) ? llmDraft.baseUrl : undefined
+                        baseUrlOptions.some((item) => item.value === (editingLlmProfile?.baseUrl ?? ""))
+                          ? editingLlmProfile?.baseUrl
+                          : undefined
                       }
                       onChange={(value) => {
                         if (typeof value !== "string") {
                           return;
                         }
-                        setLlmDraft((prev) => ({
-                          ...prev,
+                        updateEditingProfile({
                           baseUrl: value
-                        }));
+                        });
                       }}
                     />
                     <Typography.Text className="settings-label">{t("sidebar.llmBaseUrl")}</Typography.Text>
                     <Input
-                      value={llmDraft.baseUrl}
+                      value={editingLlmProfile?.baseUrl ?? ""}
                       placeholder="https://api.example.com/v1"
                       onChange={(value) => {
-                        setLlmDraft((prev) => ({
-                          ...prev,
+                        updateEditingProfile({
                           baseUrl: value
-                        }));
+                        });
                       }}
                     />
                     <Typography.Text className="settings-label">{t("sidebar.llmApiKey")}</Typography.Text>
                     <Input
-                      value={llmDraft.apiKey}
+                      value={editingLlmProfile?.apiKey ?? ""}
                       mode="password"
                       placeholder="sk-***"
                       onChange={(value) => {
-                        setLlmDraft((prev) => ({
-                          ...prev,
+                        updateEditingProfile({
                           apiKey: value
-                        }));
+                        });
                       }}
                     />
                     <div className="llm-config-actions">
@@ -460,6 +619,7 @@ export function AppSidebar() {
                         disabled={!isLlmDirty}
                         onClick={() => {
                           setLlmDraft(llmConfig);
+                          setEditingLlmProfileId(llmConfig.activeProfileId);
                         }}
                       >
                         {t("sidebar.llmReset")}
@@ -478,4 +638,44 @@ export function AppSidebar() {
       ) : null}
     </Layout.Sider>
   );
+}
+
+function sameLlmConfig(a: LlmConfig, b: LlmConfig): boolean {
+  if (a.activeProfileId !== b.activeProfileId) {
+    return false;
+  }
+  if (a.profiles.length !== b.profiles.length) {
+    return false;
+  }
+  for (let i = 0; i < a.profiles.length; i += 1) {
+    const left = a.profiles[i];
+    const right = b.profiles[i];
+    if (!right) {
+      return false;
+    }
+    if (
+      left.id !== right.id ||
+      left.name !== right.name ||
+      left.modelRef !== right.modelRef ||
+      left.provider !== right.provider ||
+      left.modelId !== right.modelId ||
+      left.apiKey !== right.apiKey ||
+      left.baseUrl !== right.baseUrl
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function mapGatewaySessionToStoreSession(session: GatewaySession) {
+  return {
+    id: session.id,
+    sessionKey: session.sessionKey,
+    title: session.title,
+    preview: session.preview,
+    runtimeMode: session.runtimeMode,
+    syncState: session.syncState as "local_only" | "syncing" | "synced" | "conflict",
+    updatedAt: session.updatedAt
+  };
 }

@@ -52,7 +52,7 @@ test("gateway HTTP exposes health and rpc", async () => {
     });
     assert.equal(listed.statusCode, 200);
     assert.equal(listed.body.response.ok, true);
-    assert.equal(Array.isArray(listed.body.response.payload.sessions), true);
+    assert.equal(Array.isArray(listed.body.response.payload.items), true);
   } finally {
     await server.close();
     rmSync(dir, { recursive: true, force: true });

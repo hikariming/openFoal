@@ -20,11 +20,19 @@ export interface OpenFoalLlmProviderConfig {
   maxTokens?: number;
 }
 
+export interface OpenFoalLlmModelConfig extends OpenFoalLlmProviderConfig {
+  provider?: string;
+  modelId?: string;
+  name?: string;
+}
+
 export interface OpenFoalCoreConfig {
   version?: number;
   llm?: {
     defaultProvider?: string;
     defaultModel?: string;
+    defaultModelRef?: string;
+    models?: Record<string, OpenFoalLlmModelConfig>;
     providers?: Record<string, OpenFoalLlmProviderConfig>;
   };
 }

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -22,6 +23,8 @@ test("sqlite session repository persists across instances", async () => {
     await repoA.upsert({
       id: "s_persist",
       sessionKey: "workspace:w_default/agent:a_default/main:thread:s_persist",
+      title: "persisted session",
+      preview: "persisted preview",
       runtimeMode: "local",
       syncState: "local_only",
       updatedAt: "2026-02-13T00:00:00.000Z"
@@ -32,6 +35,56 @@ test("sqlite session repository persists across instances", async () => {
     const persisted = await repoB.get("s_persist");
     assert.equal(Boolean(persisted), true);
     assert.equal(persisted?.runtimeMode, "cloud");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sqlite session repository migrates old schema with title and preview", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openfoal-storage-migrate-"));
+  const dbPath = join(dir, "legacy.sqlite");
+
+  try {
+    const setup = spawnSync(
+      "sqlite3",
+      [
+        dbPath,
+        `
+          CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            session_key TEXT NOT NULL,
+            runtime_mode TEXT NOT NULL,
+            sync_state TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO sessions (id, session_key, runtime_mode, sync_state, updated_at)
+          VALUES ('s_legacy', 'workspace:w_default/agent:a_default/main', 'local', 'local_only', '2026-02-13T00:00:00.000Z');
+        `
+      ],
+      { encoding: "utf8" }
+    );
+    assert.equal(setup.status, 0);
+
+    const repo = new SqliteSessionRepository(dbPath);
+    const item = await repo.get("s_legacy");
+    assert.equal(Boolean(item), true);
+    assert.equal(item?.title, "new-session");
+    assert.equal(item?.preview, "");
+
+    await repo.upsert({
+      id: "s_legacy",
+      sessionKey: "workspace:w_default/agent:a_default/main",
+      title: "updated title",
+      preview: "updated preview",
+      runtimeMode: "cloud",
+      syncState: "local_only",
+      updatedAt: "2026-02-13T00:00:00.000Z"
+    });
+
+    const updated = await repo.get("s_legacy");
+    assert.equal(updated?.title, "updated title");
+    assert.equal(updated?.preview, "updated preview");
+    assert.equal(updated?.runtimeMode, "cloud");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

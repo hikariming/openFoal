@@ -191,3 +191,95 @@ test("pi runtime settings prefer explicit options, then config, then env fallbac
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("pi runtime settings support modelRef + llm.models", () => {
+  const dir = mkdtempSync(join(tmpdir(), "openfoal-core-modelref-"));
+  const configPath = join(dir, "openfoal.json");
+
+  try {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        llm: {
+          defaultModelRef: "kimi-default",
+          providers: {
+            kimi: {
+              api: "openai-completions"
+            },
+            openai: {
+              api: "openai-completions"
+            }
+          },
+          models: {
+            "kimi-default": {
+              provider: "kimi",
+              modelId: "k2p5",
+              baseUrl: "https://api.moonshot.cn/v1",
+              apiKey: "${KIMI_API_KEY}"
+            },
+            "openai-fast": {
+              provider: "openai",
+              modelId: "gpt-4o-mini"
+            }
+          }
+        }
+      })
+    );
+
+    const fromDefaultRef = resolvePiRuntimeSettings({
+      configPath,
+      env: {
+        HOME: dir,
+        KIMI_API_KEY: "sk-kimi"
+      }
+    });
+
+    assert.equal(fromDefaultRef.modelRef, "kimi-default");
+    assert.equal(fromDefaultRef.provider, "kimi");
+    assert.equal(fromDefaultRef.modelId, "k2p5");
+    assert.equal(fromDefaultRef.apiKeys.kimi, "sk-kimi");
+
+    const fromExplicitRef = resolvePiRuntimeSettings({
+      configPath,
+      modelRef: "openai-fast",
+      env: {
+        HOME: dir,
+        KIMI_API_KEY: "sk-kimi"
+      }
+    });
+
+    assert.equal(fromExplicitRef.modelRef, "openai-fast");
+    assert.equal(fromExplicitRef.provider, "openai");
+    assert.equal(fromExplicitRef.modelId, "gpt-4o-mini");
+
+    const modelRefWins = resolvePiRuntimeSettings({
+      configPath,
+      modelRef: "kimi-default",
+      provider: "openai",
+      modelId: "gpt-4o-mini",
+      env: {
+        HOME: dir,
+        KIMI_API_KEY: "sk-kimi"
+      }
+    });
+
+    assert.equal(modelRefWins.provider, "kimi");
+    assert.equal(modelRefWins.modelId, "k2p5");
+
+    const missingRefFallsBack = resolvePiRuntimeSettings({
+      configPath,
+      modelRef: "missing-model-ref",
+      provider: "openai",
+      modelId: "gpt-4o-mini",
+      env: {
+        HOME: dir,
+        KIMI_API_KEY: "sk-kimi"
+      }
+    });
+
+    assert.equal(missingRefFallsBack.provider, "openai");
+    assert.equal(missingRefFallsBack.modelId, "gpt-4o-mini");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

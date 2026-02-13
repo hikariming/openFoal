@@ -3,8 +3,10 @@ export const METHODS = [
   "agent.run",
   "agent.abort",
   "runtime.setMode",
+  "sessions.create",
   "sessions.list",
   "sessions.get",
+  "sessions.history",
   "policy.get",
   "policy.update",
   "approval.queue",
@@ -47,6 +49,7 @@ export const SIDE_EFFECT_METHODS = new Set<MethodName>([
   "agent.run",
   "agent.abort",
   "runtime.setMode",
+  "sessions.create",
   "policy.update",
   "approval.resolve"
 ]);
@@ -60,6 +63,8 @@ export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
 export interface Session {
   id: string;
   sessionKey: string;
+  title: string;
+  preview: string;
   runtimeMode: RuntimeMode;
   syncState: SyncState;
   updatedAt: string;

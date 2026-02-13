@@ -5,7 +5,10 @@ type GatewayMethod =
   | "agent.run"
   | "agent.abort"
   | "runtime.setMode"
-  | "sessions.list";
+  | "sessions.create"
+  | "sessions.list"
+  | "sessions.get"
+  | "sessions.history";
 
 type ErrorCode =
   | "UNAUTHORIZED"
@@ -75,14 +78,25 @@ interface GatewayClientOptions {
   connectionId?: string;
 }
 
-const SIDE_EFFECT_METHODS = new Set<GatewayMethod>(["agent.run", "agent.abort", "runtime.setMode"]);
+const SIDE_EFFECT_METHODS = new Set<GatewayMethod>(["agent.run", "agent.abort", "runtime.setMode", "sessions.create"]);
 
 export type GatewaySession = {
   id: string;
   sessionKey: string;
+  title: string;
+  preview: string;
   runtimeMode: RuntimeMode;
   syncState: string;
   updatedAt: string;
+};
+
+export type GatewayTranscriptItem = {
+  id: number;
+  sessionId: string;
+  runId?: string;
+  event: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
 };
 
 export interface RunAgentParams {
@@ -90,6 +104,7 @@ export interface RunAgentParams {
   input: string;
   runtimeMode: RuntimeMode;
   llm?: {
+    modelRef?: string;
     provider?: string;
     modelId?: string;
     apiKey?: string;
@@ -146,11 +161,55 @@ export class GatewayHttpClient {
   async listSessions(): Promise<GatewaySession[]> {
     await this.ensureConnected();
     const result = await this.request("sessions.list", {});
-    const sessions = result.response.ok ? result.response.payload.sessions : [];
-    if (!Array.isArray(sessions)) {
+    const items = result.response.ok ? result.response.payload.items : [];
+    if (!Array.isArray(items)) {
       return [];
     }
-    return sessions.filter(isGatewaySession);
+    return items.filter(isGatewaySession);
+  }
+
+  async createSession(params?: { title?: string; runtimeMode?: RuntimeMode }): Promise<GatewaySession> {
+    await this.ensureConnected();
+    const result = await this.request("sessions.create", {
+      ...(params?.title ? { title: params.title } : {}),
+      ...(params?.runtimeMode ? { runtimeMode: params.runtimeMode } : {})
+    });
+    const session = result.response.ok ? result.response.payload.session : null;
+    if (!isGatewaySession(session)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid sessions.create payload");
+    }
+    return session;
+  }
+
+  async getSession(sessionId: string): Promise<GatewaySession | null> {
+    await this.ensureConnected();
+    const result = await this.request("sessions.get", { sessionId });
+    const session = result.response.ok ? result.response.payload.session : null;
+    if (session == null) {
+      return null;
+    }
+    if (!isGatewaySession(session)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid sessions.get payload");
+    }
+    return session;
+  }
+
+  async getSessionHistory(params: {
+    sessionId: string;
+    limit?: number;
+    beforeId?: number;
+  }): Promise<GatewayTranscriptItem[]> {
+    await this.ensureConnected();
+    const result = await this.request("sessions.history", {
+      sessionId: params.sessionId,
+      ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
+      ...(typeof params.beforeId === "number" ? { beforeId: params.beforeId } : {})
+    });
+    const items = result.response.ok ? result.response.payload.items : [];
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.filter(isGatewayTranscriptItem);
   }
 
   async setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode): Promise<void> {
@@ -520,9 +579,26 @@ function isGatewaySession(value: unknown): value is GatewaySession {
   return (
     typeof item.id === "string" &&
     typeof item.sessionKey === "string" &&
+    typeof item.title === "string" &&
+    typeof item.preview === "string" &&
     (item.runtimeMode === "local" || item.runtimeMode === "cloud") &&
     typeof item.syncState === "string" &&
     typeof item.updatedAt === "string"
+  );
+}
+
+function isGatewayTranscriptItem(value: unknown): value is GatewayTranscriptItem {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.id === "number" &&
+    typeof item.sessionId === "string" &&
+    (item.runId === undefined || typeof item.runId === "string") &&
+    typeof item.event === "string" &&
+    Boolean(item.payload && typeof item.payload === "object" && !Array.isArray(item.payload)) &&
+    typeof item.createdAt === "string"
   );
 }
 

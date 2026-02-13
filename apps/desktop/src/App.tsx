@@ -4,7 +4,7 @@ import { Layout } from "@douyinfe/semi-ui";
 import { AppSidebar } from "./components/AppSidebar";
 import { ChatView } from "./pages/ChatView";
 import { SkillStoreView } from "./pages/SkillStoreView";
-import { useAppStore } from "./store/app-store";
+import { getActiveSession, useAppStore } from "./store/app-store";
 
 export function App() {
   return (
@@ -17,10 +17,7 @@ export function App() {
 function DesktopLayout() {
   const { sessions, activeSessionId } = useAppStore();
 
-  const activeSession = useMemo(
-    () => sessions.find((session) => session.id === activeSessionId) ?? sessions[0],
-    [activeSessionId, sessions]
-  );
+  const activeSession = useMemo(() => getActiveSession(sessions, activeSessionId), [activeSessionId, sessions]);
 
   return (
     <Layout className="desktop-shell">
@@ -28,7 +25,16 @@ function DesktopLayout() {
 
       <Layout.Content className="desktop-main-wrap">
         <Routes>
-          <Route path="/chat" element={<ChatView sessionId={activeSession.id} sessionTitle={activeSession.title} />} />
+          <Route
+            path="/chat"
+            element={
+              activeSession ? (
+                <ChatView sessionId={activeSession.id} sessionTitle={activeSession.title} />
+              ) : (
+                <div />
+              )
+            }
+          />
           <Route path="/skills" element={<SkillStoreView />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>

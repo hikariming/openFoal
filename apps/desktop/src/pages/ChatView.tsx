@@ -15,8 +15,8 @@ import {
 } from "@douyinfe/semi-icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getGatewayClient, type RpcEvent } from "../lib/gateway-client";
-import { useAppStore } from "../store/app-store";
+import { getGatewayClient, type GatewayTranscriptItem, type RpcEvent } from "../lib/gateway-client";
+import { getActiveLlmProfile, getSessionRuntimeMode, useAppStore } from "../store/app-store";
 
 type ChatRole = "user" | "assistant" | "system" | "tool";
 
@@ -39,12 +39,19 @@ type RunRenderState = {
   toolMessageIds: Record<string, string>;
 };
 
+type ReplayRunState = {
+  assistantMessageId?: string;
+  toolMessageIds: Record<string, string>;
+};
+
 const MAX_MESSAGES_PER_SESSION = 120;
 
 export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessionTitle: string }) {
   const { t } = useTranslation();
-  const runtimeMode = useAppStore((state) => state.runtimeMode);
+  const runtimeMode = useAppStore((state) => getSessionRuntimeMode(state.sessions, state.activeSessionId));
   const llmConfig = useAppStore((state) => state.llmConfig);
+  const upsertSession = useAppStore((state) => state.upsertSession);
+  const activeLlmProfile = useMemo(() => getActiveLlmProfile(llmConfig), [llmConfig]);
   const gatewayClient = useMemo(() => getGatewayClient(), []);
   const historyCache = useRef<Record<string, ChatMessage[]>>({});
   const runRenderRef = useRef<RunRenderState | null>(null);
@@ -86,10 +93,32 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   ] as const;
 
   useEffect(() => {
-    setMessages(historyCache.current[sessionId] ?? []);
     runRenderRef.current = null;
     setRuntimeError("");
-  }, [sessionId]);
+    setMessages(historyCache.current[sessionId] ?? []);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const transcript = await gatewayClient.getSessionHistory({
+          sessionId,
+          limit: 200
+        });
+        if (cancelled) {
+          return;
+        }
+        const rebuilt = buildMessagesFromTranscript(transcript);
+        historyCache.current[sessionId] = rebuilt;
+        setMessages(rebuilt);
+      } catch (error) {
+        if (!cancelled) {
+          setRuntimeError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [gatewayClient, sessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -341,10 +370,11 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
           input: userText,
           runtimeMode,
           llm: {
-            ...(llmConfig.provider.trim() ? { provider: llmConfig.provider.trim() } : {}),
-            ...(llmConfig.modelId.trim() ? { modelId: llmConfig.modelId.trim() } : {}),
-            ...(llmConfig.apiKey.trim() ? { apiKey: llmConfig.apiKey.trim() } : {}),
-            ...(llmConfig.baseUrl.trim() ? { baseUrl: llmConfig.baseUrl.trim() } : {})
+            ...(activeLlmProfile.modelRef.trim() ? { modelRef: activeLlmProfile.modelRef.trim() } : {}),
+            ...(activeLlmProfile.provider.trim() ? { provider: activeLlmProfile.provider.trim() } : {}),
+            ...(activeLlmProfile.modelId.trim() ? { modelId: activeLlmProfile.modelId.trim() } : {}),
+            ...(activeLlmProfile.apiKey.trim() ? { apiKey: activeLlmProfile.apiKey.trim() } : {}),
+            ...(activeLlmProfile.baseUrl.trim() ? { baseUrl: activeLlmProfile.baseUrl.trim() } : {})
           }
         },
         {
@@ -353,6 +383,18 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
           }
         }
       );
+      const refreshedSession = await gatewayClient.getSession(sessionId);
+      if (refreshedSession) {
+        upsertSession({
+          id: refreshedSession.id,
+          sessionKey: refreshedSession.sessionKey,
+          title: refreshedSession.title,
+          preview: refreshedSession.preview,
+          runtimeMode: refreshedSession.runtimeMode,
+          syncState: refreshedSession.syncState as "local_only" | "syncing" | "synced" | "conflict",
+          updatedAt: refreshedSession.updatedAt
+        });
+      }
       setGatewayReady(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -518,6 +560,191 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
       </div>
     </Card>
   );
+}
+
+function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  const runState = new Map<string, ReplayRunState>();
+
+  const getState = (runId: string): ReplayRunState => {
+    const existing = runState.get(runId);
+    if (existing) {
+      return existing;
+    }
+    const created: ReplayRunState = {
+      toolMessageIds: {}
+    };
+    runState.set(runId, created);
+    return created;
+  };
+
+  const pushMessage = (message: ChatMessage): void => {
+    messages.push(message);
+  };
+
+  const updateMessage = (messageId: string, updater: (message: ChatMessage) => ChatMessage): void => {
+    const index = messages.findIndex((item) => item.id === messageId);
+    if (index === -1) {
+      return;
+    }
+    messages[index] = updater(messages[index]);
+  };
+
+  const ensureAssistantMessage = (runId: string, initialText: string): string => {
+    const state = getState(runId);
+    if (state.assistantMessageId) {
+      return state.assistantMessageId;
+    }
+    const id = createMessageId();
+    pushMessage({
+      id,
+      role: "assistant",
+      text: initialText
+    });
+    state.assistantMessageId = id;
+    return id;
+  };
+
+  const ensureToolMessage = (runId: string, kind: "call" | "result", toolCallId: string, toolName: string): string => {
+    const state = getState(runId);
+    const key = `${kind}:${toolCallId}`;
+    const existing = state.toolMessageIds[key];
+    if (existing) {
+      return existing;
+    }
+    const id = createMessageId();
+    pushMessage({
+      id,
+      role: "tool",
+      text: "",
+      toolMeta: {
+        toolCallId,
+        kind,
+        toolName,
+        detail: "",
+        preview: "(streaming...)",
+        inProgress: false
+      }
+    });
+    state.toolMessageIds[key] = id;
+    return id;
+  };
+
+  for (const item of items) {
+    const runId = asString(item.payload.runId) ?? item.runId ?? "run_unknown";
+    if (item.event === "user.input") {
+      const inputText = asString(item.payload.input) ?? "";
+      if (inputText.trim().length > 0) {
+        pushMessage({
+          id: createMessageId(),
+          role: "user",
+          text: inputText
+        });
+      }
+      continue;
+    }
+
+    if (item.event === "agent.delta") {
+      const delta = asString(item.payload.delta) ?? "";
+      if (!delta) {
+        continue;
+      }
+      const messageId = ensureAssistantMessage(runId, "");
+      updateMessage(messageId, (message) => ({
+        ...message,
+        text: `${message.text}${delta}`
+      }));
+      continue;
+    }
+
+    if (item.event === "agent.completed") {
+      const output = asString(item.payload.output) ?? "";
+      if (!output.trim()) {
+        continue;
+      }
+      const messageId = ensureAssistantMessage(runId, output);
+      updateMessage(messageId, (message) => ({
+        ...message,
+        text: output
+      }));
+      continue;
+    }
+
+    if (item.event === "agent.failed") {
+      const code = asString(item.payload.code) ?? "INTERNAL_ERROR";
+      const message = asString(item.payload.message) ?? "Unknown error";
+      pushMessage({
+        id: createMessageId(),
+        role: "system",
+        text: `[${code}] ${message}`
+      });
+      continue;
+    }
+
+    if (item.event === "agent.tool_call_start" || item.event === "agent.tool_call_delta" || item.event === "agent.tool_call") {
+      const toolName = asString(item.payload.toolName) ?? "tool";
+      const toolCallId = asString(item.payload.toolCallId) ?? `call_${toolName}`;
+      const id = ensureToolMessage(runId, "call", toolCallId, toolName);
+      updateMessage(id, (message) => {
+        const current = message.toolMeta;
+        if (!current) {
+          return message;
+        }
+        const detail =
+          item.event === "agent.tool_call_delta"
+            ? `${current.detail}${asString(item.payload.delta) ?? ""}`
+            : item.event === "agent.tool_call"
+              ? formatToolDetail(item.payload.args)
+              : current.detail;
+        return {
+          ...message,
+          toolMeta: {
+            ...current,
+            toolName,
+            detail,
+            preview: summarizeForPreview(detail),
+            inProgress: item.event === "agent.tool_call_start" || item.event === "agent.tool_call_delta"
+          }
+        };
+      });
+      continue;
+    }
+
+    if (
+      item.event === "agent.tool_result_start" ||
+      item.event === "agent.tool_result_delta" ||
+      item.event === "agent.tool_result"
+    ) {
+      const toolName = asString(item.payload.toolName) ?? "tool";
+      const toolCallId = asString(item.payload.toolCallId) ?? `result_${toolName}`;
+      const id = ensureToolMessage(runId, "result", toolCallId, toolName);
+      updateMessage(id, (message) => {
+        const current = message.toolMeta;
+        if (!current) {
+          return message;
+        }
+        const detail =
+          item.event === "agent.tool_result_delta"
+            ? `${current.detail}${asString(item.payload.delta) ?? ""}`
+            : item.event === "agent.tool_result"
+              ? formatToolDetail(item.payload.output)
+              : current.detail;
+        return {
+          ...message,
+          toolMeta: {
+            ...current,
+            toolName,
+            detail,
+            preview: summarizeForPreview(detail),
+            inProgress: item.event === "agent.tool_result_start" || item.event === "agent.tool_result_delta"
+          }
+        };
+      });
+      continue;
+    }
+  }
+
+  return messages.slice(-MAX_MESSAGES_PER_SESSION);
 }
 
 function renderRole(role: ChatRole, t: (key: string) => string): string {

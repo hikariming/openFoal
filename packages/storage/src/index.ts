@@ -9,10 +9,14 @@ declare const process: any;
 
 export type RuntimeMode = "local" | "cloud";
 export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
+export const DEFAULT_SESSION_TITLE = "new-session";
+export const DEFAULT_SESSION_PREVIEW = "";
 
 export interface SessionRecord {
   id: string;
   sessionKey: string;
+  title: string;
+  preview: string;
   runtimeMode: RuntimeMode;
   syncState: SyncState;
   updatedAt: string;
@@ -42,7 +46,7 @@ export interface TranscriptRepository {
     payload: Record<string, unknown>;
     createdAt?: string;
   }): Promise<void>;
-  list(sessionId: string, limit?: number): Promise<TranscriptRecord[]>;
+  list(sessionId: string, limit?: number, beforeId?: number): Promise<TranscriptRecord[]>;
 }
 
 export interface IdempotencyResult {
@@ -127,8 +131,8 @@ export class InMemoryTranscriptRepository implements TranscriptRepository {
     });
   }
 
-  async list(sessionId: string, limit = 50): Promise<TranscriptRecord[]> {
-    const filtered = this.items.filter((item) => item.sessionId === sessionId);
+  async list(sessionId: string, limit = 50, beforeId?: number): Promise<TranscriptRecord[]> {
+    const filtered = this.items.filter((item) => item.sessionId === sessionId && (beforeId ? item.id < beforeId : true));
     return filtered.slice(Math.max(0, filtered.length - limit));
   }
 }
@@ -171,6 +175,8 @@ export class SqliteSessionRepository implements SessionRepository {
         SELECT
           id AS id,
           session_key AS sessionKey,
+          title AS title,
+          preview AS preview,
           runtime_mode AS runtimeMode,
           sync_state AS syncState,
           updated_at AS updatedAt
@@ -188,6 +194,8 @@ export class SqliteSessionRepository implements SessionRepository {
         SELECT
           id AS id,
           session_key AS sessionKey,
+          title AS title,
+          preview AS preview,
           runtime_mode AS runtimeMode,
           sync_state AS syncState,
           updated_at AS updatedAt
@@ -205,16 +213,20 @@ export class SqliteSessionRepository implements SessionRepository {
     execSql(
       this.dbPath,
       `
-        INSERT INTO sessions (id, session_key, runtime_mode, sync_state, updated_at)
+        INSERT INTO sessions (id, session_key, title, preview, runtime_mode, sync_state, updated_at)
         VALUES (
           ${sqlString(session.id)},
           ${sqlString(session.sessionKey)},
+          ${sqlString(session.title)},
+          ${sqlString(session.preview)},
           ${sqlString(session.runtimeMode)},
           ${sqlString(session.syncState)},
           ${sqlString(updatedAt)}
         )
         ON CONFLICT(id) DO UPDATE SET
           session_key = excluded.session_key,
+          title = excluded.title,
+          preview = excluded.preview,
           runtime_mode = excluded.runtime_mode,
           sync_state = excluded.sync_state,
           updated_at = excluded.updated_at;
@@ -273,9 +285,10 @@ export class SqliteTranscriptRepository implements TranscriptRepository {
     );
   }
 
-  async list(sessionId: string, limit = 50): Promise<TranscriptRecord[]> {
+  async list(sessionId: string, limit = 50, beforeId?: number): Promise<TranscriptRecord[]> {
     ensureSchema(this.dbPath);
     const safeLimit = Math.max(1, Math.floor(limit));
+    const beforeFilter = typeof beforeId === "number" && Number.isFinite(beforeId) ? ` AND id < ${Math.floor(beforeId)}` : "";
     const rows = queryJson<{
       id: number;
       sessionId: string;
@@ -303,6 +316,7 @@ export class SqliteTranscriptRepository implements TranscriptRepository {
             created_at
           FROM transcript
           WHERE session_id = ${sqlString(sessionId)}
+          ${beforeFilter}
           ORDER BY id DESC
           LIMIT ${safeLimit}
         )
@@ -390,6 +404,8 @@ function defaultSession(): SessionRecord {
   return {
     id: "s_default",
     sessionKey: "workspace:w_default/agent:a_default/main",
+    title: DEFAULT_SESSION_TITLE,
+    preview: DEFAULT_SESSION_PREVIEW,
     runtimeMode: "local",
     syncState: "local_only",
     updatedAt: nowIso()
@@ -424,6 +440,8 @@ function ensureSchema(dbPath: string): void {
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         session_key TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT 'new-session',
+        preview TEXT NOT NULL DEFAULT '',
         runtime_mode TEXT NOT NULL,
         sync_state TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -450,11 +468,20 @@ function ensureSchema(dbPath: string): void {
         result_json TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+    `
+  );
 
-      INSERT OR IGNORE INTO sessions (id, session_key, runtime_mode, sync_state, updated_at)
+  ensureSessionColumns(dbPath);
+
+  execSql(
+    dbPath,
+    `
+      INSERT OR IGNORE INTO sessions (id, session_key, title, preview, runtime_mode, sync_state, updated_at)
       VALUES (
         ${sqlString("s_default")},
         ${sqlString("workspace:w_default/agent:a_default/main")},
+        ${sqlString(DEFAULT_SESSION_TITLE)},
+        ${sqlString(DEFAULT_SESSION_PREVIEW)},
         ${sqlString("local")},
         ${sqlString("local_only")},
         ${sqlString(nowIso())}
@@ -463,6 +490,36 @@ function ensureSchema(dbPath: string): void {
   );
 
   initializedDbPaths.add(dbPath);
+}
+
+function ensureSessionColumns(dbPath: string): void {
+  const columns = queryJson<{ name: string }>(
+    dbPath,
+    `
+      PRAGMA table_info(sessions);
+    `
+  );
+  const names = new Set(columns.map((item) => item.name));
+
+  if (!names.has("title")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN title TEXT NOT NULL DEFAULT ${sqlString(DEFAULT_SESSION_TITLE)};
+      `
+    );
+  }
+
+  if (!names.has("preview")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN preview TEXT NOT NULL DEFAULT ${sqlString(DEFAULT_SESSION_PREVIEW)};
+      `
+    );
+  }
 }
 
 function execSql(dbPath: string, sql: string): void {

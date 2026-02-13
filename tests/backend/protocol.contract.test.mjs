@@ -36,6 +36,22 @@ test("side-effect method requires idempotencyKey", () => {
   }
 });
 
+test("sessions.create requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_sessions_create_1",
+    method: "sessions.create",
+    params: {
+      title: "new"
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
 test("unknown method returns METHOD_NOT_FOUND", () => {
   const result = validateReqFrame({
     type: "req",
