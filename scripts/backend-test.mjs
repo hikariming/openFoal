@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 run(["scripts/backend-build.mjs"]);
 run([
   "--test",
+  "tests/backend/core.config.test.mjs",
   "tests/backend/core.runtime.test.mjs",
   "tests/backend/tool-executor.driver.test.mjs",
   "tests/backend/storage.sqlite.test.mjs",

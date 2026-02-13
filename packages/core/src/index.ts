@@ -7,6 +7,7 @@ import { Agent, type AgentEvent, type AgentTool, type StreamFn } from "@mariozec
 import {
   Type,
   createAssistantMessageEventStream,
+  getEnvApiKey,
   getModel,
   registerBuiltInApiProviders,
   type AssistantMessage,
@@ -14,6 +15,12 @@ import {
   type Message,
   type Model
 } from "@mariozechner/pi-ai";
+import {
+  loadOpenFoalCoreConfig,
+  type EnvMap,
+  type OpenFoalCoreConfig,
+  type OpenFoalLlmProviderConfig
+} from "./config.js";
 
 declare const process: any;
 
@@ -77,9 +84,25 @@ export type { ToolCall, ToolContext, ToolExecutor, ToolResult } from "../../../p
 export interface PiCoreOptions {
   provider?: string;
   modelId?: string;
+  apiKey?: string;
   systemPrompt?: string;
   streamMode?: "real" | "mock";
   streamFn?: StreamFn;
+  configPath?: string;
+  policyPath?: string;
+}
+
+export interface PiRuntimeSettingsOptions extends PiCoreOptions {
+  env?: EnvMap;
+}
+
+export interface PiRuntimeSettings {
+  config: OpenFoalCoreConfig;
+  provider?: string;
+  modelId?: string;
+  model?: Model<any>;
+  streamMode: "real" | "mock";
+  apiKeys: Record<string, string>;
 }
 
 export interface RuntimeCoreOptions {
@@ -130,6 +153,7 @@ export function createRuntimeCoreService(options: RuntimeCoreOptions = {}): Core
 export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreService {
   const toolExecutor = options.toolExecutor ?? createBuiltinToolExecutor();
   const piOptions = options.pi ?? {};
+  const runtimeSettings = resolvePiRuntimeSettings(piOptions);
   const running = new Map<string, ActiveRun>();
   let runCounter = 0;
 
@@ -165,7 +189,7 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
       let outputText = "";
 
       try {
-        const streamFn = resolvePiStreamFn(piOptions);
+        const streamFn = resolvePiStreamFn(piOptions, runtimeSettings.streamMode);
         const tools = createPiTools(toolExecutor, {
           runId,
           sessionId: input.sessionId,
@@ -174,12 +198,12 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
 
         const agent = new Agent({
           initialState: {
-            ...(resolvePiModel(piOptions) ? { model: resolvePiModel(piOptions) as Model<any> } : {}),
+            ...(runtimeSettings.model ? { model: runtimeSettings.model as Model<any> } : {}),
             systemPrompt: piOptions.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
             tools
           },
           streamFn,
-          getApiKey: (provider) => resolveApiKey(provider),
+          getApiKey: (provider) => resolveApiKey(provider, runtimeSettings, piOptions),
           sessionId: input.sessionId
         });
         activeRun.agent = agent;
@@ -478,29 +502,68 @@ function ensurePiProviders(): void {
   piProvidersRegistered = true;
 }
 
-function resolvePiModel(options: PiCoreOptions): Model<any> | undefined {
-  ensurePiProviders();
+export { MissingConfigEnvVarError, loadOpenFoalCoreConfig } from "./config.js";
 
-  const provider = options.provider ?? process.env.OPENFOAL_PI_PROVIDER;
-  const modelId = options.modelId ?? process.env.OPENFOAL_PI_MODEL;
-  if (provider && modelId) {
-    try {
-      return getModel(provider as any, modelId as any);
-    } catch {
-      return undefined;
-    }
-  }
+export function resolvePiRuntimeSettings(options: PiRuntimeSettingsOptions = {}): PiRuntimeSettings {
+  const env = options.env ?? (process.env as EnvMap);
+  const config = loadOpenFoalCoreConfig({
+    configPath: options.configPath,
+    policyPath: options.policyPath,
+    env
+  });
+  const provider = firstNonEmpty(options.provider, config.llm?.defaultProvider, env.OPENFOAL_PI_PROVIDER);
+  const modelId = firstNonEmpty(options.modelId, config.llm?.defaultModel, env.OPENFOAL_PI_MODEL);
+  const providerConfig = provider ? config.llm?.providers?.[provider] : undefined;
 
-  return undefined;
+  return {
+    config,
+    provider,
+    modelId,
+    model: resolvePiModel(provider, modelId, providerConfig),
+    streamMode: resolvePiStreamMode(options.streamMode, env),
+    apiKeys: collectApiKeys(config, env, options.apiKey, provider)
+  };
 }
 
-function resolvePiStreamFn(options: PiCoreOptions): StreamFn | undefined {
+function resolvePiModel(
+  provider: string | undefined,
+  modelId: string | undefined,
+  providerConfig: OpenFoalLlmProviderConfig | undefined
+): Model<any> | undefined {
+  if (!provider || !modelId) {
+    return undefined;
+  }
+
+  ensurePiProviders();
+  const needsCustomModel = Boolean(providerConfig?.baseUrl || providerConfig?.api || providerConfig?.headers);
+  let builtinModel: Model<any> | undefined;
+  try {
+    builtinModel = getModel(provider as any, modelId as any);
+  } catch {
+    builtinModel = undefined;
+  }
+
+  if (!needsCustomModel && builtinModel) {
+    return builtinModel;
+  }
+  if (!providerConfig && !builtinModel) {
+    return undefined;
+  }
+
+  return createConfiguredModel(provider, modelId, providerConfig, builtinModel);
+}
+
+function resolvePiStreamMode(mode: PiCoreOptions["streamMode"], env: EnvMap): "real" | "mock" {
+  const value = firstNonEmpty(mode, env.OPENFOAL_PI_STREAM_MODE);
+  return value === "real" ? "real" : "mock";
+}
+
+function resolvePiStreamFn(options: PiCoreOptions, streamMode: "real" | "mock"): StreamFn | undefined {
   if (options.streamFn) {
     return options.streamFn;
   }
 
-  const mode = options.streamMode ?? process.env.OPENFOAL_PI_STREAM_MODE ?? "mock";
-  if (mode === "mock") {
+  if (streamMode === "mock") {
     return createPiMockStreamFn();
   }
   return undefined;
@@ -756,32 +819,126 @@ function createPiTools(
   }));
 }
 
-function resolveApiKey(provider: string): string | undefined {
-  const explicit = process.env.OPENFOAL_PI_API_KEY;
-  if (typeof explicit === "string" && explicit.trim().length > 0) {
-    return explicit.trim();
+function createConfiguredModel(
+  provider: string,
+  modelId: string,
+  providerConfig: OpenFoalLlmProviderConfig | undefined,
+  builtinModel: Model<any> | undefined
+): Model<any> {
+  const api = providerConfig?.api ?? builtinModel?.api ?? "openai-completions";
+  const input = providerConfig?.input ?? builtinModel?.input ?? ["text"];
+  const headers = mergeHeaders((builtinModel as Record<string, unknown> | undefined)?.headers, providerConfig?.headers);
+  const baseUrl = firstNonEmpty(
+    providerConfig?.baseUrl,
+    asString((builtinModel as Record<string, unknown> | undefined)?.baseUrl)
+  );
+  const modelRecord: Record<string, unknown> = {
+    id: modelId,
+    name: builtinModel?.name ?? `${provider}/${modelId}`,
+    api,
+    provider,
+    reasoning: providerConfig?.reasoning ?? builtinModel?.reasoning ?? false,
+    input,
+    cost: builtinModel?.cost ?? {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0
+    },
+    contextWindow: providerConfig?.contextWindow ?? builtinModel?.contextWindow ?? 128000,
+    maxTokens: providerConfig?.maxTokens ?? builtinModel?.maxTokens ?? 16384
+  };
+  if (baseUrl) {
+    modelRecord.baseUrl = baseUrl;
+  }
+  if (headers) {
+    modelRecord.headers = headers;
+  }
+  return modelRecord as unknown as Model<any>;
+}
+
+function collectApiKeys(
+  config: OpenFoalCoreConfig,
+  env: EnvMap,
+  explicitApiKey: string | undefined,
+  activeProvider: string | undefined
+): Record<string, string> {
+  const keys: Record<string, string> = {};
+  const providers = config.llm?.providers ?? {};
+  for (const [providerName, providerConfig] of Object.entries(providers)) {
+    const key = firstNonEmpty(providerConfig.apiKey);
+    if (key) {
+      keys[providerName] = key;
+    }
   }
 
-  const map: Record<string, string> = {
-    openai: "OPENAI_API_KEY",
-    anthropic: "ANTHROPIC_API_KEY",
-    google: "GOOGLE_API_KEY",
-    "google-vertex": "GOOGLE_VERTEX_API_KEY",
-    "amazon-bedrock": "AWS_BEDROCK_API_KEY",
-    xai: "XAI_API_KEY",
-    groq: "GROQ_API_KEY",
-    cerebras: "CEREBRAS_API_KEY",
-    mistral: "MISTRAL_API_KEY",
-    minimax: "MINIMAX_API_KEY",
-    "minimax-cn": "MINIMAX_API_KEY",
-    openrouter: "OPENROUTER_API_KEY"
-  };
-  const envName = map[provider];
-  if (!envName) {
-    return undefined;
+  const explicit = firstNonEmpty(explicitApiKey, env.OPENFOAL_PI_API_KEY);
+  if (explicit) {
+    if (activeProvider) {
+      keys[activeProvider] = explicit;
+    } else {
+      keys._default = explicit;
+    }
   }
-  const value = process.env[envName];
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+
+  return keys;
+}
+
+function resolveApiKey(provider: string, settings: PiRuntimeSettings, options: PiCoreOptions): string | undefined {
+  const explicit = firstNonEmpty(options.apiKey, process.env.OPENFOAL_PI_API_KEY);
+  if (explicit) {
+    return explicit;
+  }
+
+  const configured = settings.apiKeys[provider] ?? settings.apiKeys._default;
+  if (configured) {
+    return configured;
+  }
+
+  const knownProviderKey = getEnvApiKey(provider);
+  if (knownProviderKey) {
+    return knownProviderKey;
+  }
+
+  const customEnvMap: Record<string, string> = {
+    kimi: "KIMI_API_KEY",
+    moonshot: "MOONSHOT_API_KEY",
+    "kimi-coding": "KIMI_API_KEY"
+  };
+  const envName = customEnvMap[provider];
+  const envValue = envName ? firstNonEmpty(process.env[envName]) : undefined;
+  return envValue;
+}
+
+function mergeHeaders(
+  base: unknown,
+  override: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  const baseRecord: Record<string, string> = {};
+  if (isRecord(base)) {
+    for (const [key, value] of Object.entries(base)) {
+      if (typeof value === "string") {
+        baseRecord[key] = value;
+      }
+    }
+  }
+  if (!override || Object.keys(override).length === 0) {
+    return Object.keys(baseRecord).length > 0 ? baseRecord : undefined;
+  }
+  return { ...baseRecord, ...override };
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 function mapPiEvent(event: AgentEvent, runId: string): CoreEvent[] {

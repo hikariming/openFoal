@@ -59,6 +59,39 @@ Model Layer
 | 权限 | 本地账户/API Key | SSO + RBAC + 审计 |
 | 执行隔离 | 本地容器/沙箱 | 租户级沙箱池 |
 
+## 4.1 LLM 配置（参考 OpenClaw 风格）
+
+后端支持统一 JSON 配置 + 环境变量注入：
+
+- 默认配置路径：`~/.openfoal/openfoal.json`
+- 覆盖路径：`OPENFOAL_CONFIG_PATH=/path/to/openfoal.json`
+- 企业策略覆盖：`OPENFOAL_POLICY_PATH=/path/to/policy.json`
+
+`provider/model` 解析优先级：
+
+1. 代码显式传入（`pi.provider`/`pi.modelId`）
+2. 配置文件（`llm.defaultProvider`/`llm.defaultModel`，含 policy merge）
+3. 环境变量 fallback（`OPENFOAL_PI_PROVIDER`/`OPENFOAL_PI_MODEL`）
+
+示例（Kimi，openai-compatible）：
+
+```json
+{
+  "version": 1,
+  "llm": {
+    "defaultProvider": "kimi",
+    "defaultModel": "k2p5",
+    "providers": {
+      "kimi": {
+        "api": "openai-completions",
+        "baseUrl": "https://api.moonshot.cn/v1",
+        "apiKey": "${KIMI_API_KEY}"
+      }
+    }
+  }
+}
+```
+
 ## 5. 目录规划
 
 ```text
