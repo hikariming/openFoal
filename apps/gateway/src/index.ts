@@ -1,4 +1,4 @@
-import { createMockCoreService, type CoreEvent, type CoreService } from "../../../packages/core/dist/index.js";
+import { createRuntimeCoreService, type CoreEvent, type CoreService } from "../../../packages/core/dist/index.js";
 import {
   InMemorySessionRepository,
   type RuntimeMode,
@@ -15,6 +15,12 @@ import {
   type ResFrame,
   validateReqFrame
 } from "../../../packages/protocol/dist/index.js";
+// @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
+import { createServer } from "node:http";
+// @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
+import { createHash } from "node:crypto";
+
+declare const Buffer: any;
 
 export interface ConnectionState {
   connected: boolean;
@@ -31,6 +37,18 @@ export interface GatewayHandleResult {
 
 export interface GatewayRouter {
   handle(input: unknown, state: ConnectionState): Promise<GatewayHandleResult>;
+}
+
+export interface GatewayServerOptions {
+  host?: string;
+  port?: number;
+  router?: GatewayRouter;
+}
+
+export interface GatewayServerHandle {
+  host: string;
+  port: number;
+  close(): Promise<void>;
 }
 
 interface GatewayDeps {
@@ -61,7 +79,7 @@ export function createConnectionState(): ConnectionState {
 }
 
 export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
-  const coreService = deps.coreService ?? createMockCoreService();
+  const coreService = deps.coreService ?? createRuntimeCoreService();
   const sessionRepo = deps.sessionRepo ?? new InMemorySessionRepository();
   const now = deps.now ?? (() => new Date());
   const idempotencyStore = new Map<string, StoredIdempotency>();
@@ -110,6 +128,50 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
       }
 
       return result;
+    }
+  };
+}
+
+export async function startGatewayServer(options: GatewayServerOptions = {}): Promise<GatewayServerHandle> {
+  const host = options.host ?? "127.0.0.1";
+  const port = options.port ?? 8787;
+  const router = options.router ?? createGatewayRouter();
+  const httpConnections = new Map<string, ConnectionState>();
+  const sockets = new Set<any>();
+
+  const server = createServer(async (req: any, res: any) => {
+    try {
+      await handleHttpRequest(req, res, router, httpConnections);
+    } catch (error) {
+      writeJson(res, 500, {
+        error: "INTERNAL_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  server.on("upgrade", (req: any, socket: any, head: any) => {
+    void handleUpgrade(req, socket, head, router);
+  });
+  server.on("connection", (socket: any) => {
+    sockets.add(socket);
+    socket.on("close", () => {
+      sockets.delete(socket);
+    });
+  });
+
+  await listen(server, host, port);
+  const addr = server.address();
+  const actualPort = addr && typeof addr === "object" ? addr.port : port;
+
+  return {
+    host,
+    port: actualPort,
+    close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await closeServer(server);
     }
   };
 }
@@ -372,6 +434,305 @@ async function route(
       };
     }
   }
+}
+
+async function handleHttpRequest(
+  req: any,
+  res: any,
+  router: GatewayRouter,
+  httpConnections: Map<string, ConnectionState>
+): Promise<void> {
+  const method = typeof req.method === "string" ? req.method.toUpperCase() : "";
+  const pathname = readPathname(req.url, req.headers?.host);
+
+  if (method === "GET" && pathname === "/health") {
+    writeJson(res, 200, {
+      ok: true,
+      service: "gateway",
+      time: new Date().toISOString()
+    });
+    return;
+  }
+
+  if (method === "POST" && pathname === "/rpc") {
+    const body = await readJsonBody(req);
+    const connectionId = readConnectionId(req.url, req.headers?.host, req.headers?.["x-openfoal-connection-id"]);
+    const state = getOrCreateConnectionState(httpConnections, connectionId);
+    const result = await router.handle(body, state);
+    writeJson(res, 200, result);
+    return;
+  }
+
+  writeJson(res, 404, {
+    error: "NOT_FOUND"
+  });
+}
+
+async function handleUpgrade(req: any, socket: any, head: any, router: GatewayRouter): Promise<void> {
+  try {
+    const pathname = readPathname(req.url, req.headers?.host);
+    if (pathname !== "/ws") {
+      writeUpgradeFailure(socket, 404, "Not Found");
+      return;
+    }
+
+    const wsKey = req.headers?.["sec-websocket-key"];
+    if (typeof wsKey !== "string" || wsKey.trim().length === 0) {
+      writeUpgradeFailure(socket, 400, "Missing Sec-WebSocket-Key");
+      return;
+    }
+
+    const accept = createHash("sha1")
+      .update(`${wsKey.trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    socket.write(
+      [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Accept: ${accept}`,
+        "",
+        ""
+      ].join("\r\n")
+    );
+
+    const state = createConnectionState();
+    let raw = head && head.length > 0 ? Buffer.from(head) : Buffer.alloc(0);
+    let processing = Promise.resolve();
+
+    socket.on("data", (chunk: any) => {
+      raw = Buffer.concat([raw, chunk]);
+      processing = processing
+        .then(async () => {
+          while (true) {
+            const parsed = tryParseWsFrame(raw);
+            if (!parsed) {
+              break;
+            }
+            raw = parsed.rest;
+
+            if (parsed.opcode === 0x8) {
+              socket.end();
+              return;
+            }
+
+            if (parsed.opcode === 0x9) {
+              socket.write(encodeWsFrame(parsed.payload, 0x0a));
+              continue;
+            }
+
+            if (parsed.opcode !== 0x1) {
+              continue;
+            }
+
+            const text = parsed.payload.toString("utf8");
+            let input: unknown;
+            try {
+              input = JSON.parse(text);
+            } catch {
+              input = text;
+            }
+
+            const result = await router.handle(input, state);
+            socket.write(encodeWsFrame(Buffer.from(JSON.stringify(result.response), "utf8"), 0x1));
+            for (const event of result.events) {
+              socket.write(encodeWsFrame(Buffer.from(JSON.stringify(event), "utf8"), 0x1));
+            }
+          }
+        })
+        .catch(() => {
+          if (!socket.destroyed) {
+            socket.destroy();
+          }
+        });
+    });
+
+    socket.on("error", () => {
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+    });
+  } catch {
+    if (!socket.destroyed) {
+      socket.destroy();
+    }
+  }
+}
+
+function writeUpgradeFailure(socket: any, code: number, message: string): void {
+  socket.write(
+    [
+      `HTTP/1.1 ${code} ${message}`,
+      "Connection: close",
+      "Content-Length: 0",
+      "",
+      ""
+    ].join("\r\n")
+  );
+  socket.destroy();
+}
+
+function tryParseWsFrame(raw: any): { opcode: number; payload: any; rest: any } | null {
+  if (raw.length < 2) {
+    return null;
+  }
+
+  const first = raw[0];
+  const second = raw[1];
+  const opcode = first & 0x0f;
+  let offset = 2;
+  let payloadLength = second & 0x7f;
+  const masked = (second & 0x80) !== 0;
+
+  if (payloadLength === 126) {
+    if (raw.length < offset + 2) {
+      return null;
+    }
+    payloadLength = raw.readUInt16BE(offset);
+    offset += 2;
+  } else if (payloadLength === 127) {
+    if (raw.length < offset + 8) {
+      return null;
+    }
+    const high = raw.readUInt32BE(offset);
+    const low = raw.readUInt32BE(offset + 4);
+    payloadLength = high * 2 ** 32 + low;
+    offset += 8;
+  }
+
+  let mask: any = null;
+  if (masked) {
+    if (raw.length < offset + 4) {
+      return null;
+    }
+    mask = raw.subarray(offset, offset + 4);
+    offset += 4;
+  }
+
+  if (raw.length < offset + payloadLength) {
+    return null;
+  }
+
+  const payload = Buffer.from(raw.subarray(offset, offset + payloadLength));
+  if (mask) {
+    for (let i = 0; i < payload.length; i += 1) {
+      payload[i] = payload[i] ^ mask[i % 4];
+    }
+  }
+
+  return {
+    opcode,
+    payload,
+    rest: raw.subarray(offset + payloadLength)
+  };
+}
+
+function encodeWsFrame(payload: any, opcode: number): any {
+  const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const header: number[] = [0x80 | (opcode & 0x0f)];
+
+  if (bytes.length < 126) {
+    header.push(bytes.length);
+  } else if (bytes.length <= 0xffff) {
+    header.push(126, (bytes.length >>> 8) & 0xff, bytes.length & 0xff);
+  } else {
+    const high = Math.floor(bytes.length / 2 ** 32);
+    const low = bytes.length >>> 0;
+    header.push(
+      127,
+      (high >>> 24) & 0xff,
+      (high >>> 16) & 0xff,
+      (high >>> 8) & 0xff,
+      high & 0xff,
+      (low >>> 24) & 0xff,
+      (low >>> 16) & 0xff,
+      (low >>> 8) & 0xff,
+      low & 0xff
+    );
+  }
+
+  return Buffer.concat([Buffer.from(header), bytes]);
+}
+
+function readPathname(rawUrl: string | undefined, host: string | undefined): string {
+  const url = new URL(rawUrl ?? "/", `http://${host ?? "127.0.0.1"}`);
+  return url.pathname;
+}
+
+function readConnectionId(rawUrl: string | undefined, host: string | undefined, headerValue: unknown): string {
+  if (typeof headerValue === "string" && headerValue.trim().length > 0) {
+    return headerValue.trim();
+  }
+  const url = new URL(rawUrl ?? "/", `http://${host ?? "127.0.0.1"}`);
+  const fromQuery = url.searchParams.get("connectionId");
+  return fromQuery && fromQuery.trim().length > 0 ? fromQuery.trim() : "http_default";
+}
+
+async function readJsonBody(req: any): Promise<unknown> {
+  const chunks: any[] = [];
+  await new Promise<void>((resolve, reject) => {
+    req.on("data", (chunk: any) => {
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      resolve();
+    });
+    req.on("error", (error: unknown) => {
+      reject(error);
+    });
+  });
+
+  if (chunks.length === 0) {
+    return {};
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (text.trim().length === 0) {
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function writeJson(res: any, statusCode: number, payload: unknown): void {
+  const text = JSON.stringify(payload);
+  res.statusCode = statusCode;
+  res.setHeader("content-type", "application/json; charset=utf-8");
+  res.setHeader("content-length", String(Buffer.byteLength(text)));
+  res.end(text);
+}
+
+function getOrCreateConnectionState(
+  states: Map<string, ConnectionState>,
+  connectionId: string
+): ConnectionState {
+  const existing = states.get(connectionId);
+  if (existing) {
+    return existing;
+  }
+  const created = createConnectionState();
+  states.set(connectionId, created);
+  return created;
+}
+
+async function listen(server: any, host: string, port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server: any): Promise<void> {
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
 }
 
 function createSession(id: string, runtimeMode: RuntimeMode): SessionRecord {
