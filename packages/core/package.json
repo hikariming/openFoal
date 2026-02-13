@@ -10,5 +10,9 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.52.10",
+    "@mariozechner/pi-ai": "^0.52.10"
   }
 }

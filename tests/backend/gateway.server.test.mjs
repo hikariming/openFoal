@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { startGatewayServer } from "../../apps/gateway/dist/index.js";
 
@@ -16,9 +19,12 @@ function req(id, method, params = {}) {
 }
 
 test("gateway HTTP exposes health and rpc", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openfoal-gateway-server-http-"));
+  const dbPath = join(dir, "gateway.sqlite");
   const server = await startGatewayServer({
     host: "127.0.0.1",
-    port: 0
+    port: 0,
+    sqlitePath: dbPath
   });
   try {
     const health = await httpJson({
@@ -49,13 +55,17 @@ test("gateway HTTP exposes health and rpc", async () => {
     assert.equal(Array.isArray(listed.body.response.payload.sessions), true);
   } finally {
     await server.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("gateway WS handles connect and agent.run stream", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openfoal-gateway-server-ws-"));
+  const dbPath = join(dir, "gateway.sqlite");
   const server = await startGatewayServer({
     host: "127.0.0.1",
-    port: 0
+    port: 0,
+    sqlitePath: dbPath
   });
   const ws = await openWs(server.port);
   try {
@@ -94,6 +104,7 @@ test("gateway WS handles connect and agent.run stream", async () => {
   } finally {
     ws.close();
     await server.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

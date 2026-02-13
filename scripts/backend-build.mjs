@@ -7,9 +7,9 @@ const tscPath = resolveTsc(root);
 
 const projects = [
   "packages/protocol/tsconfig.json",
+  "packages/tool-executor/tsconfig.json",
   "packages/core/tsconfig.json",
   "packages/storage/tsconfig.json",
-  "packages/tool-executor/tsconfig.json",
   "apps/gateway/tsconfig.json"
 ];
 

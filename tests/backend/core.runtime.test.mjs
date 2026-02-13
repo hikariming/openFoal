@@ -26,7 +26,7 @@ test("core runtime executes tool loop directives", async () => {
 
   for await (const event of core.run({
     sessionId: "s_default",
-    input: "sum [[tool:math.add {\"a\": 2, \"b\": 3}]]",
+    input: "sum [[tool:bash.exec {\"cmd\": \"printf 5\"}]]",
     runtimeMode: "local"
   })) {
     events.push(event);
@@ -38,7 +38,7 @@ test("core runtime executes tool loop directives", async () => {
   assert.equal(eventTypes.includes("completed"), true);
 
   const toolCall = events.find((event) => event.type === "tool_call");
-  assert.equal(toolCall?.toolName, "math.add");
+  assert.equal(toolCall?.toolName, "bash.exec");
 
   const toolResult = events.find((event) => event.type === "tool_result");
   assert.equal(toolResult?.output, "5");

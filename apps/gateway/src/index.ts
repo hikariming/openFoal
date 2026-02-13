@@ -1,9 +1,16 @@
 import { createRuntimeCoreService, type CoreEvent, type CoreService } from "../../../packages/core/dist/index.js";
 import {
+  InMemoryIdempotencyRepository,
   InMemorySessionRepository,
+  InMemoryTranscriptRepository,
+  SqliteIdempotencyRepository,
+  SqliteSessionRepository,
+  SqliteTranscriptRepository,
+  type IdempotencyRepository,
   type RuntimeMode,
   type SessionRecord,
-  type SessionRepository
+  type SessionRepository,
+  type TranscriptRepository
 } from "../../../packages/storage/dist/index.js";
 import {
   isSideEffectMethod,
@@ -42,6 +49,7 @@ export interface GatewayRouter {
 export interface GatewayServerOptions {
   host?: string;
   port?: number;
+  sqlitePath?: string;
   router?: GatewayRouter;
 }
 
@@ -54,12 +62,9 @@ export interface GatewayServerHandle {
 interface GatewayDeps {
   coreService?: CoreService;
   sessionRepo?: SessionRepository;
+  transcriptRepo?: TranscriptRepository;
+  idempotencyRepo?: IdempotencyRepository;
   now?: () => Date;
-}
-
-interface StoredIdempotency {
-  fingerprint: string;
-  result: GatewayHandleResult;
 }
 
 const DEFAULT_POLICY = {
@@ -81,8 +86,9 @@ export function createConnectionState(): ConnectionState {
 export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const coreService = deps.coreService ?? createRuntimeCoreService();
   const sessionRepo = deps.sessionRepo ?? new InMemorySessionRepository();
+  const transcriptRepo = deps.transcriptRepo ?? new InMemoryTranscriptRepository();
+  const idempotencyRepo = deps.idempotencyRepo ?? new InMemoryIdempotencyRepository();
   const now = deps.now ?? (() => new Date());
-  const idempotencyStore = new Map<string, StoredIdempotency>();
 
   return {
     async handle(input: unknown, state: ConnectionState): Promise<GatewayHandleResult> {
@@ -106,7 +112,7 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
       const idempotencyKey = sideEffectKey && buildIdempotencyCacheKey(req, sideEffectKey);
       const fingerprint = stableStringify(req.params);
       if (idempotencyKey) {
-        const existing = idempotencyStore.get(idempotencyKey);
+        const existing = await idempotencyRepo.get(idempotencyKey);
         if (existing) {
           if (existing.fingerprint !== fingerprint) {
             return {
@@ -114,14 +120,14 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
               events: []
             };
           }
-          return cloneResult(existing.result);
+          return cloneResult(existing.result as GatewayHandleResult);
         }
       }
 
-      const result = await route(req, state, coreService, sessionRepo, now);
+      const result = await route(req, state, coreService, sessionRepo, transcriptRepo, now);
 
       if (idempotencyKey && result.response.ok) {
-        idempotencyStore.set(idempotencyKey, {
+        await idempotencyRepo.set(idempotencyKey, {
           fingerprint,
           result: cloneResult(result)
         });
@@ -135,7 +141,13 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
 export async function startGatewayServer(options: GatewayServerOptions = {}): Promise<GatewayServerHandle> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
-  const router = options.router ?? createGatewayRouter();
+  const router =
+    options.router ??
+    createGatewayRouter({
+      sessionRepo: new SqliteSessionRepository(options.sqlitePath),
+      transcriptRepo: new SqliteTranscriptRepository(options.sqlitePath),
+      idempotencyRepo: new SqliteIdempotencyRepository(options.sqlitePath)
+    });
   const httpConnections = new Map<string, ConnectionState>();
   const sockets = new Set<any>();
 
@@ -181,6 +193,7 @@ async function route(
   state: ConnectionState,
   coreService: CoreService,
   sessionRepo: SessionRepository,
+  transcriptRepo: TranscriptRepository,
   now: () => Date
 ): Promise<GatewayHandleResult> {
   switch (req.method) {
@@ -330,11 +343,14 @@ async function route(
       }
 
       if (!acceptedRunId) {
+        await persistTranscript(sessionId, transcriptRepo, undefined, events, now);
         return {
           response: makeErrorRes(req.id, "INTERNAL_ERROR", "agent.run 未返回 runId"),
           events
         };
       }
+
+      await persistTranscript(sessionId, transcriptRepo, acceptedRunId, events, now);
 
       return {
         response: makeSuccessRes(req.id, {
@@ -433,6 +449,24 @@ async function route(
         events: []
       };
     }
+  }
+}
+
+async function persistTranscript(
+  sessionId: string,
+  transcriptRepo: TranscriptRepository,
+  runId: string | undefined,
+  events: EventFrame[],
+  now: () => Date
+): Promise<void> {
+  for (const event of events) {
+    await transcriptRepo.append({
+      sessionId,
+      runId,
+      event: event.event,
+      payload: event.payload,
+      createdAt: now().toISOString()
+    });
   }
 }
 
