@@ -6,6 +6,8 @@
     "dev:web": "pnpm --filter @openfoal/web-console dev",
     "dev:desktop": "pnpm --filter @openfoal/desktop dev",
     "build:web": "pnpm --filter @openfoal/web-console build",
-    "build:desktop": "pnpm --filter @openfoal/desktop build"
+    "build:desktop": "pnpm --filter @openfoal/desktop build",
+    "build:backend": "node scripts/backend-build.mjs",
+    "test:backend": "node scripts/backend-test.mjs"
   }
 }

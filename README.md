@@ -142,3 +142,6 @@ OpenFoal 将吸收 `openclaw-main` 已验证的记忆/会话管理机制：
 3. [API 契约（v1）](./docs/API_CONTRACT_V1.md)
 4. [实施路线图（v1）](./docs/IMPLEMENTATION_ROADMAP_V1.md)
 5. [UI 到 API 映射（v1）](./docs/UI_API_MAPPING_V1.md)
+6. [多租户设计（演进版）](./docs/MULTI_TENANCY_DESIGN.md)
+7. [实施路径（执行版）](./docs/IMPLEMENTATION_EXECUTION_PATH_V1.md)
+8. [后端测试策略（v1）](./docs/BACKEND_TEST_STRATEGY_V1.md)

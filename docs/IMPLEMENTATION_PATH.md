@@ -19,6 +19,9 @@ v1 的设计与实施细节已拆分为以下文档：
 3. [API 契约](./API_CONTRACT_V1.md)
 4. [实施路线图](./IMPLEMENTATION_ROADMAP_V1.md)
 5. [UI 到 API 映射](./UI_API_MAPPING_V1.md)
+6. [多租户演进设计](./MULTI_TENANCY_DESIGN.md)
+7. [实施路径（执行版）](./IMPLEMENTATION_EXECUTION_PATH_V1.md)
+8. [后端测试策略](./BACKEND_TEST_STRATEGY_V1.md)
 
 ## 2. 里程碑
 
@@ -98,6 +101,9 @@ docs/
   API_CONTRACT_V1.md
   IMPLEMENTATION_ROADMAP_V1.md
   UI_API_MAPPING_V1.md
+  MULTI_TENANCY_DESIGN.md
+  IMPLEMENTATION_EXECUTION_PATH_V1.md
+  BACKEND_TEST_STRATEGY_V1.md
 ```
 
 ## 4. 原型优先开发顺序
