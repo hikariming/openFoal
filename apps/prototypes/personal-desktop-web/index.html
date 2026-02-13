@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenFoal Personal Desktop Prototype</title>
+  <style>
+    :root {
+      --bg: #f1f4f7;
+      --panel: #fff;
+      --ink: #111827;
+      --muted: #5b6475;
+      --line: #d7dde6;
+      --brand: #0f766e;
+      --accent: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Source Han Sans SC", "PingFang SC", "Noto Sans SC", sans-serif;
+      background: linear-gradient(150deg, #ecfdf5 0%, #eff6ff 45%, var(--bg) 100%);
+      color: var(--ink);
+    }
+    .layout {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 240px 1fr 320px;
+      gap: 12px;
+      padding: 12px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+      overflow: hidden;
+    }
+    .head { padding: 12px 14px; border-bottom: 1px solid var(--line); font-weight: 700; }
+    .body { padding: 12px 14px; }
+    .menu a {
+      display: block;
+      text-decoration: none;
+      color: var(--ink);
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 9px 10px;
+      margin-bottom: 8px;
+    }
+    .menu a.active { border-color: #b7dfd9; background: #e8faf6; color: var(--brand); }
+    .chat-list .bubble {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .bubble.user { background: #f8fafc; }
+    .bubble.ai { background: #eefcf9; border-color: #cceee6; }
+    .input {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    input {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 14px;
+      width: 100%;
+    }
+    button {
+      border: 1px solid #0f766e;
+      background: #0f766e;
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+    .kv { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px dashed #e1e7f0; font-size: 13px; }
+    .kv:last-child { border-bottom: 0; }
+    .tag { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #e2e8f0; }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="panel">
+      <div class="head">OpenFoal Desktop</div>
+      <div class="body menu">
+        <a class="active" href="#">主对话</a>
+        <a href="#">记忆 Memory</a>
+        <a href="#">工具 Tools</a>
+        <a href="#">会话 Sessions</a>
+        <a href="#">设置 Settings</a>
+        <hr style="border:0;border-top:1px solid #e5e9f1;margin:12px 0;"/>
+        <div style="font-size:13px;color:#5b6475;">Profile: personal</div>
+        <div style="font-size:13px;color:#5b6475;">Workspace: ~/openfoal</div>
+      </div>
+    </aside>
+
+    <main class="panel">
+      <div class="head">主对话（绑定 `agent.run` + `agent.delta`）</div>
+      <div class="body chat-list">
+        <div class="bubble user">帮我总结今天的待办，并记到 memory。</div>
+        <div class="bubble ai">我会先提取关键事项，再写入 `memory/YYYY-MM-DD.md`，完成后给你摘要。</div>
+        <div class="bubble ai">工具执行：<span class="tag">file.write</span> `memory/2026-02-12.md`</div>
+
+        <div class="input">
+          <input placeholder="输入消息，支持 /new /reset /compact" />
+          <button>发送</button>
+        </div>
+      </div>
+    </main>
+
+    <aside class="panel">
+      <div class="head">上下文与记忆</div>
+      <div class="body">
+        <div class="kv"><span>Model</span><strong>claude-sonnet</strong></div>
+        <div class="kv"><span>Thinking</span><strong>medium</strong></div>
+        <div class="kv"><span>Context Usage</span><strong>68%</strong></div>
+        <div class="kv"><span>Compaction</span><strong>2 次</strong></div>
+        <div class="kv"><span>Memory Flush</span><strong>已启用</strong></div>
+
+        <h3 style="font-size:14px;margin:14px 0 8px;">Memory Files</h3>
+        <div style="font-size:13px;line-height:1.5;color:var(--accent);">
+          - `MEMORY.md`（长期偏好）<br/>
+          - `memory/2026-02-12.md`（今日日志）
+        </div>
+
+        <h3 style="font-size:14px;margin:14px 0 8px;">工具策略</h3>
+        <div style="font-size:13px;line-height:1.5;color:var(--accent);">
+          `bash.exec`: approval-required<br/>
+          `file.*`: allow<br/>
+          `http.request`: allowlist-only
+        </div>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>

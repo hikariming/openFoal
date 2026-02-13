@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenFoal",
+  "version": "0.1.0",
+  "identifier": "ai.openfoal.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev --prefix ..",
+    "beforeBuildCommand": "npm run build --prefix ..",
+    "devUrl": "http://localhost:5174",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "OpenFoal Desktop",
+        "width": 1320,
+        "height": 860,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}

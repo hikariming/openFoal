@@ -1,0 +1,11 @@
+{
+  "name": "openfoal",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @openfoal/web-console dev",
+    "dev:desktop": "pnpm --filter @openfoal/desktop dev",
+    "build:web": "pnpm --filter @openfoal/web-console build",
+    "build:desktop": "pnpm --filter @openfoal/desktop build"
+  }
+}

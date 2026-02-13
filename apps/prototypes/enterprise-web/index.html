@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenFoal Enterprise Prototype</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --ink: #0f172a;
+      --muted: #5b6475;
+      --line: #d8dee8;
+      --brand: #0b6bcb;
+      --accent: #0b9d84;
+      --warn: #d9480f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at 10% -10%, #dff0ff 0%, var(--bg) 45%);
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      min-height: 100vh;
+    }
+    .side {
+      border-right: 1px solid var(--line);
+      background: #ffffffcc;
+      backdrop-filter: blur(4px);
+      padding: 20px;
+    }
+    .logo { font-weight: 700; font-size: 20px; margin-bottom: 20px; }
+    .nav a {
+      display: block;
+      padding: 10px 12px;
+      border-radius: 10px;
+      color: var(--ink);
+      text-decoration: none;
+      margin-bottom: 8px;
+      border: 1px solid transparent;
+    }
+    .nav a.active { background: #eaf4ff; border-color: #c7dcf4; color: var(--brand); }
+    .main { padding: 20px; }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .pill { background: #e8f7f3; color: #0a6e5d; padding: 6px 10px; border-radius: 999px; font-size: 12px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 12px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 3px 10px rgba(16, 24, 40, 0.04);
+    }
+    .kpi { grid-column: span 3; }
+    .sessions { grid-column: span 7; }
+    .approvals { grid-column: span 5; }
+    .policy { grid-column: span 6; }
+    .audit { grid-column: span 6; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .list { margin: 0; padding: 0; list-style: none; }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border-top: 1px dashed #dfe5ee;
+      padding: 10px 0;
+      font-size: 13px;
+    }
+    .row:first-child { border-top: 0; padding-top: 0; }
+    .tag { padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .tag-warn { background: #fff0e8; color: var(--warn); }
+    .tag-ok { background: #ebf8f1; color: var(--accent); }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .side { border-right: 0; border-bottom: 1px solid var(--line); }
+      .kpi, .sessions, .approvals, .policy, .audit { grid-column: span 12; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="logo">OpenFoal Console</div>
+      <nav class="nav">
+        <a class="active" href="#">总览 Dashboard</a>
+        <a href="#">会话 Sessions</a>
+        <a href="#">策略 Policies</a>
+        <a href="#">审批 Approvals</a>
+        <a href="#">审计 Audit</a>
+        <a href="#">模型 Models</a>
+        <a href="#">工具 Tools</a>
+      </nav>
+      <p class="muted">Workspace: `w-enterprise`<br/>Agent: `support-main`</p>
+    </aside>
+
+    <main class="main">
+      <div class="top">
+        <div>
+          <h1 style="margin: 0; font-size: 22px;">企业控制台原型</h1>
+          <div class="muted">目标：先定信息架构，再绑定 Gateway API。</div>
+        </div>
+        <span class="pill">Prototype v0.1</span>
+      </div>
+
+      <section class="grid">
+        <article class="card kpi"><h2>今日请求</h2><div style="font-size: 28px; font-weight: 700;">12,430</div><div class="muted">QPS / 渠道趋势</div></article>
+        <article class="card kpi"><h2>错误率</h2><div style="font-size: 28px; font-weight: 700;">0.82%</div><div class="muted">按 connector 细分</div></article>
+        <article class="card kpi"><h2>模型成本</h2><div style="font-size: 28px; font-weight: 700;">$142</div><div class="muted">tenant 日预算 64%</div></article>
+        <article class="card kpi"><h2>待审批</h2><div style="font-size: 28px; font-weight: 700;">9</div><div class="muted">高风险工具调用</div></article>
+
+        <article class="card sessions">
+          <h2>活跃会话（绑定 `sessions.list`）</h2>
+          <ul class="list">
+            <li class="row"><span>slack / #ops / thread-4432</span><span class="tag tag-ok">healthy</span></li>
+            <li class="row"><span>telegram / dm / u-2931</span><span class="tag tag-warn">needs review</span></li>
+            <li class="row"><span>discord / channel-23</span><span class="tag tag-ok">streaming</span></li>
+            <li class="row"><span>web / console session</span><span class="tag tag-ok">active</span></li>
+          </ul>
+        </article>
+
+        <article class="card approvals">
+          <h2>审批中心（绑定 `approval.queue`）</h2>
+          <ul class="list">
+            <li class="row"><span>bash.exec: kubectl apply ...</span><span>owner 审批中</span></li>
+            <li class="row"><span>http.request: 外网域名</span><span>security 审批中</span></li>
+            <li class="row"><span>file.write: /secrets/*</span><span>blocked</span></li>
+          </ul>
+        </article>
+
+        <article class="card policy">
+          <h2>策略中心（绑定 policy API）</h2>
+          <ul class="list">
+            <li class="row"><span>DM 策略</span><span>pairing</span></li>
+            <li class="row"><span>Tool 默认策略</span><span>deny</span></li>
+            <li class="row"><span>高风险工具</span><span>approval-required</span></li>
+            <li class="row"><span>模型 fallback</span><span>enabled</span></li>
+          </ul>
+        </article>
+
+        <article class="card audit">
+          <h2>审计日志（绑定 `audit.query`）</h2>
+          <ul class="list">
+            <li class="row"><span>23:10 model.policy.update</span><span>admin@tenant</span></li>
+            <li class="row"><span>23:09 tool.exec.approved</span><span>owner@tenant</span></li>
+            <li class="row"><span>23:07 session.reset.manual</span><span>developer@workspace</span></li>
+            <li class="row"><span>23:04 memory.flush.run</span><span>system</span></li>
+          </ul>
+        </article>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
