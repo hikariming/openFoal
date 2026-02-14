@@ -27,7 +27,7 @@ OpenFoal 是“基于 `pi` 的产品化扩展层”，目标是同时满足：
 - Gateway（鉴权、路由、会话、策略、事件）
 - 渠道适配层（Slack/Telegram/Discord/...）
 - 租户治理（RBAC、预算、审计）
-- 执行隔离（sandbox、approval、network policy）
+- 执行隔离（sandbox、policy-gate、network policy）
 
 ## 3. 分层与模块
 
@@ -78,7 +78,7 @@ Gateway 是 OpenFoal 控制平面。
 - `auth`: API token/JWT/设备身份
 - `router`: `(tenant, workspace, channel, peer, thread) -> (agent, session)`
 - `session`: 会话创建、会话锁、并发防重入
-- `policy`: DM策略、群组策略、工具策略、审批策略
+- `policy`: DM策略、群组策略、工具策略、策略门禁策略
 - `ratelimit`: tenant/user/channel 维度限流
 - `eventbus`: 向 UI/CLI/observability 推送事件
 
@@ -159,7 +159,7 @@ MVP 工具：
 
 策略控制：
 
-- `mode=deny|allow|approval-required`
+- `mode=deny|allow|allow`
 - sandbox profile（none/local/container/microvm）
 - network egress allowlist
 
@@ -337,7 +337,7 @@ interface ModelPolicy {
 
 - 修改模型策略
 - 启用高风险工具
-- 审批 exec 调用
+- 策略门禁 exec 调用
 - 查看审计日志与导出
 
 ## 5. 安全设计
@@ -347,7 +347,7 @@ interface ModelPolicy {
 1. DM 默认 `pairing/allowlist`，禁止默认开放
 2. 工具默认 `deny`，按 agent 显式启用
 3. `bash.exec` 默认 sandbox
-4. 高风险调用可切换 `approval-required`
+4. 高风险调用可切换 `allow`
 5. 全链路审计（输入、推理、工具、配置）
 
 Prompt Injection 防护策略：
@@ -365,7 +365,7 @@ Metrics：
 - Gateway: QPS、P95/P99、5xx、限流命中率
 - Core: turn latency、平均工具调用数、流中断率
 - Models: tokens、cost、超时率、fallback率
-- Security: pairing请求、审批请求、拒绝数
+- Security: pairing请求、策略门禁请求、拒绝数
 
 Tracing：
 

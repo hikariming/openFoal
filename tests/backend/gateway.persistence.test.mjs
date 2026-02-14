@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 
 import { createConnectionState, createGatewayRouter } from "../../apps/gateway/dist/index.js";
 import {
-  SqliteApprovalRepository,
   SqliteIdempotencyRepository,
   SqliteMetricsRepository,
   SqlitePolicyRepository,
@@ -33,7 +32,6 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
       idempotencyRepo: new SqliteIdempotencyRepository(dbPath),
       transcriptRepo: new SqliteTranscriptRepository(dbPath),
       policyRepo: new SqlitePolicyRepository(dbPath),
-      approvalRepo: new SqliteApprovalRepository(dbPath),
       metricsRepo: new SqliteMetricsRepository(dbPath)
     });
     const stateA = createConnectionState();
@@ -64,7 +62,6 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
       idempotencyRepo: new SqliteIdempotencyRepository(dbPath),
       transcriptRepo: new SqliteTranscriptRepository(dbPath),
       policyRepo: new SqlitePolicyRepository(dbPath),
-      approvalRepo: new SqliteApprovalRepository(dbPath),
       metricsRepo: new SqliteMetricsRepository(dbPath)
     });
     const stateB = createConnectionState();
@@ -103,20 +100,6 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
     assert.equal(typeof persistedSession?.compactionCount, "number");
     assert.equal(typeof persistedSession?.memoryFlushState, "string");
 
-    const approvalRepoA = new SqliteApprovalRepository(dbPath);
-    const createdApproval = await approvalRepoA.create({
-      sessionId: "s_default",
-      runId: "run_persist_approval",
-      toolName: "bash.exec",
-      toolCallId: "tc_persist_1",
-      argsFingerprint: "{\"cmd\":\"echo\"}"
-    });
-    const resolvedApproval = await approvalRepoA.resolve(createdApproval.approvalId, "approve", "persist check");
-    assert.equal(resolvedApproval?.status, "approved");
-
-    const approvalRepoB = new SqliteApprovalRepository(dbPath);
-    const fetchedApproval = await approvalRepoB.get(createdApproval.approvalId);
-    assert.equal(fetchedApproval?.status, "approved");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

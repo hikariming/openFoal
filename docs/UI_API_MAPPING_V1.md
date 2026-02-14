@@ -42,7 +42,7 @@
 |---|---|---|---|
 | 活跃会话 | `sessions.list` | `id`, `title`, `updatedAt`, `runtimeMode`, `syncState` | 取代静态数组 |
 | 策略概览 | `policy.get` | `scopeKey`, `toolDefault`, `highRisk`, `bashMode`, `tools`, `version`, `updatedAt` | 面板展示 |
-| 审批中心 | `approval.queue` | `approvalId`, `runId`, `toolCallId`, `toolName`, `status`, `decision`, `reason` | pending 队列 |
+| 策略门禁中心 | `（已移除）` | `runId`, `runId`, `toolCallId`, `toolName`, `status`, `decision`, `reason` | pending 队列 |
 | 审计日志 | `audit.query` | `action`, `actor`, `resource`, `createdAt` | 列表与筛选 |
 | 运行健康 | `metrics.summary` | `runsTotal`, `runsFailed`, `toolCallsTotal`, `toolFailures`, `p95LatencyMs` | 已接真实聚合 |
 
@@ -51,7 +51,7 @@
 | UI 操作 | API | 核心字段 | 备注 |
 |---|---|---|---|
 | 修改工具策略 | `policy.update` | `patch.toolDefault/highRisk/bashMode/tools`, `idempotencyKey` | side-effect |
-| 处理审批 | `approval.resolve` | `approvalId`, `decision`, `reason`, `idempotencyKey` | 审批通过/拒绝 |
+| 处理策略门禁 | `（已移除）` | `runId`, `decision`, `reason`, `idempotencyKey` | 策略门禁通过/拒绝 |
 
 ## 字段级绑定
 
@@ -73,19 +73,19 @@ type Session = {
 };
 ```
 
-### 工具执行与审批字段（最小集）
+### 工具执行与策略门禁字段（最小集）
 
 ```ts
 type ToolRun = {
   runId: string;
   toolName: string;
-  status: "pending" | "running" | "success" | "failed" | "waiting_approval";
+  status: "pending" | "running" | "success" | "failed" | "pending";
   durationMs?: number;
   error?: string;
 };
 
 type ApprovalItem = {
-  approvalId: string;
+  runId: string;
   runId: string;
   toolName: string;
   status: "pending" | "approved" | "rejected";
@@ -108,8 +108,8 @@ Desktop 必订阅：
 Web Console 必订阅：
 
 1. `session.updated`
-2. `approval.required`
-3. `approval.resolved`
+2. `agent.failed`
+3. `（已移除）d`
 4. `agent.failed`（用于运维提示）
 
 ## 空态与错误态
@@ -118,12 +118,12 @@ Web Console 必订阅：
 
 1. 无会话：显示“创建新会话”空态，并禁用运行模式切换按钮。
 2. 模式切换冲突：显示 `effectiveAt=next_turn` 提示，不中断当前 run。
-3. 审批阻塞：显示“等待审批”状态，提供跳转控制台入口。
+3. 策略门禁阻塞：显示“等待策略门禁”状态，提供跳转控制台入口。
 4. 执行失败：显示结构化错误码与 `trace_id`。
 
 ### Web Console
 
-1. 审批队列为空：显示空队列提示，不显示错误红条。
+1. 策略门禁队列为空：显示空队列提示，不显示错误红条。
 2. 审计为空：显示筛选条件建议与时间范围提示。
 3. API 超时：使用可重试提示，保留上一次成功快照。
 4. 未授权：统一跳转登录或展示 token 配置引导。

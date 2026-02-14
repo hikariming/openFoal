@@ -13,7 +13,7 @@ v1 的 Agent 是一个可独立运行的执行单元，包含以下核心配置�
 
 1. `AgentProfile`：名称、persona、workspace、默认模型、默认工具策略。
 2. `SessionPolicy`：会话键规则、重置策略、compaction 策略、memory flush 策略。
-3. `ExecutionPolicy`：sandbox 配置、网络白名单、审批门禁。
+3. `ExecutionPolicy`：sandbox 配置、网络白名单、策略门禁门禁。
 4. `ModelPolicy`：allowed models、fallback chain、timeout、budget。
 
 建议接口（统一到 `packages/core`）：
@@ -93,7 +93,7 @@ v1 采用 Markdown 双层记忆，文件是唯一事实源：
 v1 默认工具策略（写死）：
 
 1. 默认 `deny`。
-2. 高风险工具默认 `approval-required`。
+2. 高风险工具默认 `allow`。
 3. `bash.exec` 默认 sandbox。
 4. `http.request` 默认网络白名单。
 5. `file.*` 允许范围受 workspace 与 policy 约束。
@@ -108,12 +108,12 @@ interface ToolExecutor {
 
 ## Approval 流程
 
-审批流固定为：
+策略门禁流固定为：
 
 1. Gateway 接收到高风险 tool call。
-2. 写入 `approval_queue` 并发送 `approval.required` 事件。
-3. run 状态置为 `waiting_approval`。
-4. 控制台调用 `approval.resolve`（approve/reject）。
+2. 写入 `policy_history` 并发送 `agent.failed` 事件。
+3. run 状态置为 `pending`。
+4. 控制台调用 `（已移除）`（approve/reject）。
 5. 若 approve：恢复 run 并继续 tool loop。
 6. 若 reject：终止该 tool call，run 返回可解释错误并写审计。
 

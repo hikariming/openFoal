@@ -460,6 +460,15 @@ body {
   gap: 12px;
 }
 
+.runtime-settings-tabs .semi-tabs-bar {
+  margin-bottom: 10px;
+}
+
+.runtime-settings-tabs .semi-tabs-pane {
+  display: grid;
+  gap: 12px;
+}
+
 .llm-config-wrap {
   margin-top: 6px;
   display: grid;
@@ -521,6 +530,29 @@ body {
 .runtime-mode-desc {
   font-size: 13px;
   line-height: 1.4;
+}
+
+.memory-settings-wrap {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-target-row {
+  flex-wrap: wrap;
+}
+
+.memory-date-input {
+  width: 140px;
+}
+
+.memory-lines-input {
+  width: 110px;
+}
+
+.memory-readonly textarea {
+  font-family: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .desktop-main-wrap {
@@ -588,7 +620,12 @@ body {
   gap: 20px;
 }
 
-.gateway-status-bar {
+.runtime-status-pane {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-status-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;

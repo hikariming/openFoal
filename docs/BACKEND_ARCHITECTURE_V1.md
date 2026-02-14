@@ -26,7 +26,7 @@ Desktop / WebChat / Web Console
         |
         v
 Gateway (WS + HTTP)
-  - auth / router / session / policy / approval / eventbus
+  - auth / router / session / policy / policy-gate / eventbus
         |
         v
 Core Runtime (pi wrapper)
@@ -94,11 +94,11 @@ Gateway 模块固定拆分如下：
 1. `auth`：`connect` 握手鉴权、token 校验、客户端身份识别。
 2. `router`：把 `(workspace, agent, peer, thread)` 路由到会话与执行上下文。
 3. `session`：会话创建/读取/锁定/重置、防并发重入。
-4. `policy`：模型策略、工具策略、审批策略与风险分级。
-5. `approval`：高风险工具待审队列、审批结果回写与恢复执行。
+4. `policy`：模型策略、工具策略、策略门禁策略与风险分级。
+5. `policy-gate`：高风险工具待审队列、策略门禁结果回写与恢复执行。
 6. `eventbus`：向 Desktop/WebChat/Web Console 广播事件流。
 7. `ratelimit`：按用户、会话、接口维度限流。
-8. `audit`：全链路审计记录（请求、策略变更、工具执行、审批操作）。
+8. `audit`：全链路审计记录（请求、策略变更、工具执行、策略门禁操作）。
 
 ## 存储设计
 
@@ -126,7 +126,7 @@ Gateway 模块固定拆分如下：
 ## 安全基线
 
 1. 默认拒绝：工具默认 `deny`，按 agent 显式放行。
-2. 高风险工具默认 `approval-required`。
+2. 高风险工具默认 `allow`。
 3. `bash.exec` 默认 sandbox，禁止无约束主机执行。
 4. 网络访问默认 allowlist，拒绝任意外联。
 5. 所有 side-effect 请求必须带 `idempotencyKey`。
@@ -140,7 +140,7 @@ Gateway 模块固定拆分如下：
 2. Core：run latency、平均工具调用数、中断率。
 3. Executor：成功率、超时率、容器启动耗时。
 4. Model：tokens、cost、fallback 率、超时率。
-5. Approval：待审数量、平均审批时延、拒绝率。
+5. Approval：待审数量、平均策略门禁时延、拒绝率。
 
 链路追踪：
 

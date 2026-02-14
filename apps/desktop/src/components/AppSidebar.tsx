@@ -1,4 +1,4 @@
-import { Avatar, Button, Input, Layout, Modal, Nav, Popover, Select, Space, Tag, Typography } from "@douyinfe/semi-ui";
+import { Avatar, Button, Input, Layout, Modal, Nav, Popover, Select, Space, Tabs, Tag, TextArea, Typography } from "@douyinfe/semi-ui";
 import {
   IconBolt,
   IconChevronDown,
@@ -35,7 +35,8 @@ import {
 } from "../store/app-store";
 
 type SideMenu = "new" | "skills" | "automations";
-type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "subscription" | "referral" | "experimental";
+type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "memory" | "subscription" | "referral" | "experimental";
+type RuntimeSettingsTab = "model" | "status";
 
 export function AppSidebar() {
   const navigate = useNavigate();
@@ -47,6 +48,19 @@ export function AppSidebar() {
   const [runtimePending, setRuntimePending] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
+  const [runtimeStatusError, setRuntimeStatusError] = useState("");
+  const [runtimeTab, setRuntimeTab] = useState<RuntimeSettingsTab>("model");
+  const [gatewayReady, setGatewayReady] = useState(false);
+  const [memoryTarget, setMemoryTarget] = useState<"global" | "daily">("global");
+  const [memoryDate, setMemoryDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [memoryLines, setMemoryLines] = useState("200");
+  const [memoryText, setMemoryText] = useState("");
+  const [memoryInfo, setMemoryInfo] = useState("");
+  const [memoryAppendDraft, setMemoryAppendDraft] = useState("");
+  const [memoryIncludeLongTerm, setMemoryIncludeLongTerm] = useState(false);
+  const [memoryPending, setMemoryPending] = useState(false);
+  const [memoryError, setMemoryError] = useState("");
+  const [memoryNotice, setMemoryNotice] = useState("");
   const [llmSavedNotice, setLlmSavedNotice] = useState("");
   const { sessions, activeSessionId, setSessions, upsertSession, setActiveSession, setRuntimeMode, llmConfig, setLlmConfig } =
     useAppStore();
@@ -65,6 +79,7 @@ export function AppSidebar() {
     { key: "account", label: t("sidebar.account"), icon: <IconUserStroked /> },
     { key: "capyMail", label: t("sidebar.capyMail"), icon: <IconMailStroked /> },
     { key: "runtimeModel", label: t("sidebar.runtimeModel"), icon: <IconCloudStroked /> },
+    { key: "memory", label: t("sidebar.memory"), icon: <IconBolt /> },
     { key: "subscription", label: t("sidebar.subscription"), icon: <IconCreditCardStroked /> },
     { key: "referral", label: t("sidebar.referral"), icon: <IconLink /> },
     { key: "experimental", label: t("sidebar.experimental"), icon: <IconGiftStroked /> }
@@ -87,11 +102,25 @@ export function AppSidebar() {
   const editingLlmProfile = llmDraft.profiles.find((item) => item.id === editingLlmProfileId) ?? activeLlmProfile;
   const baseUrlOptions = baseUrlOptionsByProvider[editingLlmProfile?.provider ?? ""] ?? [];
   const isLlmDirty = !sameLlmConfig(llmDraft, llmConfig);
+  const activeSession = useMemo(() => sessions.find((item) => item.id === activeSessionId), [activeSessionId, sessions]);
 
   useEffect(() => {
     setLlmDraft(llmConfig);
     setEditingLlmProfileId(llmConfig.activeProfileId);
   }, [llmConfig, settingsModalVisible]);
+
+  useEffect(() => {
+    if (activeSettingsMenu !== "runtimeModel") {
+      setRuntimeTab("model");
+    }
+  }, [activeSettingsMenu]);
+
+  useEffect(() => {
+    if (!settingsModalVisible || activeSettingsMenu !== "memory") {
+      return;
+    }
+    void refreshMemory();
+  }, [activeSettingsMenu, settingsModalVisible, memoryTarget, memoryDate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,6 +145,38 @@ export function AppSidebar() {
       cancelled = true;
     };
   }, [setSessions]);
+
+  useEffect(() => {
+    if (!settingsModalVisible || activeSettingsMenu !== "runtimeModel" || runtimeTab !== "status") {
+      return;
+    }
+    let cancelled = false;
+    setRuntimeStatusError("");
+    void (async () => {
+      try {
+        const client = getGatewayClient();
+        await client.ensureConnected();
+        if (!cancelled) {
+          setGatewayReady(true);
+        }
+        if (!activeSessionId) {
+          return;
+        }
+        const refreshed = await client.getSession(activeSessionId);
+        if (!cancelled && refreshed) {
+          upsertSession(mapGatewaySessionToStoreSession(refreshed));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setGatewayReady(false);
+          setRuntimeStatusError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, activeSettingsMenu, runtimeTab, settingsModalVisible, upsertSession]);
 
   const applyRuntimeMode = async (nextMode: RuntimeMode): Promise<void> => {
     if (!activeSessionId || nextMode === runtimeMode || runtimePending) {
@@ -147,6 +208,82 @@ export function AppSidebar() {
       setRuntimeError(message);
     } finally {
       setRuntimePending(false);
+    }
+  };
+
+  const buildMemoryPath = (): string => {
+    if (memoryTarget === "daily") {
+      return `memory/${memoryDate || new Date().toISOString().slice(0, 10)}.md`;
+    }
+    return "MEMORY.md";
+  };
+
+  const refreshMemory = async (): Promise<void> => {
+    setMemoryPending(true);
+    setMemoryError("");
+    setMemoryNotice("");
+    try {
+      const client = getGatewayClient();
+      const lines = Number(memoryLines);
+      const result = await client.memoryGet({
+        path: buildMemoryPath(),
+        from: 1,
+        ...(Number.isFinite(lines) && lines > 0 ? { lines: Math.floor(lines) } : {})
+      });
+      setMemoryText(result.text);
+      setMemoryInfo(`${result.path} · total ${result.totalLines} lines`);
+    } catch (error) {
+      setMemoryText("");
+      setMemoryInfo("");
+      setMemoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemoryPending(false);
+    }
+  };
+
+  const appendMemory = async (): Promise<void> => {
+    const content = memoryAppendDraft.trim();
+    if (!content) {
+      return;
+    }
+
+    setMemoryPending(true);
+    setMemoryError("");
+    setMemoryNotice("");
+    try {
+      const client = getGatewayClient();
+      const result = await client.memoryAppendDaily({
+        content,
+        date: memoryDate,
+        includeLongTerm: memoryIncludeLongTerm
+      });
+      setMemoryAppendDraft("");
+      setMemoryNotice(`${t("sidebar.memoryAppendSuccess")} ${result.path}`);
+      await refreshMemory();
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemoryPending(false);
+    }
+  };
+
+  const archiveMemory = async (): Promise<void> => {
+    setMemoryPending(true);
+    setMemoryError("");
+    setMemoryNotice("");
+    try {
+      const client = getGatewayClient();
+      const result = await client.memoryArchive({
+        date: memoryDate,
+        includeLongTerm: true,
+        clearDaily: true
+      });
+      setMemoryNotice(`${t("sidebar.memoryArchiveSuccess")} ${result.date}`);
+      await refreshMemory();
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemoryPending(false);
     }
   };
 
@@ -457,199 +594,322 @@ export function AppSidebar() {
                 </>
               ) : activeSettingsMenu === "runtimeModel" ? (
                 <div className="runtime-mode-wrap">
-                  <Typography.Text className="settings-label">{t("sidebar.runtimeModeLabel")}</Typography.Text>
-                  <div className="runtime-mode-grid">
-                    <button
-                      type="button"
-                      className={runtimeMode === "local" ? "runtime-mode-card active" : "runtime-mode-card"}
-                      disabled={!activeSessionId}
-                      onClick={() => {
-                        void applyRuntimeMode("local");
-                      }}
-                    >
-                      <div className="runtime-mode-head">
-                        <IconDesktop />
-                        <Typography.Text className="runtime-mode-title">{t("sidebar.runtimeLocal")}</Typography.Text>
+                  <Tabs
+                    activeKey={runtimeTab}
+                    className="runtime-settings-tabs"
+                    onChange={(itemKey) => {
+                      if (itemKey === "model" || itemKey === "status") {
+                        setRuntimeTab(itemKey);
+                      }
+                    }}
+                  >
+                    <Tabs.TabPane tab={t("sidebar.runtimeTabModel")} itemKey="model">
+                      <Typography.Text className="settings-label">{t("sidebar.runtimeModeLabel")}</Typography.Text>
+                      <div className="runtime-mode-grid">
+                        <button
+                          type="button"
+                          className={runtimeMode === "local" ? "runtime-mode-card active" : "runtime-mode-card"}
+                          disabled={!activeSessionId}
+                          onClick={() => {
+                            void applyRuntimeMode("local");
+                          }}
+                        >
+                          <div className="runtime-mode-head">
+                            <IconDesktop />
+                            <Typography.Text className="runtime-mode-title">{t("sidebar.runtimeLocal")}</Typography.Text>
+                          </div>
+                          <Typography.Text type="tertiary" className="runtime-mode-desc">
+                            {t("sidebar.runtimeLocalDesc")}
+                          </Typography.Text>
+                        </button>
+                        <button
+                          type="button"
+                          className={runtimeMode === "cloud" ? "runtime-mode-card active" : "runtime-mode-card"}
+                          disabled={!activeSessionId}
+                          onClick={() => {
+                            void applyRuntimeMode("cloud");
+                          }}
+                        >
+                          <div className="runtime-mode-head">
+                            <IconCloudStroked />
+                            <Typography.Text className="runtime-mode-title">{t("sidebar.runtimeCloud")}</Typography.Text>
+                          </div>
+                          <Typography.Text type="tertiary" className="runtime-mode-desc">
+                            {t("sidebar.runtimeCloudDesc")}
+                          </Typography.Text>
+                        </button>
                       </div>
-                      <Typography.Text type="tertiary" className="runtime-mode-desc">
-                        {t("sidebar.runtimeLocalDesc")}
-                      </Typography.Text>
-                    </button>
-                    <button
-                      type="button"
-                      className={runtimeMode === "cloud" ? "runtime-mode-card active" : "runtime-mode-card"}
-                      disabled={!activeSessionId}
-                      onClick={() => {
-                        void applyRuntimeMode("cloud");
-                      }}
-                    >
-                      <div className="runtime-mode-head">
-                        <IconCloudStroked />
-                        <Typography.Text className="runtime-mode-title">{t("sidebar.runtimeCloud")}</Typography.Text>
+                      {runtimePending ? <Typography.Text type="tertiary">{t("sidebar.runtimeSyncing")}</Typography.Text> : null}
+                      {runtimeNotice ? <Typography.Text type="success">{runtimeNotice}</Typography.Text> : null}
+                      {runtimeError ? (
+                        <Typography.Text type="danger">
+                          {t("sidebar.runtimeSyncFailed")}
+                          {runtimeError}
+                        </Typography.Text>
+                      ) : null}
+
+                      <div className="llm-config-wrap">
+                        <Typography.Text className="settings-label">{t("sidebar.llmProfileActive")}</Typography.Text>
+                        <Select
+                          value={llmDraft.activeProfileId}
+                          optionList={llmDraft.profiles.map((profile) => ({
+                            label: profile.name,
+                            value: profile.id
+                          }))}
+                          placeholder={t("sidebar.llmProfileActive")}
+                          onChange={(value) => {
+                            if (typeof value !== "string") {
+                              return;
+                            }
+                            setLlmDraft((prev) => ({
+                              ...prev,
+                              activeProfileId: value
+                            }));
+                            setEditingLlmProfileId(value);
+                          }}
+                        />
+                        <div className="llm-profile-actions">
+                          <Button theme="light" onClick={addLlmProfile}>
+                            {t("sidebar.llmAddProfile")}
+                          </Button>
+                          <Button
+                            theme="borderless"
+                            type="danger"
+                            disabled={llmDraft.profiles.length <= 1}
+                            onClick={removeEditingProfile}
+                          >
+                            {t("sidebar.llmDeleteProfile")}
+                          </Button>
+                        </div>
+                        <Typography.Text className="settings-label">{t("sidebar.llmProfileEdit")}</Typography.Text>
+                        <Select
+                          value={editingLlmProfile?.id}
+                          optionList={llmDraft.profiles.map((profile) => ({
+                            label: profile.name,
+                            value: profile.id
+                          }))}
+                          placeholder={t("sidebar.llmProfileEdit")}
+                          onChange={(value) => {
+                            if (typeof value !== "string") {
+                              return;
+                            }
+                            setEditingLlmProfileId(value);
+                          }}
+                        />
+                        <Typography.Text className="settings-label">{t("sidebar.llmProfileName")}</Typography.Text>
+                        <Input
+                          value={editingLlmProfile?.name ?? ""}
+                          placeholder="Kimi · k2p5"
+                          onChange={(value) => {
+                            updateEditingProfile({
+                              name: value
+                            });
+                          }}
+                        />
+                        <Typography.Text className="settings-label">{t("sidebar.llmModelRef")}</Typography.Text>
+                        <Input
+                          value={editingLlmProfile?.modelRef ?? ""}
+                          placeholder="kimi-default"
+                          onChange={(value) => {
+                            updateEditingProfile({
+                              modelRef: value
+                            });
+                          }}
+                        />
+                        <Typography.Text className="settings-label">{t("sidebar.llmProvider")}</Typography.Text>
+                        <Select
+                          value={editingLlmProfile?.provider}
+                          optionList={providerOptions}
+                          placeholder="Select provider"
+                          onChange={(value) => {
+                            if (typeof value !== "string") {
+                              return;
+                            }
+                            updateEditingProfile({
+                              provider: value
+                            });
+                          }}
+                        />
+                        <Typography.Text className="settings-label">{t("sidebar.llmModelId")}</Typography.Text>
+                        <Input
+                          value={editingLlmProfile?.modelId ?? ""}
+                          placeholder="k2p5"
+                          onChange={(value) => {
+                            updateEditingProfile({
+                              modelId: value
+                            });
+                          }}
+                        />
+                        <Typography.Text className="settings-label">{t("sidebar.llmBasePreset")}</Typography.Text>
+                        <Select
+                          optionList={baseUrlOptions}
+                          placeholder={t("sidebar.llmBasePreset")}
+                          value={
+                            baseUrlOptions.some((item) => item.value === (editingLlmProfile?.baseUrl ?? ""))
+                              ? editingLlmProfile?.baseUrl
+                              : undefined
+                          }
+                          onChange={(value) => {
+                            if (typeof value !== "string") {
+                              return;
+                            }
+                            updateEditingProfile({
+                              baseUrl: value
+                            });
+                          }}
+                        />
+                        <Typography.Text className="settings-label">{t("sidebar.llmBaseUrl")}</Typography.Text>
+                        <Input
+                          value={editingLlmProfile?.baseUrl ?? ""}
+                          placeholder="https://api.example.com/v1"
+                          onChange={(value) => {
+                            updateEditingProfile({
+                              baseUrl: value
+                            });
+                          }}
+                        />
+                        <Typography.Text className="settings-label">{t("sidebar.llmApiKey")}</Typography.Text>
+                        <Input
+                          value={editingLlmProfile?.apiKey ?? ""}
+                          mode="password"
+                          placeholder="sk-***"
+                          onChange={(value) => {
+                            updateEditingProfile({
+                              apiKey: value
+                            });
+                          }}
+                        />
+                        <div className="llm-config-actions">
+                          <Button theme="solid" onClick={saveLlm} disabled={!isLlmDirty}>
+                            {t("sidebar.llmSave")}
+                          </Button>
+                          <Button
+                            theme="light"
+                            disabled={!isLlmDirty}
+                            onClick={() => {
+                              setLlmDraft(llmConfig);
+                              setEditingLlmProfileId(llmConfig.activeProfileId);
+                            }}
+                          >
+                            {t("sidebar.llmReset")}
+                          </Button>
+                        </div>
+                        {llmSavedNotice ? <Typography.Text type="success">{llmSavedNotice}</Typography.Text> : null}
+                        <Typography.Text type="tertiary">{t("sidebar.llmConfigHint")}</Typography.Text>
                       </div>
-                      <Typography.Text type="tertiary" className="runtime-mode-desc">
-                        {t("sidebar.runtimeCloudDesc")}
-                      </Typography.Text>
-                    </button>
-                  </div>
-                  {runtimePending ? <Typography.Text type="tertiary">{t("sidebar.runtimeSyncing")}</Typography.Text> : null}
-                  {runtimeNotice ? <Typography.Text type="success">{runtimeNotice}</Typography.Text> : null}
-                  {runtimeError ? (
+                    </Tabs.TabPane>
+                    <Tabs.TabPane tab={t("sidebar.runtimeTabStatus")} itemKey="status">
+                      <div className="runtime-status-pane">
+                        <div className="runtime-status-bar">
+                          <Space spacing={16}>
+                            <Typography.Text type={gatewayReady ? "success" : "danger"}>
+                              {t("chat.gatewayStatus")}
+                              {" · "}
+                              {gatewayReady ? t("chat.gatewayOnline") : t("chat.gatewayOffline")}
+                            </Typography.Text>
+                            <Typography.Text type="tertiary">
+                              {t("chat.runtimeMode")}
+                              {" · "}
+                              {runtimeMode === "local" ? t("chat.runtimeLocal") : t("chat.runtimeCloud")}
+                            </Typography.Text>
+                          </Space>
+                          <Space spacing={12}>
+                            <Typography.Text type="tertiary">
+                              {t("chat.contextUsage")}
+                              {" · "}
+                              {formatUsage(activeSession?.contextUsage)}
+                            </Typography.Text>
+                            <Typography.Text type="tertiary">
+                              {t("chat.compactionCount")}
+                              {" · "}
+                              {String(activeSession?.compactionCount ?? 0)}
+                            </Typography.Text>
+                            <Typography.Text type="tertiary">
+                              {t("chat.memoryFlushState")}
+                              {" · "}
+                              {activeSession?.memoryFlushState ?? "idle"}
+                            </Typography.Text>
+                          </Space>
+                        </div>
+                        {!activeSession ? (
+                          <Typography.Text type="tertiary">{t("sidebar.runtimeStatusNoSession")}</Typography.Text>
+                        ) : null}
+                        {runtimeStatusError ? <Typography.Text type="danger">{runtimeStatusError}</Typography.Text> : null}
+                      </div>
+                    </Tabs.TabPane>
+                  </Tabs>
+                </div>
+              ) : activeSettingsMenu === "memory" ? (
+                <div className="memory-settings-wrap">
+                  <Typography.Text className="settings-label">{t("sidebar.memoryTarget")}</Typography.Text>
+                  <Space spacing={8} className="memory-target-row">
+                    <Button
+                      size="small"
+                      theme={memoryTarget === "global" ? "solid" : "light"}
+                      onClick={() => setMemoryTarget("global")}
+                    >
+                      MEMORY.md
+                    </Button>
+                    <Button
+                      size="small"
+                      theme={memoryTarget === "daily" ? "solid" : "light"}
+                      onClick={() => setMemoryTarget("daily")}
+                    >
+                      {t("sidebar.memoryDailyFile")}
+                    </Button>
+                    {memoryTarget === "daily" ? (
+                      <Input value={memoryDate} className="memory-date-input" onChange={(value) => setMemoryDate(value)} />
+                    ) : null}
+                    <Input
+                      value={memoryLines}
+                      className="memory-lines-input"
+                      onChange={(value) => setMemoryLines(value)}
+                      placeholder={t("sidebar.memoryLines")}
+                    />
+                    <Button theme="solid" loading={memoryPending} onClick={() => void refreshMemory()}>
+                      {t("sidebar.memoryRefresh")}
+                    </Button>
+                  </Space>
+                  {memoryInfo ? <Typography.Text type="tertiary">{memoryInfo}</Typography.Text> : null}
+
+                  <Typography.Text className="settings-label">{t("sidebar.memoryCurrentContent")}</Typography.Text>
+                  <TextArea
+                    value={memoryText}
+                    readOnly
+                    rows={12}
+                    className="memory-readonly"
+                    placeholder={t("sidebar.memoryEmpty")}
+                  />
+
+                  <Typography.Text className="settings-label">{t("sidebar.memoryAppendTitle")}</Typography.Text>
+                  <TextArea
+                    value={memoryAppendDraft}
+                    rows={4}
+                    onChange={(value: string) => setMemoryAppendDraft(value)}
+                    placeholder={t("sidebar.memoryAppendPlaceholder")}
+                  />
+                  <Space spacing={8}>
+                    <Button
+                      size="small"
+                      theme={memoryIncludeLongTerm ? "solid" : "light"}
+                      onClick={() => setMemoryIncludeLongTerm((prev) => !prev)}
+                    >
+                      {memoryIncludeLongTerm ? t("sidebar.memoryIncludeLongTermOn") : t("sidebar.memoryIncludeLongTermOff")}
+                    </Button>
+                    <Button theme="solid" loading={memoryPending} onClick={() => void appendMemory()}>
+                      {t("sidebar.memoryAppend")}
+                    </Button>
+                    <Button theme="light" type="danger" loading={memoryPending} onClick={() => void archiveMemory()}>
+                      {t("sidebar.memoryArchive")}
+                    </Button>
+                  </Space>
+                  {memoryNotice ? <Typography.Text type="success">{memoryNotice}</Typography.Text> : null}
+                  {memoryError ? (
                     <Typography.Text type="danger">
-                      {t("sidebar.runtimeSyncFailed")}
-                      {runtimeError}
+                      {t("sidebar.memoryErrorPrefix")}
+                      {memoryError}
                     </Typography.Text>
                   ) : null}
-
-                  <div className="llm-config-wrap">
-                    <Typography.Text className="settings-label">{t("sidebar.llmProfileActive")}</Typography.Text>
-                    <Select
-                      value={llmDraft.activeProfileId}
-                      optionList={llmDraft.profiles.map((profile) => ({
-                        label: profile.name,
-                        value: profile.id
-                      }))}
-                      placeholder={t("sidebar.llmProfileActive")}
-                      onChange={(value) => {
-                        if (typeof value !== "string") {
-                          return;
-                        }
-                        setLlmDraft((prev) => ({
-                          ...prev,
-                          activeProfileId: value
-                        }));
-                        setEditingLlmProfileId(value);
-                      }}
-                    />
-                    <div className="llm-profile-actions">
-                      <Button theme="light" onClick={addLlmProfile}>
-                        {t("sidebar.llmAddProfile")}
-                      </Button>
-                      <Button
-                        theme="borderless"
-                        type="danger"
-                        disabled={llmDraft.profiles.length <= 1}
-                        onClick={removeEditingProfile}
-                      >
-                        {t("sidebar.llmDeleteProfile")}
-                      </Button>
-                    </div>
-                    <Typography.Text className="settings-label">{t("sidebar.llmProfileEdit")}</Typography.Text>
-                    <Select
-                      value={editingLlmProfile?.id}
-                      optionList={llmDraft.profiles.map((profile) => ({
-                        label: profile.name,
-                        value: profile.id
-                      }))}
-                      placeholder={t("sidebar.llmProfileEdit")}
-                      onChange={(value) => {
-                        if (typeof value !== "string") {
-                          return;
-                        }
-                        setEditingLlmProfileId(value);
-                      }}
-                    />
-                    <Typography.Text className="settings-label">{t("sidebar.llmProfileName")}</Typography.Text>
-                    <Input
-                      value={editingLlmProfile?.name ?? ""}
-                      placeholder="Kimi · k2p5"
-                      onChange={(value) => {
-                        updateEditingProfile({
-                          name: value
-                        });
-                      }}
-                    />
-                    <Typography.Text className="settings-label">{t("sidebar.llmModelRef")}</Typography.Text>
-                    <Input
-                      value={editingLlmProfile?.modelRef ?? ""}
-                      placeholder="kimi-default"
-                      onChange={(value) => {
-                        updateEditingProfile({
-                          modelRef: value
-                        });
-                      }}
-                    />
-                    <Typography.Text className="settings-label">{t("sidebar.llmProvider")}</Typography.Text>
-                    <Select
-                      value={editingLlmProfile?.provider}
-                      optionList={providerOptions}
-                      placeholder="Select provider"
-                      onChange={(value) => {
-                        if (typeof value !== "string") {
-                          return;
-                        }
-                        updateEditingProfile({
-                          provider: value
-                        });
-                      }}
-                    />
-                    <Typography.Text className="settings-label">{t("sidebar.llmModelId")}</Typography.Text>
-                    <Input
-                      value={editingLlmProfile?.modelId ?? ""}
-                      placeholder="k2p5"
-                      onChange={(value) => {
-                        updateEditingProfile({
-                          modelId: value
-                        });
-                      }}
-                    />
-                    <Typography.Text className="settings-label">{t("sidebar.llmBasePreset")}</Typography.Text>
-                    <Select
-                      optionList={baseUrlOptions}
-                      placeholder={t("sidebar.llmBasePreset")}
-                      value={
-                        baseUrlOptions.some((item) => item.value === (editingLlmProfile?.baseUrl ?? ""))
-                          ? editingLlmProfile?.baseUrl
-                          : undefined
-                      }
-                      onChange={(value) => {
-                        if (typeof value !== "string") {
-                          return;
-                        }
-                        updateEditingProfile({
-                          baseUrl: value
-                        });
-                      }}
-                    />
-                    <Typography.Text className="settings-label">{t("sidebar.llmBaseUrl")}</Typography.Text>
-                    <Input
-                      value={editingLlmProfile?.baseUrl ?? ""}
-                      placeholder="https://api.example.com/v1"
-                      onChange={(value) => {
-                        updateEditingProfile({
-                          baseUrl: value
-                        });
-                      }}
-                    />
-                    <Typography.Text className="settings-label">{t("sidebar.llmApiKey")}</Typography.Text>
-                    <Input
-                      value={editingLlmProfile?.apiKey ?? ""}
-                      mode="password"
-                      placeholder="sk-***"
-                      onChange={(value) => {
-                        updateEditingProfile({
-                          apiKey: value
-                        });
-                      }}
-                    />
-                    <div className="llm-config-actions">
-                      <Button theme="solid" onClick={saveLlm} disabled={!isLlmDirty}>
-                        {t("sidebar.llmSave")}
-                      </Button>
-                      <Button
-                        theme="light"
-                        disabled={!isLlmDirty}
-                        onClick={() => {
-                          setLlmDraft(llmConfig);
-                          setEditingLlmProfileId(llmConfig.activeProfileId);
-                        }}
-                      >
-                        {t("sidebar.llmReset")}
-                      </Button>
-                    </div>
-                    {llmSavedNotice ? <Typography.Text type="success">{llmSavedNotice}</Typography.Text> : null}
-                    <Typography.Text type="tertiary">{t("sidebar.llmConfigHint")}</Typography.Text>
-                  </div>
                 </div>
               ) : (
                 <div className="settings-placeholder">{t("sidebar.comingSoon")}</div>
@@ -730,4 +990,9 @@ function syncStateColor(syncState: "local_only" | "syncing" | "synced" | "confli
     return "red";
   }
   return "grey";
+}
+
+function formatUsage(value: number | undefined): string {
+  const usage = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+  return `${Math.round(usage * 100)}%`;
 }

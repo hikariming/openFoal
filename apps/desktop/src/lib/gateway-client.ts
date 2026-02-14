@@ -11,10 +11,11 @@ type GatewayMethod =
   | "sessions.history"
   | "policy.get"
   | "policy.update"
-  | "approval.queue"
-  | "approval.resolve"
   | "audit.query"
-  | "metrics.summary";
+  | "metrics.summary"
+  | "memory.get"
+  | "memory.appendDaily"
+  | "memory.archive";
 
 type ErrorCode =
   | "UNAUTHORIZED"
@@ -23,7 +24,6 @@ type ErrorCode =
   | "IDEMPOTENCY_CONFLICT"
   | "SESSION_BUSY"
   | "POLICY_DENIED"
-  | "APPROVAL_REQUIRED"
   | "MODEL_UNAVAILABLE"
   | "TOOL_EXEC_FAILED"
   | "INTERNAL_ERROR";
@@ -95,7 +95,8 @@ const SIDE_EFFECT_METHODS = new Set<GatewayMethod>([
   "runtime.setMode",
   "sessions.create",
   "policy.update",
-  "approval.resolve"
+  "memory.appendDaily",
+  "memory.archive"
 ]);
 
 export type MemoryFlushState = "idle" | "pending" | "flushed" | "skipped";
@@ -123,7 +124,7 @@ export type GatewayTranscriptItem = {
   createdAt: string;
 };
 
-export type PolicyDecision = "deny" | "allow" | "approval-required";
+export type PolicyDecision = "deny" | "allow";
 
 export type GatewayPolicy = {
   scopeKey: string;
@@ -133,22 +134,6 @@ export type GatewayPolicy = {
   tools: Record<string, PolicyDecision>;
   version: number;
   updatedAt: string;
-};
-
-export type GatewayApprovalStatus = "pending" | "approved" | "rejected";
-
-export type GatewayApproval = {
-  approvalId: string;
-  sessionId: string;
-  runId: string;
-  toolName: string;
-  toolCallId?: string;
-  argsFingerprint: string;
-  status: GatewayApprovalStatus;
-  decision?: "approve" | "reject";
-  reason?: string;
-  createdAt: string;
-  resolvedAt?: string;
 };
 
 export type GatewayMetricsSummary = {
@@ -166,6 +151,30 @@ export type GatewayAuditItem = {
   resource?: string;
   createdAt?: string;
   [key: string]: unknown;
+};
+
+export type GatewayMemoryReadResult = {
+  path: string;
+  from: number;
+  lines: number | null;
+  totalLines: number;
+  text: string;
+};
+
+export type GatewayMemoryAppendResult = {
+  path: string;
+  append: boolean;
+  bytes: number;
+  includeLongTerm: boolean;
+};
+
+export type GatewayMemoryArchiveResult = {
+  date: string;
+  dailyPath: string;
+  includeLongTerm: boolean;
+  clearDaily: boolean;
+  archivedLines: number;
+  archivedBytes: number;
 };
 
 export interface RunAgentParams {
@@ -328,42 +337,6 @@ export class GatewayHttpClient {
     return policy;
   }
 
-  async listApprovals(params: {
-    status?: GatewayApprovalStatus;
-    runId?: string;
-    sessionId?: string;
-  } = {}): Promise<GatewayApproval[]> {
-    await this.ensureConnected();
-    const result = await this.request("approval.queue", {
-      ...(params.status ? { status: params.status } : {}),
-      ...(params.runId ? { runId: params.runId } : {}),
-      ...(params.sessionId ? { sessionId: params.sessionId } : {})
-    });
-    const items = result.response.payload.items;
-    if (!Array.isArray(items)) {
-      return [];
-    }
-    return items.filter(isGatewayApproval);
-  }
-
-  async resolveApproval(params: {
-    approvalId: string;
-    decision: "approve" | "reject";
-    reason?: string;
-  }): Promise<GatewayApproval> {
-    await this.ensureConnected();
-    const result = await this.request("approval.resolve", {
-      approvalId: params.approvalId,
-      decision: params.decision,
-      ...(params.reason ? { reason: params.reason } : {})
-    });
-    const approval = result.response.payload.approval;
-    if (!isGatewayApproval(approval)) {
-      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid approval.resolve payload");
-    }
-    return approval;
-  }
-
   async queryAudit(params: {
     from?: string;
     to?: string;
@@ -390,6 +363,56 @@ export class GatewayHttpClient {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid metrics.summary payload");
     }
     return metrics;
+  }
+
+  async memoryGet(params: { path?: string; from?: number; lines?: number } = {}): Promise<GatewayMemoryReadResult> {
+    await this.ensureConnected();
+    const result = await this.request("memory.get", {
+      ...(params.path ? { path: params.path } : {}),
+      ...(typeof params.from === "number" ? { from: params.from } : {}),
+      ...(typeof params.lines === "number" ? { lines: params.lines } : {})
+    });
+    const memory = result.response.payload.memory;
+    if (!isGatewayMemoryReadResult(memory)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid memory.get payload");
+    }
+    return memory;
+  }
+
+  async memoryAppendDaily(params: {
+    content: string;
+    date?: string;
+    includeLongTerm?: boolean;
+  }): Promise<GatewayMemoryAppendResult> {
+    await this.ensureConnected();
+    const result = await this.request("memory.appendDaily", {
+      content: params.content,
+      ...(params.date ? { date: params.date } : {}),
+      ...(params.includeLongTerm === true ? { includeLongTerm: true } : {})
+    });
+    const append = result.response.payload.result;
+    if (!isGatewayMemoryAppendResult(append)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid memory.appendDaily payload");
+    }
+    return append;
+  }
+
+  async memoryArchive(params: {
+    date?: string;
+    includeLongTerm?: boolean;
+    clearDaily?: boolean;
+  }): Promise<GatewayMemoryArchiveResult> {
+    await this.ensureConnected();
+    const result = await this.request("memory.archive", {
+      ...(params.date ? { date: params.date } : {}),
+      ...(params.includeLongTerm === false ? { includeLongTerm: false } : {}),
+      ...(params.clearDaily === false ? { clearDaily: false } : {})
+    });
+    const archive = result.response.payload.result;
+    if (!isGatewayMemoryArchiveResult(archive)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid memory.archive payload");
+    }
+    return archive;
   }
 
   async runAgent(params: RunAgentParams): Promise<{ runId?: string; events: RpcEvent[] }> {
@@ -782,26 +805,6 @@ function isGatewayPolicy(value: unknown): value is GatewayPolicy {
   );
 }
 
-function isGatewayApproval(value: unknown): value is GatewayApproval {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const item = value as Record<string, unknown>;
-  return (
-    typeof item.approvalId === "string" &&
-    typeof item.sessionId === "string" &&
-    typeof item.runId === "string" &&
-    typeof item.toolName === "string" &&
-    typeof item.argsFingerprint === "string" &&
-    (item.status === "pending" || item.status === "approved" || item.status === "rejected") &&
-    (item.decision === undefined || item.decision === "approve" || item.decision === "reject") &&
-    (item.reason === undefined || typeof item.reason === "string") &&
-    typeof item.createdAt === "string" &&
-    (item.toolCallId === undefined || typeof item.toolCallId === "string") &&
-    (item.resolvedAt === undefined || typeof item.resolvedAt === "string")
-  );
-}
-
 function isGatewayMetricsSummary(value: unknown): value is GatewayMetricsSummary {
   if (!value || typeof value !== "object") {
     return false;
@@ -818,6 +821,48 @@ function isGatewayMetricsSummary(value: unknown): value is GatewayMetricsSummary
 
 function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isGatewayMemoryReadResult(value: unknown): value is GatewayMemoryReadResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.path === "string" &&
+    typeof item.from === "number" &&
+    (item.lines === null || typeof item.lines === "number") &&
+    typeof item.totalLines === "number" &&
+    typeof item.text === "string"
+  );
+}
+
+function isGatewayMemoryAppendResult(value: unknown): value is GatewayMemoryAppendResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.path === "string" &&
+    typeof item.append === "boolean" &&
+    typeof item.bytes === "number" &&
+    typeof item.includeLongTerm === "boolean"
+  );
+}
+
+function isGatewayMemoryArchiveResult(value: unknown): value is GatewayMemoryArchiveResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.date === "string" &&
+    typeof item.dailyPath === "string" &&
+    typeof item.includeLongTerm === "boolean" &&
+    typeof item.clearDaily === "boolean" &&
+    typeof item.archivedLines === "number" &&
+    typeof item.archivedBytes === "number"
+  );
 }
 
 function isGatewayTranscriptItem(value: unknown): value is GatewayTranscriptItem {
@@ -844,7 +889,7 @@ function asRuntimeMode(value: unknown): RuntimeMode | undefined {
 }
 
 function isPolicyDecision(value: unknown): value is PolicyDecision {
-  return value === "deny" || value === "allow" || value === "approval-required";
+  return value === "deny" || value === "allow";
 }
 
 function toErrorMessage(error: unknown): string {

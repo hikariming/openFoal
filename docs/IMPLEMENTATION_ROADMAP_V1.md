@@ -37,11 +37,11 @@
 1. `packages/tool-executor(cloud)` Docker driver 与容器生命周期。
 2. `runtime.setMode` 与会话级 mode 语义落地。
 3. 云端 Postgres 与对象存储接入。
-4. 审批队列与恢复执行链路（`approval.required/resolve`）。
+4. 策略门禁队列与恢复执行链路（`agent.failed/resolve`）。
 
 ### M4（第 7-8 周）
 
-1. `apps/web-console` 绑定 `sessions.list/policy.get/update/audit.query/approval.*`。
+1. `apps/web-console` 绑定 `sessions.list/policy.get/update/audit.query/policy-gate.*`。
 2. 本地优先同步（local -> cloud）增量任务落地。
 3. 冲突状态 `syncState=conflict` 可见与可恢复。
 
@@ -57,15 +57,15 @@
 
 1. Desktop 可切换本地/云端沙盒并完成真实对话链路。
 2. Web Console 关键页面由真实 API 驱动，不依赖硬编码数据。
-3. 策略变更、工具执行与审批流程可审计可回放。
+3. 策略变更、工具执行与策略门禁流程可审计可回放。
 4. 同步失败与冲突可观测、可重试、可解释。
 
 ### 阶段验收（DoD）
 
 1. M1：`agent.run` 有可消费的流式事件。
 2. M2：本地工具 loop 可执行并持久化。
-3. M3：云端 Docker 执行稳定，审批可拦截高风险调用。
-4. M4：控制台可改策略、看审计、做审批。
+3. M3：云端 Docker 执行稳定，策略门禁可拦截高风险调用。
+4. M4：控制台可改策略、看审计、做策略门禁。
 5. M5：回归用例通过，发布阻塞问题清零。
 
 ## 测试与验收场景
@@ -73,7 +73,7 @@
 1. 协议测试：schema 校验、错误码一致性、向后兼容字段。
 2. 会话测试：session key 规范化、`/new /reset /compact`、mode 切换时序。
 3. 执行测试：local executor 与 cloud docker executor 的成功/失败/超时路径。
-4. 审批测试：高风险调用拦截、审批通过恢复、拒绝终止。
+4. 策略门禁测试：高风险调用拦截、策略门禁通过恢复、拒绝终止。
 5. 同步测试：离线增量上云、幂等重放、冲突标记。
 6. 安全测试：未授权 connect 拒绝、越权 session 拒绝、网络白名单有效。
 7. 可观测性测试：`trace_id/run_id` 可串联 message/tool/audit 全链路。

@@ -331,40 +331,21 @@ test("policy.get/policy.update returns structured policy", async () => {
   }
 });
 
-test("approval.queue/approval.resolve closes approval-required tool run", async () => {
+test("high-risk tools run directly", async () => {
   const router = createGatewayRouter();
   const state = createConnectionState();
   await router.handle(req("r_connect", "connect", {}), state);
 
-  const runPromise = router.handle(
-    req("r_run_need_approval", "agent.run", {
-      idempotencyKey: "idem_run_need_approval_1",
+  const run = await router.handle(
+    req("r_run_high_risk_direct", "agent.run", {
+      idempotencyKey: "idem_run_high_risk_direct_1",
       sessionId: "s_default",
-      input: "run [[tool:bash.exec {\"cmd\":\"echo approval-flow\"}]]",
+      input: "run [[tool:bash.exec {\"cmd\":\"echo high-risk-direct\"}]]",
       runtimeMode: "local"
     }),
     state
   );
-
-  const pending = await waitForPendingApproval(router, state);
-  const resolved = await router.handle(
-    req("r_approval_resolve", "approval.resolve", {
-      idempotencyKey: "idem_approval_resolve_1",
-      approvalId: pending.approvalId,
-      decision: "approve",
-      reason: "allow for test"
-    }),
-    state
-  );
-  assert.equal(resolved.response.ok, true);
-  if (resolved.response.ok) {
-    assert.equal(resolved.response.payload.approval.approvalId, pending.approvalId);
-    assert.equal(resolved.response.payload.approval.status, "approved");
-  }
-
-  const run = await runPromise;
   assert.equal(run.response.ok, true);
-  assert.equal(run.events.some((event) => event.event === "approval.required"), true);
   assert.equal(run.events.some((event) => event.event === "agent.completed"), true);
 });
 
@@ -407,16 +388,85 @@ test("metrics.summary returns real aggregate fields", async () => {
   }
 });
 
-async function waitForPendingApproval(router, state) {
-  for (let i = 0; i < 60; i += 1) {
-    const queued = await router.handle(req(`r_approval_queue_${i}`, "approval.queue", { status: "pending" }), state);
-    if (queued.response.ok) {
-      const first = queued.response.payload.items[0];
-      if (first) {
-        return first;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+test("memory.get and memory.appendDaily are available via gateway route", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const append = await router.handle(
+    req("r_memory_append", "memory.appendDaily", {
+      idempotencyKey: "idem_memory_append_1",
+      date: "2026-02-13",
+      content: "memory api smoke test",
+      includeLongTerm: true
+    }),
+    state
+  );
+  assert.equal(append.response.ok, true);
+
+  const getDaily = await router.handle(
+    req("r_memory_get", "memory.get", {
+      path: "memory/2026-02-13.md"
+    }),
+    state
+  );
+  assert.equal(getDaily.response.ok, true);
+  if (getDaily.response.ok) {
+    const text = getDaily.response.payload.memory?.text ?? "";
+    assert.match(String(text), /memory api smoke test/);
   }
-  throw new Error("pending approval not found");
-}
+});
+
+test("memory.archive moves daily content and clears daily file", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const append = await router.handle(
+    req("r_memory_append_2", "memory.appendDaily", {
+      idempotencyKey: "idem_memory_append_2",
+      date: "2026-02-14",
+      content: "archive this memory",
+      includeLongTerm: false
+    }),
+    state
+  );
+  assert.equal(append.response.ok, true);
+
+  const archive = await router.handle(
+    req("r_memory_archive_1", "memory.archive", {
+      idempotencyKey: "idem_memory_archive_1",
+      date: "2026-02-14",
+      includeLongTerm: true,
+      clearDaily: true
+    }),
+    state
+  );
+  assert.equal(archive.response.ok, true);
+  if (archive.response.ok) {
+    assert.equal(archive.response.payload.result.date, "2026-02-14");
+    assert.equal(archive.response.payload.result.clearDaily, true);
+  }
+
+  const daily = await router.handle(
+    req("r_memory_get_daily_cleared", "memory.get", {
+      path: "memory/2026-02-14.md"
+    }),
+    state
+  );
+  assert.equal(daily.response.ok, true);
+  if (daily.response.ok) {
+    assert.equal(String(daily.response.payload.memory?.text ?? ""), "");
+  }
+
+  const globalMemory = await router.handle(
+    req("r_memory_get_global_archived", "memory.get", {
+      path: "MEMORY.md"
+    }),
+    state
+  );
+  assert.equal(globalMemory.response.ok, true);
+  if (globalMemory.response.ok) {
+    assert.match(String(globalMemory.response.payload.memory?.text ?? ""), /archive this memory/);
+  }
+});

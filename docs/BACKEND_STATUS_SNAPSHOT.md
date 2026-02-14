@@ -5,9 +5,9 @@
 ## 已落地（真实实现）
 
 1. `packages/protocol`
-- 已定义并校验 `connect/agent.run/agent.abort/runtime.setMode/sessions.create|list|get|history/policy.get|update/approval.queue|resolve/audit.query/metrics.summary`。
+- 已定义并校验 `connect/agent.run/agent.abort/runtime.setMode/sessions.create|list|get|history/policy.get|update/（已移除）|resolve/audit.query/metrics.summary`。
 - side-effect 方法强制 `idempotencyKey`。
-- 错误码包含 `POLICY_DENIED`、`APPROVAL_REQUIRED` 等治理语义。
+- 错误码包含 `POLICY_DENIED`、`POLICY_DENIED` 等治理语义。
 
 2. `apps/gateway`
 - 已提供 HTTP(`/health`, `/rpc`) + WS(`/ws`) 网关服务。
@@ -15,9 +15,9 @@
 - 已实现 side-effect 幂等缓存与参数冲突检测。
 - `sessions.get` 已返回 `contextUsage/compactionCount/memoryFlushState(/memoryFlushAt)`。
 - `policy.get/update` 已接 SQLite/InMemory repository，返回结构化 policy（含 `version/updatedAt`）。
-- `approval.queue/resolve` 已接 SQLite/InMemory repository，返回真实审批对象。
+- `（已移除）/resolve` 已接 SQLite/InMemory repository，返回真实策略门禁对象。
 - `metrics.summary` 已接真实聚合（`runsTotal/runsFailed/toolCallsTotal/toolFailures/p95LatencyMs`）。
-- `agent.run` 已记录 transcript、run metrics，并在高风险工具上执行 policy gate（allow/deny/approval-required）。
+- `agent.run` 已记录 transcript、run metrics，并在高风险工具上执行 policy gate（allow/deny/allow）。
 
 3. `packages/storage`
 - 已实现 SQLite + InMemory 仓储：
@@ -27,7 +27,7 @@
   - Policy
   - Approval
   - Metrics
-- 已支持重启后恢复 policy/approval/session 元数据。
+- 已支持重启后恢复 policy/policy-gate/session 元数据。
 
 4. `packages/tool-executor`
 - 已实现 local driver：`bash.exec`、`file.read/write/list`、`http.request`、`math.add`、`text.upper`、`echo`。

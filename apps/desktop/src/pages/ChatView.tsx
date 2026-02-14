@@ -49,7 +49,6 @@ const MAX_MESSAGES_PER_SESSION = 120;
 export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessionTitle: string }) {
   const { t } = useTranslation();
   const runtimeMode = useAppStore((state) => getSessionRuntimeMode(state.sessions, state.activeSessionId));
-  const sessionState = useAppStore((state) => state.sessions.find((item) => item.id === sessionId));
   const llmConfig = useAppStore((state) => state.llmConfig);
   const upsertSession = useAppStore((state) => state.upsertSession);
   const activeLlmProfile = useMemo(() => getActiveLlmProfile(llmConfig), [llmConfig]);
@@ -58,7 +57,6 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   const runRenderRef = useRef<RunRenderState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
-  const [gatewayReady, setGatewayReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
 
@@ -126,12 +124,8 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
     void (async () => {
       try {
         await gatewayClient.ensureConnected();
-        if (!cancelled) {
-          setGatewayReady(true);
-        }
       } catch (error) {
         if (!cancelled) {
-          setGatewayReady(false);
           setRuntimeError(error instanceof Error ? error.message : String(error));
         }
       }
@@ -341,24 +335,6 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
       return;
     }
 
-    if (event.event === "approval.required") {
-      const summary = formatApprovalEvent("required", event.payload.approval);
-      pushMessage({
-        id: createMessageId(),
-        role: "system",
-        text: `${t("chat.approvalRequired")}: ${summary}`
-      });
-      return;
-    }
-
-    if (event.event === "approval.resolved") {
-      const summary = formatApprovalEvent("resolved", event.payload.approval);
-      pushMessage({
-        id: createMessageId(),
-        role: "system",
-        text: `${t("chat.approvalResolved")}: ${summary}`
-      });
-    }
   };
 
   const handleSend = async (rawInput?: string): Promise<void> => {
@@ -420,10 +396,8 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
           updatedAt: refreshedSession.updatedAt
         });
       }
-      setGatewayReady(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setGatewayReady(false);
       setRuntimeError(message);
       pushMessage({
         id: createMessageId(),
@@ -459,38 +433,6 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
       </div>
 
       <div className="workspace-body">
-        <div className="gateway-status-bar">
-          <Space spacing={16}>
-            <Typography.Text type={gatewayReady ? "success" : "danger"}>
-              {t("chat.gatewayStatus")}
-              {" · "}
-              {gatewayReady ? t("chat.gatewayOnline") : t("chat.gatewayOffline")}
-            </Typography.Text>
-            <Typography.Text type="tertiary">
-              {t("chat.runtimeMode")}
-              {" · "}
-              {runtimeMode === "local" ? t("chat.runtimeLocal") : t("chat.runtimeCloud")}
-            </Typography.Text>
-          </Space>
-          <Space spacing={12}>
-            <Typography.Text type="tertiary">
-              {t("chat.contextUsage")}
-              {" · "}
-              {formatUsage(sessionState?.contextUsage)}
-            </Typography.Text>
-            <Typography.Text type="tertiary">
-              {t("chat.compactionCount")}
-              {" · "}
-              {String(sessionState?.compactionCount ?? 0)}
-            </Typography.Text>
-            <Typography.Text type="tertiary">
-              {t("chat.memoryFlushState")}
-              {" · "}
-              {sessionState?.memoryFlushState ?? "idle"}
-            </Typography.Text>
-          </Space>
-        </div>
-
         <div className="chat-feed">
           {messages.length === 0 ? (
             <>
@@ -787,23 +729,6 @@ function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): ChatMessag
       continue;
     }
 
-    if (item.event === "approval.required") {
-      messages.push({
-        id: createMessageId(),
-        role: "system",
-        text: formatApprovalEvent("required", item.payload.approval)
-      });
-      continue;
-    }
-
-    if (item.event === "approval.resolved") {
-      messages.push({
-        id: createMessageId(),
-        role: "system",
-        text: formatApprovalEvent("resolved", item.payload.approval)
-      });
-      continue;
-    }
   }
 
   return messages.slice(-MAX_MESSAGES_PER_SESSION);
@@ -850,32 +775,6 @@ function summarizeForPreview(detail: string): string {
     return compact;
   }
   return `${compact.slice(0, 180)}...`;
-}
-
-function formatUsage(value: number | undefined): string {
-  const usage = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-  return `${Math.round(usage * 100)}%`;
-}
-
-function formatApprovalEvent(kind: "required" | "resolved", approval: unknown): string {
-  if (!approval || typeof approval !== "object" || Array.isArray(approval)) {
-    return kind === "required" ? "approval.required" : "approval.resolved";
-  }
-  const record = approval as Record<string, unknown>;
-  const approvalId = asString(record.approvalId) ?? "unknown";
-  const toolName = asString(record.toolName) ?? "tool";
-  const runId = asString(record.runId) ?? "run";
-  const status = asString(record.status) ?? (kind === "required" ? "pending" : "updated");
-  const decision = asString(record.decision);
-  const reason = asString(record.reason);
-
-  if (kind === "required") {
-    return `Approval required: ${approvalId} · ${toolName} · ${runId} (${status})`;
-  }
-
-  return `Approval resolved: ${approvalId} · ${toolName} · ${runId} (${status}${
-    decision ? `/${decision}` : ""
-  }${reason ? `) ${reason}` : ")"}`;
 }
 
 function createMessageId(): string {

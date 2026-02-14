@@ -52,6 +52,38 @@ test("sessions.create requires idempotencyKey", () => {
   }
 });
 
+test("memory.appendDaily requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_memory_append_1",
+    method: "memory.appendDaily",
+    params: {
+      content: "test"
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
+test("memory.archive requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_memory_archive_1",
+    method: "memory.archive",
+    params: {
+      date: "2026-02-13"
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
 test("unknown method returns METHOD_NOT_FOUND", () => {
   const result = validateReqFrame({
     type: "req",

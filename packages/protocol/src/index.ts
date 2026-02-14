@@ -9,10 +9,11 @@ export const METHODS = [
   "sessions.history",
   "policy.get",
   "policy.update",
-  "approval.queue",
-  "approval.resolve",
   "audit.query",
-  "metrics.summary"
+  "metrics.summary",
+  "memory.get",
+  "memory.appendDaily",
+  "memory.archive"
 ] as const;
 
 export const EVENTS = [
@@ -27,9 +28,7 @@ export const EVENTS = [
   "agent.completed",
   "agent.failed",
   "runtime.mode_changed",
-  "session.updated",
-  "approval.required",
-  "approval.resolved"
+  "session.updated"
 ] as const;
 
 export const ERROR_CODES = [
@@ -39,7 +38,6 @@ export const ERROR_CODES = [
   "IDEMPOTENCY_CONFLICT",
   "SESSION_BUSY",
   "POLICY_DENIED",
-  "APPROVAL_REQUIRED",
   "MODEL_UNAVAILABLE",
   "TOOL_EXEC_FAILED",
   "INTERNAL_ERROR"
@@ -51,7 +49,8 @@ export const SIDE_EFFECT_METHODS = new Set<MethodName>([
   "runtime.setMode",
   "sessions.create",
   "policy.update",
-  "approval.resolve"
+  "memory.appendDaily",
+  "memory.archive"
 ]);
 
 export type MethodName = (typeof METHODS)[number];

@@ -66,7 +66,7 @@
 4. `messages`
 5. `tool_runs`
 6. `audit_logs`
-7. `approvals`
+7. `controls`
 8. `policies`
 
 建议复合索引：
@@ -164,7 +164,7 @@ interface AuthzProvider {
 
 1. 开启租户管理 API（创建/停用租户）。
 2. 开启租户级配额、预算与策略中心。
-3. 审计与审批按租户隔离可查询。
+3. 审计与策略门禁按租户隔离可查询。
 
 ### Phase C（企业化）
 

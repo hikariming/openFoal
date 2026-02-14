@@ -10,9 +10,7 @@ declare const process: any;
 export type RuntimeMode = "local" | "cloud";
 export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
 export type MemoryFlushState = "idle" | "pending" | "flushed" | "skipped";
-export type PolicyDecision = "deny" | "allow" | "approval-required";
-export type ApprovalDecision = "approve" | "reject";
-export type ApprovalStatus = "pending" | "approved" | "rejected";
+export type PolicyDecision = "deny" | "allow";
 
 export const DEFAULT_SESSION_TITLE = "new-session";
 export const DEFAULT_SESSION_PREVIEW = "";
@@ -109,45 +107,6 @@ export interface PolicyPatch {
 export interface PolicyRepository {
   get(scopeKey?: string): Promise<PolicyRecord>;
   update(patch: PolicyPatch, scopeKey?: string): Promise<PolicyRecord>;
-}
-
-export interface ApprovalRecord {
-  approvalId: string;
-  sessionId: string;
-  runId: string;
-  toolName: string;
-  toolCallId?: string;
-  argsFingerprint: string;
-  status: ApprovalStatus;
-  decision?: ApprovalDecision;
-  reason?: string;
-  createdAt: string;
-  resolvedAt?: string;
-}
-
-export interface ApprovalCreateInput {
-  approvalId?: string;
-  sessionId: string;
-  runId: string;
-  toolName: string;
-  toolCallId?: string;
-  argsFingerprint: string;
-  createdAt?: string;
-}
-
-export interface ApprovalRepository {
-  list(status?: ApprovalStatus): Promise<ApprovalRecord[]>;
-  listPendingByRun(runId: string): Promise<ApprovalRecord[]>;
-  get(approvalId: string): Promise<ApprovalRecord | undefined>;
-  findByMatch(
-    sessionId: string,
-    runId: string,
-    toolName: string,
-    argsFingerprint: string
-  ): Promise<ApprovalRecord | undefined>;
-  create(input: ApprovalCreateInput): Promise<ApprovalRecord>;
-  resolve(approvalId: string, decision: ApprovalDecision, reason?: string): Promise<ApprovalRecord | undefined>;
-  waitForResolution(approvalId: string, timeoutMs?: number): Promise<ApprovalRecord | undefined>;
 }
 
 export interface MetricsRunRecord {
@@ -324,91 +283,6 @@ export class InMemoryPolicyRepository implements PolicyRepository {
     });
     this.store.set(scopeKey, merged);
     return { ...merged, tools: { ...merged.tools } };
-  }
-}
-
-export class InMemoryApprovalRepository implements ApprovalRepository {
-  private readonly store = new Map<string, ApprovalRecord>();
-
-  async list(status?: ApprovalStatus): Promise<ApprovalRecord[]> {
-    return Array.from(this.store.values())
-      .filter((item) => (status ? item.status === status : true))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }
-
-  async listPendingByRun(runId: string): Promise<ApprovalRecord[]> {
-    return Array.from(this.store.values())
-      .filter((item) => item.runId === runId && item.status === "pending")
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }
-
-  async get(approvalId: string): Promise<ApprovalRecord | undefined> {
-    return this.store.get(approvalId);
-  }
-
-  async findByMatch(
-    sessionId: string,
-    runId: string,
-    toolName: string,
-    argsFingerprint: string
-  ): Promise<ApprovalRecord | undefined> {
-    const matched = Array.from(this.store.values())
-      .filter(
-        (item) =>
-          item.sessionId === sessionId &&
-          item.runId === runId &&
-          item.toolName === toolName &&
-          item.argsFingerprint === argsFingerprint
-      )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return matched[0];
-  }
-
-  async create(input: ApprovalCreateInput): Promise<ApprovalRecord> {
-    const approval: ApprovalRecord = {
-      approvalId: input.approvalId ?? createApprovalId(),
-      sessionId: input.sessionId,
-      runId: input.runId,
-      toolName: input.toolName,
-      ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
-      argsFingerprint: input.argsFingerprint,
-      status: "pending",
-      createdAt: input.createdAt ?? nowIso()
-    };
-    this.store.set(approval.approvalId, approval);
-    return approval;
-  }
-
-  async resolve(approvalId: string, decision: ApprovalDecision, reason?: string): Promise<ApprovalRecord | undefined> {
-    const current = this.store.get(approvalId);
-    if (!current) {
-      return undefined;
-    }
-
-    const next: ApprovalRecord = {
-      ...current,
-      status: decision === "approve" ? "approved" : "rejected",
-      decision,
-      ...(reason ? { reason } : {}),
-      resolvedAt: nowIso()
-    };
-    this.store.set(approvalId, next);
-    return next;
-  }
-
-  async waitForResolution(approvalId: string, timeoutMs = 30_000): Promise<ApprovalRecord | undefined> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const current = this.store.get(approvalId);
-      if (!current) {
-        return undefined;
-      }
-      if (current.status !== "pending") {
-        return current;
-      }
-      await sleep(200);
-    }
-    return this.store.get(approvalId);
   }
 }
 
@@ -820,202 +694,6 @@ export class SqlitePolicyRepository implements PolicyRepository {
   }
 }
 
-export class SqliteApprovalRepository implements ApprovalRepository {
-  private readonly dbPath: string;
-
-  constructor(dbPath = defaultSqlitePath()) {
-    this.dbPath = normalizeDbPath(dbPath);
-  }
-
-  async list(status?: ApprovalStatus): Promise<ApprovalRecord[]> {
-    ensureSchema(this.dbPath);
-    const where = status ? `WHERE status = ${sqlString(status)}` : "";
-    const rows = queryJson<ApprovalRow>(
-      this.dbPath,
-      `
-        SELECT
-          approval_id AS approvalId,
-          session_id AS sessionId,
-          run_id AS runId,
-          tool_name AS toolName,
-          tool_call_id AS toolCallId,
-          args_fingerprint AS argsFingerprint,
-          status AS status,
-          decision AS decision,
-          reason AS reason,
-          created_at AS createdAt,
-          resolved_at AS resolvedAt
-        FROM approval_queue
-        ${where}
-        ORDER BY created_at DESC;
-      `
-    );
-    return rows.map(parseApprovalRow);
-  }
-
-  async listPendingByRun(runId: string): Promise<ApprovalRecord[]> {
-    ensureSchema(this.dbPath);
-    const rows = queryJson<ApprovalRow>(
-      this.dbPath,
-      `
-        SELECT
-          approval_id AS approvalId,
-          session_id AS sessionId,
-          run_id AS runId,
-          tool_name AS toolName,
-          tool_call_id AS toolCallId,
-          args_fingerprint AS argsFingerprint,
-          status AS status,
-          decision AS decision,
-          reason AS reason,
-          created_at AS createdAt,
-          resolved_at AS resolvedAt
-        FROM approval_queue
-        WHERE run_id = ${sqlString(runId)} AND status = 'pending'
-        ORDER BY created_at DESC;
-      `
-    );
-    return rows.map(parseApprovalRow);
-  }
-
-  async get(approvalId: string): Promise<ApprovalRecord | undefined> {
-    ensureSchema(this.dbPath);
-    const rows = queryJson<ApprovalRow>(
-      this.dbPath,
-      `
-        SELECT
-          approval_id AS approvalId,
-          session_id AS sessionId,
-          run_id AS runId,
-          tool_name AS toolName,
-          tool_call_id AS toolCallId,
-          args_fingerprint AS argsFingerprint,
-          status AS status,
-          decision AS decision,
-          reason AS reason,
-          created_at AS createdAt,
-          resolved_at AS resolvedAt
-        FROM approval_queue
-        WHERE approval_id = ${sqlString(approvalId)}
-        LIMIT 1;
-      `
-    );
-    return rows[0] ? parseApprovalRow(rows[0]) : undefined;
-  }
-
-  async findByMatch(
-    sessionId: string,
-    runId: string,
-    toolName: string,
-    argsFingerprint: string
-  ): Promise<ApprovalRecord | undefined> {
-    ensureSchema(this.dbPath);
-    const rows = queryJson<ApprovalRow>(
-      this.dbPath,
-      `
-        SELECT
-          approval_id AS approvalId,
-          session_id AS sessionId,
-          run_id AS runId,
-          tool_name AS toolName,
-          tool_call_id AS toolCallId,
-          args_fingerprint AS argsFingerprint,
-          status AS status,
-          decision AS decision,
-          reason AS reason,
-          created_at AS createdAt,
-          resolved_at AS resolvedAt
-        FROM approval_queue
-        WHERE
-          session_id = ${sqlString(sessionId)}
-          AND run_id = ${sqlString(runId)}
-          AND tool_name = ${sqlString(toolName)}
-          AND args_fingerprint = ${sqlString(argsFingerprint)}
-        ORDER BY created_at DESC
-        LIMIT 1;
-      `
-    );
-    return rows[0] ? parseApprovalRow(rows[0]) : undefined;
-  }
-
-  async create(input: ApprovalCreateInput): Promise<ApprovalRecord> {
-    ensureSchema(this.dbPath);
-    const approvalId = input.approvalId ?? createApprovalId();
-    const createdAt = input.createdAt ?? nowIso();
-
-    execSql(
-      this.dbPath,
-      `
-        INSERT INTO approval_queue (
-          approval_id,
-          session_id,
-          run_id,
-          tool_name,
-          tool_call_id,
-          args_fingerprint,
-          status,
-          created_at
-        )
-        VALUES (
-          ${sqlString(approvalId)},
-          ${sqlString(input.sessionId)},
-          ${sqlString(input.runId)},
-          ${sqlString(input.toolName)},
-          ${sqlMaybeString(input.toolCallId)},
-          ${sqlString(input.argsFingerprint)},
-          'pending',
-          ${sqlString(createdAt)}
-        );
-      `
-    );
-
-    const created = await this.get(approvalId);
-    if (!created) {
-      throw new Error(`approval create failed: ${approvalId}`);
-    }
-    return created;
-  }
-
-  async resolve(approvalId: string, decision: ApprovalDecision, reason?: string): Promise<ApprovalRecord | undefined> {
-    ensureSchema(this.dbPath);
-    const existing = await this.get(approvalId);
-    if (!existing) {
-      return undefined;
-    }
-
-    const status = decision === "approve" ? "approved" : "rejected";
-    execSql(
-      this.dbPath,
-      `
-        UPDATE approval_queue
-        SET
-          status = ${sqlString(status)},
-          decision = ${sqlString(decision)},
-          reason = ${sqlMaybeString(reason)},
-          resolved_at = ${sqlString(nowIso())}
-        WHERE approval_id = ${sqlString(approvalId)};
-      `
-    );
-
-    return await this.get(approvalId);
-  }
-
-  async waitForResolution(approvalId: string, timeoutMs = 30_000): Promise<ApprovalRecord | undefined> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const current = await this.get(approvalId);
-      if (!current) {
-        return undefined;
-      }
-      if (current.status !== "pending") {
-        return current;
-      }
-      await sleep(200);
-    }
-    return await this.get(approvalId);
-  }
-}
-
 export class SqliteMetricsRepository implements MetricsRepository {
   private readonly dbPath: string;
 
@@ -1078,37 +756,6 @@ export class SqliteMetricsRepository implements MetricsRepository {
     );
     return summarizeMetrics(rows);
   }
-}
-
-type ApprovalRow = {
-  approvalId: string;
-  sessionId: string;
-  runId: string;
-  toolName: string;
-  toolCallId: string | null;
-  argsFingerprint: string;
-  status: string;
-  decision: string | null;
-  reason: string | null;
-  createdAt: string;
-  resolvedAt: string | null;
-};
-
-function parseApprovalRow(row: ApprovalRow): ApprovalRecord {
-  const status = row.status === "approved" || row.status === "rejected" ? row.status : "pending";
-  return {
-    approvalId: row.approvalId,
-    sessionId: row.sessionId,
-    runId: row.runId,
-    toolName: row.toolName,
-    ...(row.toolCallId ? { toolCallId: row.toolCallId } : {}),
-    argsFingerprint: row.argsFingerprint,
-    status,
-    ...(row.decision === "approve" || row.decision === "reject" ? { decision: row.decision } : {}),
-    ...(row.reason ? { reason: row.reason } : {}),
-    createdAt: row.createdAt,
-    ...(row.resolvedAt ? { resolvedAt: row.resolvedAt } : {})
-  };
 }
 
 function parsePolicyRow(row: { scopeKey: string; policyJson: string; version: number; updatedAt: string }): PolicyRecord {
@@ -1182,7 +829,7 @@ function defaultPolicy(): PolicyRecord {
   return {
     scopeKey: "default",
     toolDefault: "deny",
-    highRisk: "approval-required",
+    highRisk: "allow",
     bashMode: "sandbox",
     tools: {
       "math.add": "allow",
@@ -1221,6 +868,10 @@ function ensureSchema(dbPath: string): void {
     `
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
+
+      DROP INDEX IF EXISTS idx_approval_run_id;
+      DROP INDEX IF EXISTS idx_approval_match;
+      DROP TABLE IF EXISTS approval_queue;
 
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -1264,26 +915,6 @@ function ensureSchema(dbPath: string): void {
         version INTEGER NOT NULL,
         updated_at TEXT NOT NULL
       );
-
-      CREATE TABLE IF NOT EXISTS approval_queue (
-        approval_id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        tool_name TEXT NOT NULL,
-        tool_call_id TEXT,
-        args_fingerprint TEXT NOT NULL,
-        status TEXT NOT NULL,
-        decision TEXT,
-        reason TEXT,
-        created_at TEXT NOT NULL,
-        resolved_at TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_approval_run_id
-      ON approval_queue(run_id, created_at DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_approval_match
-      ON approval_queue(session_id, run_id, tool_name, args_fingerprint, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS run_metrics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1570,7 +1201,7 @@ function normalizePolicy(policy: PolicyRecord): PolicyRecord {
   return {
     scopeKey: policy.scopeKey,
     toolDefault: asPolicyDecision(policy.toolDefault) ?? "deny",
-    highRisk: asPolicyDecision(policy.highRisk) ?? "approval-required",
+    highRisk: asPolicyDecision(policy.highRisk) ?? "allow",
     bashMode: policy.bashMode === "host" ? "host" : "sandbox",
     tools: sanitizePolicyMap(policy.tools),
     version: Number.isFinite(Number(policy.version)) ? Math.max(1, Math.floor(Number(policy.version))) : 1,
@@ -1593,19 +1224,9 @@ function sanitizePolicyMap(input: unknown): Record<string, PolicyDecision> {
 }
 
 function asPolicyDecision(value: unknown): PolicyDecision | undefined {
-  return value === "deny" || value === "allow" || value === "approval-required" ? value : undefined;
-}
-
-function createApprovalId(): string {
-  return `ap_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+  return value === "deny" || value === "allow" ? value : undefined;
 }
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

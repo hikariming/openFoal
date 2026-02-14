@@ -6,7 +6,7 @@
 
 1. 事实对齐：文档与真实实现一致。
 2. 契约对齐：API 字段与协议/网关/测试一致。
-3. 工程闭环（local）：policy/approval/metrics 从占位到真实仓储与状态机。
+3. 工程闭环（local）：policy/policy-gate/metrics 从占位到真实仓储与状态机。
 4. 记忆 MVP：`memory.get` + `memory.appendDaily` 与会话元数据可观测。
 5. SOUL 最小集：引导文件创建与系统提示注入。
 
@@ -14,7 +14,7 @@
 
 1. `apps/gateway` 已有可运行实现（HTTP + WS）。
 2. `packages/core/storage/tool-executor/protocol` 均已落地基础能力。
-3. `policy.get/update`、`approval.queue/resolve`、`metrics.summary` 已不是占位返回。
+3. `policy.get/update`、`（已移除）/resolve`、`metrics.summary` 已不是占位返回。
 4. 会话元数据已包含 `contextUsage/compactionCount/memoryFlushState(/memoryFlushAt)`。
 5. 本轮不进入 cloud 交付。
 
@@ -28,14 +28,14 @@
 ### Batch B：契约对齐（已完成）
 
 1. `sessions.get` 字段扩展落地到 storage + gateway + tests。
-2. `policy/approval/metrics` 返回结构化真实对象。
+2. `policy/policy-gate/metrics` 返回结构化真实对象。
 3. 协议 Session 类型与 API 文档同步扩展字段。
 
 ### Batch C：工程闭环（local）（已完成 MVP）
 
 1. policy repository（SQLite/InMemory）接入。
-2. approval repository（SQLite/InMemory）接入并可 resolve。
-3. 工具执行前 policy gate（deny/allow/approval-required）接入。
+2. policy-gate repository（SQLite/InMemory）接入并可 resolve。
+3. 工具执行前 policy gate（deny/allow/allow）接入。
 4. metrics summary 改为真实聚合。
 
 ### Batch D：记忆 MVP（已完成）
@@ -53,8 +53,8 @@
 
 ## 4. 验收口径（当前）
 
-1. 契约可测：网关路由测试覆盖 `sessions.get/policy/approval/metrics`。
-2. 持久化可测：policy/approval/session 元数据重启后可恢复。
+1. 契约可测：网关路由测试覆盖 `sessions.get/policy/policy-gate/metrics`。
+2. 持久化可测：policy/policy-gate/session 元数据重启后可恢复。
 3. 记忆可测：路径白名单、daily append、读取行为可测。
 4. 回归可测：`agent.run`、idempotency、`runtime.setMode(local)` 不退化。
 

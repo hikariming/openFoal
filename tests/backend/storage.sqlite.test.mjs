@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
-  SqliteApprovalRepository,
   SqliteIdempotencyRepository,
   SqliteMetricsRepository,
   SqlitePolicyRepository,
@@ -171,7 +170,7 @@ test("sqlite idempotency repository persists cached result", async () => {
   }
 });
 
-test("sqlite policy/approval/metrics repositories persist across instances", async () => {
+test("sqlite policy/metrics repositories persist across instances", async () => {
   const dir = mkdtempSync(join(tmpdir(), "openfoal-storage-extra-"));
   const dbPath = join(dir, "storage.sqlite");
 
@@ -181,23 +180,11 @@ test("sqlite policy/approval/metrics repositories persist across instances", asy
     const updated = await policyA.update({
       toolDefault: "allow",
       tools: {
-        "bash.exec": "approval-required"
+        "bash.exec": "allow"
       }
     });
     assert.equal(updated.version > current.version, true);
     assert.equal(updated.toolDefault, "allow");
-
-    const approvalA = new SqliteApprovalRepository(dbPath);
-    const created = await approvalA.create({
-      sessionId: "s_default",
-      runId: "run_repo_1",
-      toolName: "bash.exec",
-      toolCallId: "tc_repo_1",
-      argsFingerprint: "{\"cmd\":\"echo hi\"}"
-    });
-    assert.equal(created.status, "pending");
-    const resolved = await approvalA.resolve(created.approvalId, "reject", "not allowed");
-    assert.equal(resolved?.status, "rejected");
 
     const metricsA = new SqliteMetricsRepository(dbPath);
     await metricsA.recordRun({
@@ -218,15 +205,12 @@ test("sqlite policy/approval/metrics repositories persist across instances", asy
     });
 
     const policyB = new SqlitePolicyRepository(dbPath);
-    const approvalB = new SqliteApprovalRepository(dbPath);
     const metricsB = new SqliteMetricsRepository(dbPath);
 
     const persistedPolicy = await policyB.get();
-    const persistedApproval = await approvalB.get(created.approvalId);
     const summary = await metricsB.summary();
 
     assert.equal(persistedPolicy.toolDefault, "allow");
-    assert.equal(persistedApproval?.status, "rejected");
     assert.equal(summary.runsTotal, 2);
     assert.equal(summary.runsFailed, 1);
     assert.equal(summary.toolCallsTotal, 3);

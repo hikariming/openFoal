@@ -1,6 +1,5 @@
 import { createRuntimeCoreService, type CoreEvent, type CoreService } from "../../../packages/core/dist/index.js";
 import {
-  InMemoryApprovalRepository,
   DEFAULT_SESSION_PREVIEW,
   DEFAULT_SESSION_TITLE,
   InMemoryIdempotencyRepository,
@@ -8,15 +7,11 @@ import {
   InMemoryPolicyRepository,
   InMemorySessionRepository,
   InMemoryTranscriptRepository,
-  SqliteApprovalRepository,
   SqliteIdempotencyRepository,
   SqliteMetricsRepository,
   SqlitePolicyRepository,
   SqliteSessionRepository,
   SqliteTranscriptRepository,
-  type ApprovalRecord,
-  type ApprovalRepository,
-  type ApprovalStatus,
   type IdempotencyRepository,
   type MetricsRepository,
   type PolicyDecision,
@@ -30,7 +25,6 @@ import {
 } from "../../../packages/storage/dist/index.js";
 import {
   createLocalToolExecutor,
-  type ToolContext,
   type ToolExecutor,
   type ToolResult
 } from "../../../packages/tool-executor/dist/index.js";
@@ -94,7 +88,6 @@ interface GatewayDeps {
   transcriptRepo?: TranscriptRepository;
   idempotencyRepo?: IdempotencyRepository;
   policyRepo?: PolicyRepository;
-  approvalRepo?: ApprovalRepository;
   metricsRepo?: MetricsRepository;
   now?: () => Date;
 }
@@ -114,23 +107,13 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const transcriptRepo = deps.transcriptRepo ?? new InMemoryTranscriptRepository();
   const idempotencyRepo = deps.idempotencyRepo ?? new InMemoryIdempotencyRepository();
   const policyRepo = deps.policyRepo ?? new InMemoryPolicyRepository();
-  const approvalRepo = deps.approvalRepo ?? new InMemoryApprovalRepository();
   const metricsRepo = deps.metricsRepo ?? new InMemoryMetricsRepository();
   const now = deps.now ?? (() => new Date());
-  const approvalEventSinks = new Map<string, (approval: ApprovalRecord) => void>();
   const baseToolExecutor = deps.toolExecutor ?? createLocalToolExecutor();
   const internalToolExecutor = deps.internalToolExecutor ?? baseToolExecutor;
   const policyAwareToolExecutor = createPolicyAwareToolExecutor({
     base: baseToolExecutor,
-    policyRepo,
-    approvalRepo,
-    now,
-    onApprovalRequired: (approval, ctx) => {
-      const sink = approvalEventSinks.get(ctx.runId);
-      if (sink) {
-        sink(approval);
-      }
-    }
+    policyRepo
   });
   const coreService = deps.coreService ?? createRuntimeCoreService({ toolExecutor: policyAwareToolExecutor });
 
@@ -181,10 +164,8 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         sessionRepo,
         transcriptRepo,
         policyRepo,
-        approvalRepo,
         metricsRepo,
         internalToolExecutor,
-        approvalEventSinks,
         now,
         options
       );
@@ -211,7 +192,6 @@ export async function startGatewayServer(options: GatewayServerOptions = {}): Pr
       transcriptRepo: new SqliteTranscriptRepository(options.sqlitePath),
       idempotencyRepo: new SqliteIdempotencyRepository(options.sqlitePath),
       policyRepo: new SqlitePolicyRepository(options.sqlitePath),
-      approvalRepo: new SqliteApprovalRepository(options.sqlitePath),
       metricsRepo: new SqliteMetricsRepository(options.sqlitePath)
     });
   const httpConnections = new Map<string, ConnectionState>();
@@ -261,10 +241,8 @@ async function route(
   sessionRepo: SessionRepository,
   transcriptRepo: TranscriptRepository,
   policyRepo: PolicyRepository,
-  approvalRepo: ApprovalRepository,
   metricsRepo: MetricsRepository,
   internalToolExecutor: ToolExecutor,
-  approvalEventSinks: Map<string, (approval: ApprovalRecord) => void>,
   now: () => Date,
   options: GatewayHandleOptions
 ): Promise<GatewayHandleResult> {
@@ -473,13 +451,6 @@ async function route(
             const runId = mapped.payload.runId;
             if (typeof runId === "string") {
               acceptedRunId = runId;
-              approvalEventSinks.set(runId, (approval) => {
-                emit(
-                  createEvent(state, "approval.required", {
-                    approval
-                  })
-                );
-              });
             }
           } else if (mapped.event === "agent.tool_call") {
             toolCallsTotal += 1;
@@ -493,9 +464,6 @@ async function route(
         }
       } finally {
         state.runningSessionIds.delete(sessionId);
-        if (acceptedRunId) {
-          approvalEventSinks.delete(acceptedRunId);
-        }
       }
 
       const queuedMode = state.queuedModeChanges.get(sessionId);
@@ -602,54 +570,6 @@ async function route(
       };
     }
 
-    case "approval.queue": {
-      const status = asApprovalStatus(req.params.status);
-      if (req.params.status !== undefined && !status) {
-        return invalidParams(req.id, "approval.queue 的 status 仅支持 pending|approved|rejected");
-      }
-      const runId = requireString(req.params, "runId");
-      const sessionId = requireString(req.params, "sessionId");
-      let items = runId && (!status || status === "pending") ? await approvalRepo.listPendingByRun(runId) : await approvalRepo.list(status);
-      if (runId) {
-        items = items.filter((item) => item.runId === runId);
-      }
-      if (sessionId) {
-        items = items.filter((item) => item.sessionId === sessionId);
-      }
-      return {
-        response: makeSuccessRes(req.id, {
-          items
-        }),
-        events: []
-      };
-    }
-
-    case "approval.resolve": {
-      const approvalId = requireString(req.params, "approvalId");
-      const decision = asApprovalDecision(req.params.decision ?? req.params.action);
-      const reason = requireString(req.params, "reason") ?? requireString(req.params, "comment");
-      if (!approvalId || !decision) {
-        return invalidParams(req.id, "approval.resolve 需要 approvalId 和 decision(approve|reject)");
-      }
-      const approval = await approvalRepo.resolve(approvalId, decision, reason);
-      if (!approval) {
-        return {
-          response: makeErrorRes(req.id, "INVALID_REQUEST", `未知审批单: ${approvalId}`),
-          events: []
-        };
-      }
-      return {
-        response: makeSuccessRes(req.id, {
-          approval
-        }),
-        events: [
-          createEvent(state, "approval.resolved", {
-            approval
-          })
-        ]
-      };
-    }
-
     case "audit.query": {
       return {
         response: makeSuccessRes(req.id, {
@@ -664,6 +584,179 @@ async function route(
       return {
         response: makeSuccessRes(req.id, {
           metrics
+        }),
+        events: []
+      };
+    }
+
+    case "memory.get": {
+      const toolResult = await internalToolExecutor.execute(
+        {
+          name: "memory.get",
+          args: req.params
+        },
+        {
+          runId: `memory_get_${Date.now().toString(36)}`,
+          sessionId: "session_memory_api",
+          runtimeMode: "local"
+        }
+      );
+      if (!toolResult.ok) {
+        return {
+          response: makeErrorRes(
+            req.id,
+            toolResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+            toolResult.error?.message ?? "memory.get 失败"
+          ),
+          events: []
+        };
+      }
+      return {
+        response: makeSuccessRes(req.id, {
+          memory: parseToolJsonOutput(toolResult.output)
+        }),
+        events: []
+      };
+    }
+
+    case "memory.appendDaily": {
+      const toolResult = await internalToolExecutor.execute(
+        {
+          name: "memory.appendDaily",
+          args: req.params
+        },
+        {
+          runId: `memory_append_${Date.now().toString(36)}`,
+          sessionId: "session_memory_api",
+          runtimeMode: "local"
+        }
+      );
+      if (!toolResult.ok) {
+        return {
+          response: makeErrorRes(
+            req.id,
+            toolResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+            toolResult.error?.message ?? "memory.appendDaily 失败"
+          ),
+          events: []
+        };
+      }
+      return {
+        response: makeSuccessRes(req.id, {
+          result: parseToolJsonOutput(toolResult.output)
+        }),
+        events: []
+      };
+    }
+
+    case "memory.archive": {
+      const date = normalizeMemoryDate(req.params.date);
+      if (!date) {
+        return invalidParams(req.id, "memory.archive 的 date 必须为 YYYY-MM-DD");
+      }
+      const includeLongTerm = req.params.includeLongTerm !== false;
+      const clearDaily = req.params.clearDaily !== false;
+      const dailyPath = `memory/${date}.md`;
+
+      let dailyText = "";
+      const readResult = await internalToolExecutor.execute(
+        {
+          name: "file.read",
+          args: {
+            path: dailyPath
+          }
+        },
+        {
+          runId: `memory_archive_read_${Date.now().toString(36)}`,
+          sessionId: "session_memory_api",
+          runtimeMode: "local"
+        }
+      );
+      if (readResult.ok) {
+        dailyText = readResult.output ?? "";
+      } else if (!String(readResult.error?.message ?? "").includes("ENOENT")) {
+        return {
+          response: makeErrorRes(
+            req.id,
+            readResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+            readResult.error?.message ?? "memory.archive 读取失败"
+          ),
+          events: []
+        };
+      }
+
+      if (includeLongTerm && dailyText.trim().length > 0) {
+        const archivedContent = [
+          `## Archived ${date} (${now().toISOString()})`,
+          "",
+          dailyText.trimEnd(),
+          ""
+        ].join("\n");
+        const appendResult = await internalToolExecutor.execute(
+          {
+            name: "file.write",
+            args: {
+              path: "MEMORY.md",
+              content: `${archivedContent}\n`,
+              append: true
+            }
+          },
+          {
+            runId: `memory_archive_append_${Date.now().toString(36)}`,
+            sessionId: "session_memory_api",
+            runtimeMode: "local"
+          }
+        );
+        if (!appendResult.ok) {
+          return {
+            response: makeErrorRes(
+              req.id,
+              appendResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+              appendResult.error?.message ?? "memory.archive 归档失败"
+            ),
+            events: []
+          };
+        }
+      }
+
+      if (clearDaily) {
+        const clearResult = await internalToolExecutor.execute(
+          {
+            name: "file.write",
+            args: {
+              path: dailyPath,
+              content: "",
+              append: false
+            }
+          },
+          {
+            runId: `memory_archive_clear_${Date.now().toString(36)}`,
+            sessionId: "session_memory_api",
+            runtimeMode: "local"
+          }
+        );
+        if (!clearResult.ok) {
+          return {
+            response: makeErrorRes(
+              req.id,
+              clearResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+              clearResult.error?.message ?? "memory.archive 清理失败"
+            ),
+            events: []
+          };
+        }
+      }
+
+      return {
+        response: makeSuccessRes(req.id, {
+          result: {
+            date,
+            dailyPath,
+            includeLongTerm,
+            clearDaily,
+            archivedLines: dailyText.length > 0 ? dailyText.split(/\r?\n/).length : 0,
+            archivedBytes: byteLen(dailyText)
+          }
         }),
         events: []
       };
@@ -706,9 +799,7 @@ const TRANSCRIPT_KEY_EVENT_NAMES = new Set<EventFrame["event"]>([
   "agent.completed",
   "agent.failed",
   "runtime.mode_changed",
-  "session.updated",
-  "approval.required",
-  "approval.resolved"
+  "session.updated"
 ]);
 
 function filterEventsForTranscript(events: EventFrame[]): EventFrame[] {
@@ -1304,7 +1395,6 @@ function asLlmOptions(
 
 const HIGH_RISK_TOOLS = new Set(["bash.exec", "http.request", "file.write", "memory.appendDaily"]);
 const PRE_COMPACTION_THRESHOLD = 0.85;
-const APPROVAL_WAIT_TIMEOUT_MS = 90_000;
 
 function asString(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -1314,15 +1404,7 @@ function asString(value: unknown): string | undefined {
 }
 
 function asPolicyDecision(value: unknown): PolicyDecision | undefined {
-  return value === "deny" || value === "allow" || value === "approval-required" ? value : undefined;
-}
-
-function asApprovalStatus(value: unknown): ApprovalStatus | undefined {
-  return value === "pending" || value === "approved" || value === "rejected" ? value : undefined;
-}
-
-function asApprovalDecision(value: unknown): "approve" | "reject" | undefined {
-  return value === "approve" || value === "reject" ? value : undefined;
+  return value === "deny" || value === "allow" ? value : undefined;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -1367,9 +1449,6 @@ function resolveToolDecision(policy: PolicyRecord, toolName: string): PolicyDeci
 function createPolicyAwareToolExecutor(input: {
   base: ToolExecutor;
   policyRepo: PolicyRepository;
-  approvalRepo: ApprovalRepository;
-  now: () => Date;
-  onApprovalRequired?: (approval: ApprovalRecord, ctx: ToolContext) => void;
 }): ToolExecutor {
   return {
     async execute(call, ctx, hooks): Promise<ToolResult> {
@@ -1384,48 +1463,6 @@ function createPolicyAwareToolExecutor(input: {
             message: `策略拒绝执行工具: ${call.name}`
           }
         };
-      }
-
-      if (decision === "approval-required") {
-        const argsFingerprint = stableStringify(call.args ?? {});
-        let approval = await input.approvalRepo.findByMatch(ctx.sessionId, ctx.runId, call.name, argsFingerprint);
-        if (!approval) {
-          approval = await input.approvalRepo.create({
-            sessionId: ctx.sessionId,
-            runId: ctx.runId,
-            toolName: call.name,
-            toolCallId: ctx.toolCallId,
-            argsFingerprint,
-            createdAt: input.now().toISOString()
-          });
-          input.onApprovalRequired?.(approval, ctx);
-        }
-
-        if (approval.status === "pending") {
-          const resolved = await input.approvalRepo.waitForResolution(approval.approvalId, APPROVAL_WAIT_TIMEOUT_MS);
-          if (!resolved || resolved.status === "pending") {
-            return {
-              ok: false,
-              error: {
-                code: "APPROVAL_REQUIRED",
-                message: `工具执行等待审批: ${approval.approvalId}`
-              }
-            };
-          }
-          approval = resolved;
-        }
-
-        if (approval.status === "rejected") {
-          return {
-            ok: false,
-            error: {
-              code: "POLICY_DENIED",
-              message: approval.reason
-                ? `审批拒绝(${approval.approvalId}): ${approval.reason}`
-                : `审批拒绝: ${approval.approvalId}`
-            }
-          };
-        }
       }
 
       return await input.base.execute(call, ctx, hooks);
@@ -1543,6 +1580,33 @@ function sortObject(value: unknown): unknown {
 
 function cloneResult(result: GatewayHandleResult): GatewayHandleResult {
   return JSON.parse(JSON.stringify(result)) as GatewayHandleResult;
+}
+
+function parseToolJsonOutput(output: string | undefined): unknown {
+  if (!output) {
+    return {};
+  }
+  try {
+    return JSON.parse(output);
+  } catch {
+    return {
+      text: output
+    };
+  }
+}
+
+function normalizeMemoryDate(value: unknown): string | undefined {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+    return value.trim();
+  }
+  if (value === undefined || value === null) {
+    return new Date().toISOString().slice(0, 10);
+  }
+  return undefined;
+}
+
+function byteLen(text: string): number {
+  return Buffer.byteLength(text ?? "");
 }
 
 function extractRequestId(input: unknown): string {

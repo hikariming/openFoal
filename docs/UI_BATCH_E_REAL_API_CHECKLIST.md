@@ -17,9 +17,9 @@
 
 最小改动点：
 1. 扩展 `GatewayMethod`：
-- 增加 `policy.get`、`policy.update`、`approval.queue`、`approval.resolve`、`audit.query`、`metrics.summary`。
+- 增加 `policy.get`、`policy.update`、`（已移除）`、`（已移除）`、`audit.query`、`metrics.summary`。
 2. 扩展 side-effect 集合：
-- `SIDE_EFFECT_METHODS` 增加 `policy.update`、`approval.resolve`。
+- `SIDE_EFFECT_METHODS` 增加 `policy.update`、`（已移除）`。
 3. 扩展 `GatewaySession` 类型：
 - 增加 `contextUsage`、`compactionCount`、`memoryFlushState`、`memoryFlushAt?`。
 4. 更新 `isGatewaySession` 校验：
@@ -28,7 +28,7 @@
 - `getPolicy(scopeKey?: string)`
 - `updatePolicy(patch, scopeKey?: string)`
 - `listApprovals(params?: {status?: "pending"|"approved"|"rejected"; runId?: string; sessionId?: string})`
-- `resolveApproval(params: {approvalId: string; decision: "approve"|"reject"; reason?: string})`
+- `resolveApproval(params: {runId: string; decision: "approve"|"reject"; reason?: string})`
 - `getMetricsSummary()`
 - `queryAudit(params?)`（先返回空列表也可，保持契约）
 6. `setRuntimeMode` 改为返回 payload（至少带 `status`、`effectiveOn?`），供 UI 提示 queued/applied。
@@ -76,7 +76,7 @@
 
 ---
 
-## 4) Desktop：聊天页状态栏与审批感知
+## 4) Desktop：聊天页状态栏与策略门禁感知
 
 文件：`/Users/rqq/openFoal/apps/desktop/src/pages/ChatView.tsx`
 
@@ -86,14 +86,14 @@
 - `contextUsage`（百分比）
 - `compactionCount`
 - `memoryFlushState`（idle/pending/flushed/skipped）
-3. 增加 `approval.required` 事件处理：
-- 插入 system 消息，展示 `approvalId/toolName/runId`。
-- 文案提示“需在控制台审批后继续”。
-4. 增加 `approval.resolved` 事件处理：
+3. 增加 `agent.failed` 事件处理：
+- 插入 system 消息，展示 `runId/toolName/runId`。
+- 文案提示“需在控制台策略门禁后继续”。
+4. 增加 `（已移除）d` 事件处理：
 - 插入 system 消息，展示 `status/decision/reason`。
 
 验收：
-1. 触发高风险工具时，聊天流里能看到审批提示。
+1. 触发高风险工具时，聊天流里能看到策略门禁提示。
 2. 会话状态栏能实时显示新增元数据。
 
 ---
@@ -104,30 +104,30 @@
 
 最小改动点：
 1. 删除顶部静态数组：
-- `sessions`、`approvals`、`audits`。
+- `sessions`、`controls`、`audits`。
 2. 增加页面状态：
 - `loading`、`error`
-- `sessions`、`policy`、`approvals`、`audits`、`metrics`
+- `sessions`、`policy`、`controls`、`audits`、`metrics`
 3. `useEffect` 首次加载并并发请求：
 - `sessions.list`
 - `policy.get`
-- `approval.queue`
+- `（已移除）`
 - `audit.query`
 - `metrics.summary`
 4. 卡片字段改为真实字段：
 - 会话卡：`id/title/runtimeMode/syncState/updatedAt`
 - 策略卡：`toolDefault/highRisk/bashMode/version/updatedAt`
-- 审批卡：`approvalId/toolName/runId/status`
+- 策略门禁卡：`runId/toolName/runId/status`
 - 审计卡：`action/actor/createdAt`
 - KPI 卡：`runsTotal/runsFailed/toolCallsTotal/toolFailures/p95LatencyMs`
-5. 审批卡增加两个按钮：
-- Approve -> `approval.resolve(decision="approve")`
-- Reject -> `approval.resolve(decision="reject")`
-- 完成后刷新 `approval.queue` 与 `metrics.summary`。
+5. 策略门禁卡增加两个按钮：
+- Approve -> `（已移除）(decision="approve")`
+- Reject -> `（已移除）(decision="reject")`
+- 完成后刷新 `（已移除）` 与 `metrics.summary`。
 
 验收：
 1. 页面刷新后不再看到硬编码 mock 数据。
-2. 审批按钮可直接驱动后端状态变化。
+2. 策略门禁按钮可直接驱动后端状态变化。
 
 ---
 
@@ -178,7 +178,7 @@
 ## 8) 联调检查（完成定义）
 
 1. Desktop 进入某会话后，状态栏能看到 `contextUsage/compactionCount/memoryFlushState`。
-2. Desktop 触发 `bash.exec` 时，能看到 `approval.required` 提示。
-3. Web Console 审批卡能看到 pending 项并可 approve/reject。
+2. Desktop 触发 `bash.exec` 时，能看到 `agent.failed` 提示。
+3. Web Console 策略门禁卡能看到 pending 项并可 approve/reject。
 4. approve 后，Desktop 对应 run 可继续完成；reject 后 run 失败且有解释。
 5. Web Console KPI 展示真实 `metrics.summary` 字段，不再是占位数字。

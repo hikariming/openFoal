@@ -7,8 +7,8 @@
 1. Workspace/Agent 切换
 2. 会话列表与会话详情
 3. 模型策略（allowlist/fallback/budget）
-4. 工具策略（deny/allow/approval）
-5. 审批中心（高风险工具）
+4. 工具策略（deny/allow/policy-gate）
+5. 策略门禁中心（高风险工具）
 6. 审计日志（筛选、检索、导出入口）
 7. 运行健康（QPS、错误率、延迟）
 
@@ -46,6 +46,6 @@
 
 1. `sessions.list`: `channel`, `target`, `status`
 2. `policy.get/update`: `toolPolicy`, `modelPolicy`, `patch`
-3. `approval.queue/resolve`: `approvalId`, `toolName`, `decision`, `status`
+3. `（已移除）/resolve`: `runId`, `toolName`, `decision`, `status`
 4. `audit.query`: `action`, `actor`, `resource`, `createdAt`
 5. `metrics.summary`（预留）: `qps`, `errorRate`, `p95`, `cost`

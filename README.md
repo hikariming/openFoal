@@ -119,7 +119,7 @@ openFoal/
     core/                  # pi runtime wrapper
     gateway-core/          # auth/routing/session/policy
     channel-connectors/    # slack/telegram/discord/...
-    tool-executor/         # tools + sandbox + approvals
+    tool-executor/         # tools + sandbox + controls
     skill-engine/          # skill discovery/validation/load
     model-adapters/        # provider policy + fallback strategy
     storage/               # repositories + migrations

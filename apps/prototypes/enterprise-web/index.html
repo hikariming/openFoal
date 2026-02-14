@@ -99,7 +99,7 @@
         <a class="active" href="#">总览 Dashboard</a>
         <a href="#">会话 Sessions</a>
         <a href="#">策略 Policies</a>
-        <a href="#">审批 Approvals</a>
+        <a href="#">控制 Policies</a>
         <a href="#">审计 Audit</a>
         <a href="#">模型 Models</a>
         <a href="#">工具 Tools</a>
@@ -133,11 +133,11 @@
         </article>
 
         <article class="card approvals">
-          <h2>审批中心（绑定 `approval.queue`）</h2>
+          <h2>工具执行（无人工审批）</h2>
           <ul class="list">
-            <li class="row"><span>bash.exec: kubectl apply ...</span><span>owner 审批中</span></li>
-            <li class="row"><span>http.request: 外网域名</span><span>security 审批中</span></li>
-            <li class="row"><span>file.write: /secrets/*</span><span>blocked</span></li>
+            <li class="row"><span>bash.exec: kubectl apply ...</span><span>running</span></li>
+            <li class="row"><span>http.request: 外网域名</span><span>running</span></li>
+            <li class="row"><span>file.write: /secrets/*</span><span>denied by policy</span></li>
           </ul>
         </article>
 
@@ -146,7 +146,7 @@
           <ul class="list">
             <li class="row"><span>DM 策略</span><span>pairing</span></li>
             <li class="row"><span>Tool 默认策略</span><span>deny</span></li>
-            <li class="row"><span>高风险工具</span><span>approval-required</span></li>
+            <li class="row"><span>高风险工具</span><span>allow</span></li>
             <li class="row"><span>模型 fallback</span><span>enabled</span></li>
           </ul>
         </article>

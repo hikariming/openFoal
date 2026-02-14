@@ -17,7 +17,6 @@ import {
 } from "@douyinfe/semi-ui";
 import {
   IconActivity,
-  IconCheckList,
   IconClock,
   IconHistogram,
   IconSafe,
@@ -27,8 +26,6 @@ import {
 } from "@douyinfe/semi-icons";
 import {
   getGatewayClient,
-  type ApprovalStatus,
-  type GatewayApproval,
   type GatewayAuditItem,
   type GatewayMetricsSummary,
   type GatewayPolicy,
@@ -63,10 +60,8 @@ export function App() {
   const client = useMemo(() => getGatewayClient(), []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [resolvingApprovalId, setResolvingApprovalId] = useState("");
   const [sessions, setSessions] = useState<GatewaySession[]>([]);
   const [policy, setPolicy] = useState<GatewayPolicy | null>(null);
-  const [approvals, setApprovals] = useState<GatewayApproval[]>([]);
   const [audits, setAudits] = useState<GatewayAuditItem[]>([]);
   const [metrics, setMetrics] = useState<GatewayMetricsSummary>(EMPTY_METRICS);
 
@@ -74,16 +69,14 @@ export function App() {
     setLoading(true);
     setError("");
     try {
-      const [nextSessions, nextPolicy, nextApprovals, nextAudits, nextMetrics] = await Promise.all([
+      const [nextSessions, nextPolicy, nextAudits, nextMetrics] = await Promise.all([
         client.listSessions(),
         client.getPolicy(),
-        client.listApprovals({ status: "pending" }),
         client.queryAudit({ limit: 20 }),
         client.getMetricsSummary()
       ]);
       setSessions(nextSessions);
       setPolicy(nextPolicy);
-      setApprovals(nextApprovals);
       setAudits(nextAudits);
       setMetrics(nextMetrics);
     } catch (loadError) {
@@ -97,27 +90,6 @@ export function App() {
     void refreshDashboard();
   }, [refreshDashboard]);
 
-  const handleResolveApproval = useCallback(
-    async (approvalId: string, decision: "approve" | "reject"): Promise<void> => {
-      setResolvingApprovalId(approvalId);
-      setError("");
-      try {
-        await client.resolveApproval({
-          approvalId,
-          decision,
-          reason: decision === "approve" ? "approved from console" : "rejected from console"
-        });
-        await refreshDashboard();
-      } catch (resolveError) {
-        setError(resolveError instanceof Error ? resolveError.message : String(resolveError));
-      } finally {
-        setResolvingApprovalId("");
-      }
-    },
-    [client, refreshDashboard]
-  );
-
-  const approvalCount = approvals.length;
   const runsFailedRate = metrics.runsTotal > 0 ? (metrics.runsFailed / metrics.runsTotal) * 100 : 0;
 
   return (
@@ -131,7 +103,6 @@ export function App() {
             { itemKey: "dashboard", text: "总览", icon: <IconHistogram /> },
             { itemKey: "sessions", text: "会话", icon: <IconActivity /> },
             { itemKey: "policies", text: "策略", icon: <IconSafe /> },
-            { itemKey: "approvals", text: "审批", icon: <IconCheckList /> },
             { itemKey: "audit", text: "审计", icon: <IconClock /> },
             { itemKey: "models", text: "模型", icon: <IconServer /> },
             { itemKey: "settings", text: "设置", icon: <IconSetting /> }
@@ -169,7 +140,7 @@ export function App() {
         <Layout.Content className="console-content">
           <Banner
             type={error ? "danger" : "info"}
-            description={error ? `加载失败：${error}` : "已接入 Gateway API（sessions/policy/approval/audit/metrics）。"}
+            description={error ? `加载失败：${error}` : "已接入 Gateway API（sessions/policy/audit/metrics）。"}
             closeIcon={null}
           />
 
@@ -188,12 +159,12 @@ export function App() {
               <KpiCard title="Tool Calls" value={String(metrics.toolCallsTotal)} hint="metrics.summary.toolCallsTotal" />
             </Col>
             <Col span={6}>
-              <KpiCard title="Pending Approvals" value={String(approvalCount)} hint="approval.queue(status=pending)" />
+              <KpiCard title="P95 Latency" value={`${metrics.p95LatencyMs} ms`} hint="metrics.summary.p95LatencyMs" />
             </Col>
           </Row>
 
           <Row gutter={[12, 12]} style={{ marginTop: 4 }}>
-            <Col span={14}>
+            <Col span={12}>
               <Card title="活跃会话（sessions.list）">
                 {sessions.length === 0 ? (
                   <Typography.Text type="tertiary">No sessions</Typography.Text>
@@ -214,53 +185,6 @@ export function App() {
                               flush {item.memoryFlushState} · {formatDate(item.updatedAt)}
                             </Typography.Text>
                           </div>
-                        }
-                      />
-                    )}
-                  />
-                )}
-              </Card>
-            </Col>
-
-            <Col span={10}>
-              <Card title="审批中心（approval.queue）">
-                {approvals.length === 0 ? (
-                  <Typography.Text type="tertiary">No pending approvals</Typography.Text>
-                ) : (
-                  <List
-                    dataSource={approvals}
-                    renderItem={(item: GatewayApproval) => (
-                      <List.Item
-                        main={
-                          <div>
-                            <Typography.Text>{item.toolName}</Typography.Text>
-                            <Typography.Text type="tertiary" size="small">
-                              {item.approvalId} · {item.runId}
-                            </Typography.Text>
-                          </div>
-                        }
-                        extra={
-                          <Space spacing={8}>
-                            {renderApprovalStatusTag(item.status)}
-                            <Button
-                              theme="light"
-                              type="primary"
-                              size="small"
-                              loading={resolvingApprovalId === item.approvalId}
-                              onClick={() => void handleResolveApproval(item.approvalId, "approve")}
-                            >
-                              Approve
-                            </Button>
-                            <Button
-                              theme="light"
-                              type="danger"
-                              size="small"
-                              loading={resolvingApprovalId === item.approvalId}
-                              onClick={() => void handleResolveApproval(item.approvalId, "reject")}
-                            >
-                              Reject
-                            </Button>
-                          </Space>
                         }
                       />
                     )}
@@ -347,16 +271,6 @@ function renderSyncStateTag(syncState: GatewaySession["syncState"]): JSX.Element
     return <Tag color="red">conflict</Tag>;
   }
   return <Tag color="grey">local_only</Tag>;
-}
-
-function renderApprovalStatusTag(status: ApprovalStatus): JSX.Element {
-  if (status === "approved") {
-    return <Tag color="green">approved</Tag>;
-  }
-  if (status === "rejected") {
-    return <Tag color="red">rejected</Tag>;
-  }
-  return <Tag color="orange">pending</Tag>;
 }
 
 function formatDate(input: string | undefined): string {

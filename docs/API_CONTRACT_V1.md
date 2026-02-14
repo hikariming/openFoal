@@ -57,10 +57,13 @@
 | `sessions.get` | 会话详情查询 | 否 | 否 |
 | `policy.get` | 读取策略 | 否 | 否 |
 | `policy.update` | 更新策略 | 是 | 是 |
-| `approval.queue` | 查询待审批队列 | 否 | 否 |
-| `approval.resolve` | 审批通过/拒绝 | 是 | 是 |
+| `（已移除）` | 查询待策略门禁队列 | 否 | 否 |
+| `（已移除）` | 策略门禁通过/拒绝 | 是 | 是 |
 | `audit.query` | 审计检索 | 否 | 否 |
 | `metrics.summary` | 指标汇总（真实聚合） | 否 | 否 |
+| `memory.get` | 读取记忆文件（白名单） | 否 | 否 |
+| `memory.appendDaily` | 追加到 daily 记忆（可选写入 MEMORY.md） | 是 | 是 |
+| `memory.archive` | 归档 daily 记忆到 MEMORY.md（可选清空 daily） | 是 | 是 |
 
 ## 事件列表
 
@@ -74,8 +77,8 @@
 6. `agent.failed`
 7. `runtime.mode_changed`
 8. `session.updated`
-9. `approval.required`
-10. `approval.resolved`
+9. `agent.failed`
+10. `（已移除）d`
 
 ## 错误码
 
@@ -87,7 +90,7 @@
 | `IDEMPOTENCY_CONFLICT` | 幂等键冲突且参数不一致 | 生成新幂等键重试 |
 | `SESSION_BUSY` | 会话已被占用 | 排队或提示稍后重试 |
 | `POLICY_DENIED` | 策略拒绝执行 | 在 UI 展示具体策略原因 |
-| `APPROVAL_REQUIRED` | 工具调用需要审批 | 引导去审批中心处理 |
+| `POLICY_DENIED` | 工具调用需要策略门禁 | 引导去策略门禁中心处理 |
 | `MODEL_UNAVAILABLE` | 模型与 fallback 全部不可用 | 切换模型或稍后重试 |
 | `TOOL_EXEC_FAILED` | 工具执行失败 | 按错误内容做重试或降级 |
 | `INTERNAL_ERROR` | 未分类内部错误 | 记录 trace_id 并告警 |
@@ -100,7 +103,9 @@
 2. `agent.abort`
 3. `runtime.setMode`
 4. `policy.update`
-5. `approval.resolve`
+5. `（已移除）`
+6. `memory.appendDaily`
+7. `memory.archive`
 
 ### 服务端行为
 
@@ -380,7 +385,7 @@ interface ToolExecutor {
     "policy": {
       "scopeKey": "default",
       "toolDefault": "deny",
-      "highRisk": "approval-required",
+      "highRisk": "allow",
       "bashMode": "sandbox",
       "tools": {
         "math.add": "allow",
@@ -422,7 +427,7 @@ interface ToolExecutor {
     "policy": {
       "scopeKey": "default",
       "toolDefault": "allow",
-      "highRisk": "approval-required",
+      "highRisk": "allow",
       "bashMode": "sandbox",
       "tools": {
         "math.add": "allow"
@@ -434,13 +439,13 @@ interface ToolExecutor {
 }
 ```
 
-### 9) `approval.queue`
+### 9) `（已移除）`
 
 ```json
 {
   "type": "req",
-  "id": "r_approval_queue_1",
-  "method": "approval.queue",
+  "id": "r_policy_history_1",
+  "method": "（已移除）",
   "params": {
     "status": "pending"
   }
@@ -450,12 +455,12 @@ interface ToolExecutor {
 ```json
 {
   "type": "res",
-  "id": "r_approval_queue_1",
+  "id": "r_policy_history_1",
   "ok": true,
   "payload": {
     "items": [
       {
-        "approvalId": "ap_001",
+        "runId": "ap_001",
         "toolName": "bash.exec",
         "status": "pending",
         "runId": "run_001"
@@ -465,16 +470,16 @@ interface ToolExecutor {
 }
 ```
 
-### 10) `approval.resolve`
+### 10) `（已移除）`
 
 ```json
 {
   "type": "req",
   "id": "r_approval_resolve_1",
-  "method": "approval.resolve",
+  "method": "（已移除）",
   "params": {
     "idempotencyKey": "idem_approval_20260213_001",
-    "approvalId": "ap_001",
+    "runId": "ap_001",
     "decision": "approve",
     "comment": "owner approved"
   }
@@ -487,8 +492,8 @@ interface ToolExecutor {
   "id": "r_approval_resolve_1",
   "ok": true,
   "payload": {
-    "approval": {
-      "approvalId": "ap_001",
+    "policy-gate": {
+      "runId": "ap_001",
       "sessionId": "s_001",
       "runId": "run_001",
       "toolName": "bash.exec",

@@ -1,14 +1,11 @@
 export type RuntimeMode = "local" | "cloud";
 export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
-export type PolicyDecision = "deny" | "allow" | "approval-required";
-export type ApprovalStatus = "pending" | "approved" | "rejected";
+export type PolicyDecision = "deny" | "allow";
 
 type GatewayMethod =
   | "connect"
   | "sessions.list"
   | "policy.get"
-  | "approval.queue"
-  | "approval.resolve"
   | "audit.query"
   | "metrics.summary";
 
@@ -56,7 +53,7 @@ interface RpcSuccessEnvelope {
   events: RpcEvent[];
 }
 
-const SIDE_EFFECT_METHODS = new Set<GatewayMethod>(["approval.resolve"]);
+const SIDE_EFFECT_METHODS = new Set<GatewayMethod>();
 
 export type GatewaySession = {
   id: string;
@@ -80,20 +77,6 @@ export type GatewayPolicy = {
   tools: Record<string, PolicyDecision>;
   version: number;
   updatedAt: string;
-};
-
-export type GatewayApproval = {
-  approvalId: string;
-  sessionId: string;
-  runId: string;
-  toolName: string;
-  toolCallId?: string;
-  argsFingerprint: string;
-  status: ApprovalStatus;
-  decision?: "approve" | "reject";
-  reason?: string;
-  createdAt: string;
-  resolvedAt?: string;
 };
 
 export type GatewayMetricsSummary = {
@@ -181,42 +164,6 @@ export class GatewayClient {
     return policy;
   }
 
-  async listApprovals(params: {
-    status?: ApprovalStatus;
-    runId?: string;
-    sessionId?: string;
-  } = {}): Promise<GatewayApproval[]> {
-    await this.ensureConnected();
-    const result = await this.request("approval.queue", {
-      ...(params.status ? { status: params.status } : {}),
-      ...(params.runId ? { runId: params.runId } : {}),
-      ...(params.sessionId ? { sessionId: params.sessionId } : {})
-    });
-    const items = result.response.payload.items;
-    if (!Array.isArray(items)) {
-      return [];
-    }
-    return items.filter(isGatewayApproval);
-  }
-
-  async resolveApproval(input: {
-    approvalId: string;
-    decision: "approve" | "reject";
-    reason?: string;
-  }): Promise<GatewayApproval> {
-    await this.ensureConnected();
-    const result = await this.request("approval.resolve", {
-      approvalId: input.approvalId,
-      decision: input.decision,
-      ...(input.reason ? { reason: input.reason } : {})
-    });
-    const approval = result.response.payload.approval;
-    if (!isGatewayApproval(approval)) {
-      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid approval.resolve payload");
-    }
-    return approval;
-  }
-
   async queryAudit(params: {
     from?: string;
     to?: string;
@@ -251,12 +198,7 @@ export class GatewayClient {
       type: "req",
       id,
       method,
-      params: SIDE_EFFECT_METHODS.has(method)
-        ? {
-            ...params,
-            idempotencyKey: createIdempotencyKey(method)
-          }
-        : params
+      params: SIDE_EFFECT_METHODS.has(method) ? { ...params } : params
     };
 
     const endpoint = new URL("/rpc", this.baseUrl);
@@ -319,10 +261,6 @@ function createConnectionId(): string {
   return `console_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
 }
 
-function createIdempotencyKey(method: GatewayMethod): string {
-  return `${method}:${Date.now()}:${Math.random().toString(16).slice(2, 10)}`;
-}
-
 function isRpcEnvelope(value: Partial<RpcEnvelope>): value is RpcEnvelope {
   return Boolean(value.response && typeof value.response === "object" && Array.isArray(value.events));
 }
@@ -366,26 +304,6 @@ function isGatewayPolicy(value: unknown): value is GatewayPolicy {
   );
 }
 
-function isGatewayApproval(value: unknown): value is GatewayApproval {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const item = value as Record<string, unknown>;
-  return (
-    typeof item.approvalId === "string" &&
-    typeof item.sessionId === "string" &&
-    typeof item.runId === "string" &&
-    typeof item.toolName === "string" &&
-    typeof item.argsFingerprint === "string" &&
-    (item.status === "pending" || item.status === "approved" || item.status === "rejected") &&
-    (item.decision === undefined || item.decision === "approve" || item.decision === "reject") &&
-    (item.reason === undefined || typeof item.reason === "string") &&
-    (item.toolCallId === undefined || typeof item.toolCallId === "string") &&
-    typeof item.createdAt === "string" &&
-    (item.resolvedAt === undefined || typeof item.resolvedAt === "string")
-  );
-}
-
 function isGatewayMetricsSummary(value: unknown): value is GatewayMetricsSummary {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -405,7 +323,7 @@ function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
 }
 
 function isPolicyDecision(value: unknown): value is PolicyDecision {
-  return value === "deny" || value === "allow" || value === "approval-required";
+  return value === "deny" || value === "allow";
 }
 
 function toErrorMessage(error: unknown): string {
