@@ -1,0 +1,15 @@
+.git
+.gitignore
+.codex
+.openfoal
+.pnpm-store
+node_modules
+apps/*/node_modules
+packages/*/node_modules
+refproj
+memory
+*.log
+dist
+coverage
+tmp
+Dockerfile

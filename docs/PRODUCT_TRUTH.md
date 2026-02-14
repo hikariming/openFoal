@@ -53,13 +53,26 @@ OpenFoal 统一为 3 个产品块：
 6. P2 基线（后端 + 控制台最小闭环）：
    - `docker-runner` 目标选择后可走远程 HTTP 执行
    - `web-console` 已支持 `audit.query` 筛选与分页加载
+7. Docker 双版本启动：
+   - 单一 `docker-compose.yml` + profiles
+   - 个人版：`gateway + personal-web`
+   - 商业版：`gateway + web-console + docker-runner + bootstrap-enterprise`
+   - 已提供 `npm run up:personal` / `npm run up:enterprise` 一键命令
+8. Auth & Tenant 第一阶段（Enterprise）：
+   - `OPENFOAL_AUTH_MODE=none|local|external|hybrid`
+   - Gateway 已支持本地 JWT（HS256）与外部 JWT（JWKS + RS256）
+   - `connect` 成功后绑定 `principal`（tenant/workspace/roles/authSource）
+   - Enterprise 治理接口已接入租户/工作区 scope 注入与基础 RBAC（三角色）
+   - 已提供 `/auth/login` `/auth/refresh` `/auth/me` `/auth/logout`
+   - 已落地账号与租户基础表：`tenants/users/user_tenants/workspace_memberships/auth_identities/refresh_tokens`
 
 ### 2.2 未实现 / 仅占位
 
 1. `runtimeMode=cloud` 仅语义存在，尚未形成独立云执行闭环。
-2. 企业多租户/RBAC/SSO 未落地。
+2. 企业账号体系已完成第一阶段（JWT + 租户隔离 + 三角色 RBAC）；完整 SSO 门户、复杂权限树、组织架构仍未落地。
 3. 个人 Web 聊天入口已落地最小版本，仍需补齐更完整 UI 冒烟自动化。
 4. `docker-runner` 当前为最小 HTTP 协议版，尚未覆盖 mTLS/证书轮换/重试队列等生产级能力。
+5. Docker 部署当前默认 HTTP（未集成 HTTPS 证书与反向代理）。
 
 ### 2.3 本期不做（P0-P2 范围外）
 
@@ -166,6 +179,7 @@ OpenFoal 统一为 3 个产品块：
 2. `/Users/rqq/openFoal/docs/testing/P1_PERSONAL_ACCESS_TEST_PLAN.md`
 3. `/Users/rqq/openFoal/docs/testing/P2_ENTERPRISE_CONTROL_TEST_PLAN.md`
 4. `/Users/rqq/openFoal/docs/testing/P2_DOCKER_RUNNER_HTTP_PROTOCOL.md`
+5. `/Users/rqq/openFoal/docs/testing/AUTH_TENANT_TEST_PLAN.md`
 
 执行约定：
 
@@ -178,8 +192,9 @@ OpenFoal 统一为 3 个产品块：
 ### 8.1 全局门禁
 
 1. `npm run test:backend` 必须全绿。
-2. 变更说明必须包含影响范围与回滚方式。
-3. 若触达协议或存储结构，必须补回归测试。
+2. 触达 Auth/Tenant 代码时，`npm run test:auth` 必须全绿。
+3. 变更说明必须包含影响范围与回滚方式。
+4. 若触达协议或存储结构，必须补回归测试。
 
 ### 8.2 P1 门禁（Personal Access）
 
@@ -192,3 +207,27 @@ OpenFoal 统一为 3 个产品块：
 1. P2 UT/IT 全绿（预算、策略、调度、审计）。
 2. 审计查询必须返回真实数据（不允许占位空实现通过）。
 3. 预算超限必须硬拒绝新 run，且拒绝事件可审计追踪。
+
+## 9. Auth & Tenant Baseline
+
+### 9.1 模式与默认值
+
+1. Personal 默认：`OPENFOAL_AUTH_MODE=none`（无账号可用）。
+2. Enterprise 默认：`OPENFOAL_AUTH_MODE=hybrid` + `OPENFOAL_ENTERPRISE_REQUIRE_AUTH=true`。
+3. 支持模式：
+   - `none`：不校验 token
+   - `local`：仅本地账号 JWT
+   - `external`：仅外部 JWT（JWKS）
+   - `hybrid`：本地与外部 JWT 共存
+
+### 9.2 角色与权限（首版）
+
+1. 角色固定三种：`tenant_admin` / `workspace_admin` / `member`。
+2. 所有 enterprise 治理写操作由 gateway 基于 principal 注入租户作用域，忽略客户端伪造 tenantId。
+3. `member` 默认不可执行治理写接口（`policy.update`/`budget.update`/`agents.upsert`/`executionTargets.upsert`）。
+
+### 9.3 对接边界
+
+1. OpenFoal 保持开源独立运行：local 模式可完整使用。
+2. 与 aipt5 通过 JWT 联邦对接（`iss/aud/JWKS`），不依赖 aipt5 数据库。
+3. 冲突优先级：本文件 > 其它文档（含 archived）。

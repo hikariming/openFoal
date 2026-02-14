@@ -22,6 +22,7 @@ console.log("[backend-build] done");
 function resolveTsc(cwd) {
   const candidates = [
     "node_modules/typescript/lib/tsc.js",
+    "/usr/local/lib/node_modules/typescript/lib/tsc.js",
     "apps/web-console/node_modules/typescript/lib/tsc.js",
     "apps/desktop/node_modules/typescript/lib/tsc.js"
   ];

@@ -31,6 +31,7 @@
 | 策略门禁 | P2-UT-003 | P2-IT-001/P2-IT-002 | P2-E2E-002 |
 | 审计查询 | P2-UT-*（过滤逻辑） | P2-IT-004 | P2-E2E-003 |
 | 企业记忆 | P2-UT-*（namespace） | P2-IT-*（隔离读写） | 阶段性手工验收 |
+| 认证与租户 | AUTH-UT-001~004 | AUTH-IT-* | AUTH-E2E-* |
 
 ## 3. 双目标执行链路测试
 
@@ -50,6 +51,14 @@
 
 1. `P2-IT-003` 指标计数与预算扣减一致。
 2. local 与 docker 路径写入的审计结构一致。
+
+### 3.4 认证与租户联动验证（企业默认）
+
+1. 企业默认模式：`OPENFOAL_AUTH_MODE=hybrid` + `OPENFOAL_ENTERPRISE_REQUIRE_AUTH=true`。
+2. 所有治理写接口在 enterprise 环境必须先完成登录并携带 token。
+3. 作用域强制收口：
+   - tenant 不一致返回 `TENANT_SCOPE_MISMATCH`
+   - workspace 越权返回 `WORKSPACE_SCOPE_MISMATCH`
 
 ## 4. 失败与降级策略测试
 
@@ -72,6 +81,7 @@
 1. P2 UT 全绿。
 2. P2 IT 全绿。
 3. `audit.query` 非占位实现（可查到真实记录）。
+4. `npm run test:auth` 全绿（至少覆盖 AUTH-UT-001~004）。
 
 ### 5.2 Week 7（控制台闭环）
 
@@ -87,6 +97,7 @@
    - docker-runner 远程执行命中
    - `audit.query` 的筛选 + 分页闭环
 3. `docker-runner` 协议冲突时以 `P2_DOCKER_RUNNER_HTTP_PROTOCOL.md` 为准。
+4. Docker 企业链路建议额外执行：`npm run test:p2:e2e:docker`。
 
 ## 6. 关键测试用例（首批）
 

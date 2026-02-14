@@ -2,6 +2,7 @@ import { createRuntimeCoreService, type CoreEvent, type CoreService } from "../.
 import {
   DEFAULT_SESSION_PREVIEW,
   DEFAULT_SESSION_TITLE,
+  InMemoryAuthStore,
   InMemoryIdempotencyRepository,
   InMemoryAgentRepository,
   InMemoryAuditRepository,
@@ -12,6 +13,7 @@ import {
   InMemorySessionRepository,
   InMemoryTranscriptRepository,
   SqliteAgentRepository,
+  SqliteAuthStore,
   SqliteAuditRepository,
   SqliteBudgetRepository,
   SqliteExecutionTargetRepository,
@@ -31,6 +33,7 @@ import {
   type IdempotencyRepository,
   type MetricsRepository,
   type MetricsScopeFilter,
+  type AuthStore,
   type PolicyDecision,
   type PolicyPatch,
   type PolicyRecord,
@@ -58,6 +61,13 @@ import {
   type ResFrame,
   validateReqFrame
 } from "../../../packages/protocol/dist/index.js";
+import {
+  AuthHttpError,
+  createGatewayAuthRuntime,
+  resolveAuthRuntimeConfig,
+  type GatewayAuthRuntime,
+  type Principal
+} from "./auth.js";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { createServer, request as httpRequest } from "node:http";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
@@ -73,6 +83,7 @@ export interface ConnectionState {
   stateVersion: number;
   runningSessionIds: Set<string>;
   queuedModeChanges: Map<string, RuntimeMode>;
+  principal?: Principal;
 }
 
 export interface GatewayHandleResult {
@@ -87,6 +98,12 @@ export interface GatewayHandleOptions {
 
 export interface GatewayRouter {
   handle(input: unknown, state: ConnectionState, options?: GatewayHandleOptions): Promise<GatewayHandleResult>;
+  auth?: {
+    login(body: Record<string, unknown>): Promise<Record<string, unknown>>;
+    refresh(body: Record<string, unknown>): Promise<Record<string, unknown>>;
+    me(authorizationHeader: string | undefined): Promise<Record<string, unknown>>;
+    logout(body: Record<string, unknown>): Promise<Record<string, unknown>>;
+  };
 }
 
 export interface GatewayServerOptions {
@@ -125,6 +142,8 @@ interface GatewayDeps {
   auditRepo?: AuditRepository;
   policyRepo?: PolicyRepository;
   metricsRepo?: MetricsRepository;
+  authStore?: AuthStore;
+  authRuntime?: GatewayAuthRuntime;
   now?: () => Date;
 }
 
@@ -148,7 +167,13 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const auditRepo = deps.auditRepo ?? new InMemoryAuditRepository();
   const policyRepo = deps.policyRepo ?? new InMemoryPolicyRepository();
   const metricsRepo = deps.metricsRepo ?? new InMemoryMetricsRepository();
+  const authStore = deps.authStore ?? new InMemoryAuthStore();
   const now = deps.now ?? (() => new Date());
+  const authRuntime = deps.authRuntime ?? createGatewayAuthRuntime({
+    config: resolveAuthRuntimeConfig(),
+    store: authStore,
+    now
+  });
   const baseToolExecutor = deps.toolExecutor ?? createLocalToolExecutor();
   const internalToolExecutor = deps.internalToolExecutor ?? baseToolExecutor;
   const dockerRunnerInvoker = deps.dockerRunnerInvoker ?? invokeDockerRunnerOverHttp;
@@ -174,7 +199,33 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         };
       }
 
-      const req = validated.data;
+      let req = validated.data;
+
+      if (req.method === "connect") {
+        const connectAuth = await authRuntime.authenticateConnect(req.params);
+        if (!connectAuth.ok) {
+          return {
+            response: makeErrorRes(req.id, connectAuth.code, connectAuth.message),
+            events: []
+          };
+        }
+        if (connectAuth.principal) {
+          state.principal = connectAuth.principal;
+        }
+      } else {
+        const authz = authRuntime.authorizeRpc(req.method, req.params, state.principal);
+        if (!authz.ok) {
+          return {
+            response: makeErrorRes(req.id, authz.code, authz.message),
+            events: []
+          };
+        }
+        req = {
+          ...req,
+          params: authz.params
+        };
+      }
+
       if (!state.connected && req.method !== "connect") {
         return {
           response: makeErrorRes(req.id, "UNAUTHORIZED", "connect 之前不能调用其他方法"),
@@ -230,6 +281,20 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
       }
 
       return result;
+    },
+    auth: {
+      login: async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        return await authRuntime.login(body);
+      },
+      refresh: async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        return await authRuntime.refresh(body);
+      },
+      me: async (authorizationHeader: string | undefined): Promise<Record<string, unknown>> => {
+        return await authRuntime.me(authorizationHeader);
+      },
+      logout: async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        return await authRuntime.logout(body);
+      }
     }
   };
 }
@@ -248,7 +313,8 @@ export async function startGatewayServer(options: GatewayServerOptions = {}): Pr
       budgetRepo: new SqliteBudgetRepository(options.sqlitePath),
       auditRepo: new SqliteAuditRepository(options.sqlitePath),
       policyRepo: new SqlitePolicyRepository(options.sqlitePath),
-      metricsRepo: new SqliteMetricsRepository(options.sqlitePath)
+      metricsRepo: new SqliteMetricsRepository(options.sqlitePath),
+      authStore: new SqliteAuthStore(options.sqlitePath)
     });
   const httpConnections = new Map<string, ConnectionState>();
   const sockets = new Set<any>();
@@ -313,7 +379,19 @@ async function route(
       return {
         response: makeSuccessRes(req.id, {
           protocolVersion: "1.0.0",
-          serverTime: now().toISOString()
+          serverTime: now().toISOString(),
+          ...(state.principal
+            ? {
+                principal: {
+                  subject: state.principal.subject,
+                  tenantId: state.principal.tenantId,
+                  workspaceIds: [...state.principal.workspaceIds],
+                  roles: [...state.principal.roles],
+                  authSource: state.principal.authSource,
+                  ...(state.principal.displayName ? { displayName: state.principal.displayName } : {})
+                }
+              }
+            : {})
         }),
         events: []
       };
@@ -1155,6 +1233,83 @@ async function handleHttpRequest(
     return;
   }
 
+  if (method === "POST" && pathname === "/auth/login") {
+    const body = await readJsonBody(req);
+    if (!isObjectRecord(body)) {
+      writeJson(res, 400, {
+        error: "INVALID_REQUEST",
+        message: "body 必须是对象"
+      });
+      return;
+    }
+    try {
+      const payload = await router.auth?.login(body);
+      writeJson(res, 200, payload ?? {
+        error: "NOT_SUPPORTED",
+        message: "auth endpoint not enabled"
+      });
+    } catch (error) {
+      writeAuthHttpError(res, error);
+    }
+    return;
+  }
+
+  if (method === "POST" && pathname === "/auth/refresh") {
+    const body = await readJsonBody(req);
+    if (!isObjectRecord(body)) {
+      writeJson(res, 400, {
+        error: "INVALID_REQUEST",
+        message: "body 必须是对象"
+      });
+      return;
+    }
+    try {
+      const payload = await router.auth?.refresh(body);
+      writeJson(res, 200, payload ?? {
+        error: "NOT_SUPPORTED",
+        message: "auth endpoint not enabled"
+      });
+    } catch (error) {
+      writeAuthHttpError(res, error);
+    }
+    return;
+  }
+
+  if (method === "GET" && pathname === "/auth/me") {
+    const authorization = typeof req.headers?.authorization === "string" ? req.headers.authorization : undefined;
+    try {
+      const payload = await router.auth?.me(authorization);
+      writeJson(res, 200, payload ?? {
+        error: "NOT_SUPPORTED",
+        message: "auth endpoint not enabled"
+      });
+    } catch (error) {
+      writeAuthHttpError(res, error);
+    }
+    return;
+  }
+
+  if (method === "POST" && pathname === "/auth/logout") {
+    const body = await readJsonBody(req);
+    if (!isObjectRecord(body)) {
+      writeJson(res, 400, {
+        error: "INVALID_REQUEST",
+        message: "body 必须是对象"
+      });
+      return;
+    }
+    try {
+      const payload = await router.auth?.logout(body);
+      writeJson(res, 200, payload ?? {
+        error: "NOT_SUPPORTED",
+        message: "auth endpoint not enabled"
+      });
+    } catch (error) {
+      writeAuthHttpError(res, error);
+    }
+    return;
+  }
+
   if (method === "POST" && pathname === "/rpc") {
     const body = await readJsonBody(req);
     const connectionId = readConnectionId(req.url, req.headers?.host, req.headers?.["x-openfoal-connection-id"]);
@@ -1433,10 +1588,24 @@ function writeJson(res: any, statusCode: number, payload: unknown): void {
   res.end(text);
 }
 
+function writeAuthHttpError(res: any, error: unknown): void {
+  if (error instanceof AuthHttpError) {
+    writeJson(res, error.statusCode, {
+      error: error.code,
+      message: error.message
+    });
+    return;
+  }
+  writeJson(res, 500, {
+    error: "INTERNAL_ERROR",
+    message: error instanceof Error ? error.message : String(error)
+  });
+}
+
 function writeCorsHeaders(res: any): void {
   res.setHeader("access-control-allow-origin", "*");
   res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
-  res.setHeader("access-control-allow-headers", "content-type,x-openfoal-connection-id");
+  res.setHeader("access-control-allow-headers", "content-type,authorization,x-openfoal-connection-id");
 }
 
 function getOrCreateConnectionState(

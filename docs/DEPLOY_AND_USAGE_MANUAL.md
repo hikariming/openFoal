@@ -1,214 +1,178 @@
-# OpenFoal 从零部署与使用说明书
+# OpenFoal 部署与使用说明书（Docker 优先）
 
 更新时间：2026-02-14  
 状态：ACTIVE
 
-## 1. 你该选哪条路径
+## 1. 选择版本
 
-1. 只想个人使用（完全不用企业能力）：走 **路径 A（Personal Runtime/Access）**。  
-2. 需要企业治理（预算/审计/策略/执行目标）：走 **路径 B（Enterprise Control）**。
+1. 个人版（完全不用企业能力）：`gateway + personal-web`
+2. 商业版（Enterprise Control）：`gateway + web-console + docker-runner + bootstrap`
 
-## 2. 通用前置条件
+## 2. 前置条件
 
-1. Node.js 建议 `>=18`（推荐 20/22）。
-2. 在项目根目录执行依赖安装：
+1. Docker + Docker Compose 可用。
+2. 端口未占用：
+   - `8787`（gateway）
+   - `5180`（personal-web）
+   - `5173`（web-console）
+3. 命令行验证若使用 `jq` 解析 token，请先安装 `jq`。
 
-```bash
-cd /Users/rqq/openFoal
-npm install
-```
+## 3. 个人版（完全不用企业）
 
-3. 默认网关地址：`http://127.0.0.1:8787`
-
-## 3. 路径 A：个人版（完全不用企业）
-
-目标：本机单用户，直接聊天，不启用企业控制台，不配置租户治理。
-
-### 3.1 启动服务
-
-终端 1（网关）：
+启动：
 
 ```bash
 cd /Users/rqq/openFoal
-npm run dev:gateway
+npm run up:personal
 ```
 
-终端 2（二选一）：
+访问：
 
-1. 个人 Web：
+1. 个人 Web：`http://127.0.0.1:5180`
+2. 网关健康：`http://127.0.0.1:8787/health`
+
+常用命令：
+
+```bash
+npm run logs:personal
+npm run ps:docker
+npm run down:personal
+```
+
+## 4. 商业版（从零到首条 run）
+
+### 4.1 启动
 
 ```bash
 cd /Users/rqq/openFoal
-npm run dev:personal-web
+npm run up:enterprise
 ```
 
-2. 桌面端：
+默认认证模式：
+
+1. `OPENFOAL_AUTH_MODE=hybrid`
+2. `OPENFOAL_ENTERPRISE_REQUIRE_AUTH=true`
+3. 默认本地管理员：`tenant=default` / `username=admin` / `password=admin123!`
+
+启动后会自动执行 `bootstrap-enterprise`，写入默认：
+
+1. `tenantId=t_default`
+2. `workspaceId=w_default`
+3. `agentId=a_default`
+4. `executionTargetId=target_enterprise_docker`（指向内部 `docker-runner`）
+
+访问：
+
+1. 企业控制台：`http://127.0.0.1:5173`
+2. 网关健康：`http://127.0.0.1:8787/health`
+
+### 4.2 验证 bootstrap 是否成功
 
 ```bash
-cd /Users/rqq/openFoal
-npm run dev:desktop
+npm run logs:enterprise
 ```
 
-### 3.2 首次使用
+看到类似日志即成功：
 
-1. 打开个人 Web 或桌面端。  
-2. 新建/选择会话。  
-3. 直接发送消息。  
-4. 刷新后会话历史可通过 `sessions.history` 回放（已实现）。
-
-### 3.3 个人版常用验证命令
-
-```bash
-cd /Users/rqq/openFoal
-npm run test:backend
-npm run test:p1:smoke
+```text
+[bootstrap-enterprise] done: tenant=t_default workspace=w_default agent=a_default target=target_enterprise_docker
 ```
 
-## 4. 路径 B：企业版（从零到首条 run）
-
-目标：启用企业控制面 + 执行目标治理，并跑通首条企业 `agent.run`。
-
-### 4.1 启动网关与控制台
-
-终端 1（网关）：
+### 4.3 获取 access token（企业默认必需）
 
 ```bash
-cd /Users/rqq/openFoal
-npm run dev:gateway
-```
-
-终端 2（企业控制台）：
-
-```bash
-cd /Users/rqq/openFoal
-npm run dev:web
-```
-
-打开控制台地址（Vite 输出的本地地址，通常是 `http://127.0.0.1:5173`）。
-
-### 4.2 准备一个 docker-runner（最小 mock）
-
-终端 3（mock runner）：
-
-```bash
-node -e "const {createServer}=require('node:http');createServer((req,res)=>{let raw='';req.on('data',c=>raw+=c);req.on('end',()=>{const body=JSON.parse(raw||'{}');const toolName=body?.call?.name||'unknown';res.setHeader('content-type','application/json');res.end(JSON.stringify({updates:[{delta:'runner:'+toolName,at:new Date().toISOString()}],result:{ok:true,output:'mock-runner:'+toolName}}));});}).listen(18081,'127.0.0.1',()=>console.log('mock runner on http://127.0.0.1:18081/execute'));"
-```
-
-### 4.3 通过 RPC 完成企业初始化
-
-#### Step 1) connect
-
-```bash
-curl -sS "http://127.0.0.1:8787/rpc?connectionId=ent_bootstrap" \
-  -H "content-type: application/json" \
-  -d '{"type":"req","id":"r_connect","method":"connect","params":{}}'
-```
-
-#### Step 2) 注册执行目标（docker-runner）
-
-```bash
-curl -sS "http://127.0.0.1:8787/rpc?connectionId=ent_bootstrap" \
+ACCESS_TOKEN=$(curl -sS "http://127.0.0.1:8787/auth/login" \
   -H "content-type: application/json" \
   -d '{
+    "tenant":"default",
+    "username":"admin",
+    "password":"admin123!"
+  }' | jq -r '.access_token')
+```
+
+```bash
+test -n "$ACCESS_TOKEN" && echo "login ok"
+```
+
+### 4.4 发送首条企业 run（RPC）
+
+```bash
+curl -sS "http://127.0.0.1:8787/rpc?connectionId=enterprise_manual" \
+  -H "content-type: application/json" \
+  -H "authorization: Bearer ${ACCESS_TOKEN}" \
+  -d '{
     "type":"req",
-    "id":"r_target",
-    "method":"executionTargets.upsert",
+    "id":"r_connect",
+    "method":"connect",
     "params":{
-      "idempotencyKey":"idem_target_1",
-      "tenantId":"t_demo",
-      "workspaceId":"w_demo",
-      "targetId":"target_demo_docker",
-      "kind":"docker-runner",
-      "endpoint":"http://127.0.0.1:18081/execute",
-      "authToken":"runner-demo-token",
-      "isDefault":true,
-      "enabled":true,
-      "config":{"timeoutMs":10000}
+      "auth":{
+        "type":"Bearer",
+        "token":"'"${ACCESS_TOKEN}"'"
+      }
     }
   }'
 ```
 
-#### Step 3) 注册 agent_definition 并绑定 target
-
 ```bash
-curl -sS "http://127.0.0.1:8787/rpc?connectionId=ent_bootstrap" \
+curl -sS "http://127.0.0.1:8787/rpc?connectionId=enterprise_manual" \
   -H "content-type: application/json" \
-  -d '{
-    "type":"req",
-    "id":"r_agent",
-    "method":"agents.upsert",
-    "params":{
-      "idempotencyKey":"idem_agent_1",
-      "tenantId":"t_demo",
-      "workspaceId":"w_demo",
-      "agentId":"a_demo",
-      "name":"Demo Agent",
-      "runtimeMode":"local",
-      "executionTargetId":"target_demo_docker",
-      "enabled":true
-    }
-  }'
-```
-
-#### Step 4) 发起首条企业 run
-
-```bash
-curl -sS "http://127.0.0.1:8787/rpc?connectionId=ent_bootstrap" \
-  -H "content-type: application/json" \
+  -H "authorization: Bearer ${ACCESS_TOKEN}" \
   -d '{
     "type":"req",
     "id":"r_run_1",
     "method":"agent.run",
     "params":{
-      "idempotencyKey":"idem_run_1",
-      "sessionId":"s_demo",
+      "idempotencyKey":"idem_enterprise_manual_run_1",
+      "sessionId":"s_enterprise_manual",
       "input":"run [[tool:bash.exec {\"cmd\":\"printf hello-enterprise\"}]]",
       "runtimeMode":"local",
-      "tenantId":"t_demo",
-      "workspaceId":"w_demo",
-      "agentId":"a_demo",
-      "actor":"admin-demo"
+      "tenantId":"t_default",
+      "workspaceId":"w_default",
+      "agentId":"a_default",
+      "actor":"enterprise-admin"
     }
   }'
 ```
 
 成功标志：
 
-1. `response.ok = true` 且返回 `runId`。  
-2. 事件中可见 `agent.tool_result`，输出包含 `mock-runner:bash.exec`（表示已命中远程 runner）。
+1. 返回 `response.ok=true` 且包含 `runId`
+2. 事件里出现 `agent.tool_result`
 
-#### Step 5) 审计筛选 + 分页验证
+### 4.5 审计筛选 + 分页验证
 
 第一页：
 
 ```bash
-curl -sS "http://127.0.0.1:8787/rpc?connectionId=ent_bootstrap" \
+curl -sS "http://127.0.0.1:8787/rpc?connectionId=enterprise_manual" \
   -H "content-type: application/json" \
+  -H "authorization: Bearer ${ACCESS_TOKEN}" \
   -d '{
     "type":"req",
     "id":"r_audit_1",
     "method":"audit.query",
     "params":{
-      "tenantId":"t_demo",
-      "workspaceId":"w_demo",
+      "tenantId":"t_default",
+      "workspaceId":"w_default",
       "action":"agent.run.completed",
       "limit":1
     }
   }'
 ```
 
-第二页（把上一页 `nextCursor` 填入 `cursor`）：
+第二页（带 `cursor`）：
 
 ```bash
-curl -sS "http://127.0.0.1:8787/rpc?connectionId=ent_bootstrap" \
+curl -sS "http://127.0.0.1:8787/rpc?connectionId=enterprise_manual" \
   -H "content-type: application/json" \
+  -H "authorization: Bearer ${ACCESS_TOKEN}" \
   -d '{
     "type":"req",
     "id":"r_audit_2",
     "method":"audit.query",
     "params":{
-      "tenantId":"t_demo",
-      "workspaceId":"w_demo",
+      "tenantId":"t_default",
+      "workspaceId":"w_default",
       "action":"agent.run.completed",
       "limit":1,
       "cursor":123
@@ -216,25 +180,44 @@ curl -sS "http://127.0.0.1:8787/rpc?connectionId=ent_bootstrap" \
   }'
 ```
 
-### 4.4 企业版一键联调（推荐）
-
-已内置完整联调脚本（mock runner + gateway + web-console + 审计分页校验）：
+### 4.6 停止商业版
 
 ```bash
-cd /Users/rqq/openFoal
-npm run test:p2:e2e
+npm run down:enterprise
 ```
 
-## 5. 常见问题
+## 5. 自动化验证
 
-1. `connect 之前不能调用其他方法`：先调用 `connect`。  
-2. `POLICY_DENIED`：策略拒绝（默认仅高风险工具允许，非高风险工具可能被 `toolDefault=deny` 拒绝）。  
-3. `docker-runner 缺少 endpoint`：`executionTargets.upsert` 必须提供 `endpoint`。  
-4. Web 控制台启动失败且报 `crypto.getRandomValues`：请使用 Node `>=18`。  
-5. 预算超限被拒绝：检查 `budget.get/update` 与审计 `budget.rejected` 记录。
+### 5.1 全局基础回归
 
-## 6. 关键文档
+1. `npm run test:backend`
+2. `npm run test:auth`（触达 enterprise auth/tenant 代码时必跑）
 
-1. 产品真相：`/Users/rqq/openFoal/docs/PRODUCT_TRUTH.md`
-2. P2 协议：`/Users/rqq/openFoal/docs/testing/P2_DOCKER_RUNNER_HTTP_PROTOCOL.md`
-3. P2 测试计划：`/Users/rqq/openFoal/docs/testing/P2_ENTERPRISE_CONTROL_TEST_PLAN.md`
+### 5.2 个人版测试（Personal）
+
+1. 自动化：`npm run test:p1:smoke`
+2. Docker 验收：
+   - `npm run up:personal`
+   - 打开 `http://127.0.0.1:5180` 完成一轮问答
+   - `npm run logs:personal`
+   - `npm run down:personal`
+
+### 5.3 企业版测试（Enterprise）
+
+1. 非 Docker 场景联调：`npm run test:p2:e2e`
+2. Docker 场景联调：`npm run test:p2:e2e:docker`
+3. 企业认证最小验收：
+   - `/auth/login` 可拿到 `access_token`
+   - `connect` 可携带 token 成功
+   - 无 token 时返回 `AUTH_REQUIRED`
+
+## 6. 常见问题
+
+1. `connect 之前不能调用其他方法`：先调用 `connect`。
+2. `AUTH_REQUIRED`：企业模式默认要求先登录并在 `connect.params.auth.token` 传 token。
+3. `FORBIDDEN`：当前角色无治理写权限（`member` 默认不可更新 budget/policy/agents/targets）。
+4. `TENANT_SCOPE_MISMATCH` / `WORKSPACE_SCOPE_MISMATCH`：请求作用域与 token 不一致。
+5. `POLICY_DENIED`：策略拒绝；检查 `policy.update` 与 `budget.update`。
+6. `docker-runner 缺少 endpoint`：检查 `bootstrap-enterprise` 是否成功。
+7. `sqlite3` 找不到：检查 gateway 镜像是否正确构建（镜像内已安装 sqlite3 CLI）。
+8. 审计为空：确认 `tenantId/workspaceId/action` 过滤条件是否过严。

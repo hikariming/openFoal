@@ -1322,3 +1322,4 @@ function nowIso(): string {
 }
 
 export * from "./p2.js";
+export * from "./auth.js";

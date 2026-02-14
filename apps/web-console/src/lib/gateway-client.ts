@@ -128,6 +128,7 @@ export class GatewayRpcError extends Error {
 export class GatewayClient {
   private readonly baseUrl: string;
   private readonly connectionId: string;
+  private accessToken?: string;
   private connected = false;
   private connectPromise: Promise<void> | null = null;
   private requestCounter = 0;
@@ -135,6 +136,17 @@ export class GatewayClient {
   constructor(baseUrl = readDefaultBaseUrl()) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
     this.connectionId = createConnectionId();
+    this.accessToken = readStoredAccessToken();
+  }
+
+  getAccessToken(): string | undefined {
+    return this.accessToken;
+  }
+
+  setAccessToken(token?: string): void {
+    this.accessToken = token && token.trim().length > 0 ? token.trim() : undefined;
+    this.connected = false;
+    persistAccessToken(this.accessToken);
   }
 
   async ensureConnected(): Promise<void> {
@@ -151,7 +163,15 @@ export class GatewayClient {
           name: "web-console",
           version: "0.1.0"
         },
-        workspaceId: "w_default"
+        workspaceId: "w_default",
+        ...(this.accessToken
+          ? {
+              auth: {
+                type: "Bearer",
+                token: this.accessToken
+              }
+            }
+          : {})
       });
       this.connected = true;
     })();
@@ -212,6 +232,87 @@ export class GatewayClient {
     return metrics;
   }
 
+  async login(input: { username: string; password: string; tenant?: string }): Promise<Record<string, unknown>> {
+    const endpoint = new URL("/auth/login", this.baseUrl);
+    const response = await fetch(endpoint.toString(), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        username: input.username,
+        password: input.password,
+        ...(input.tenant ? { tenant: input.tenant } : {})
+      })
+    });
+    const payload = (await safeJson(response)) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new GatewayRpcError(String(payload.error ?? "HTTP_ERROR"), String(payload.message ?? `HTTP ${response.status}`));
+    }
+    const accessToken = typeof payload.access_token === "string" ? payload.access_token : undefined;
+    if (!accessToken) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "auth.login missing access_token");
+    }
+    this.setAccessToken(accessToken);
+    return payload;
+  }
+
+  async refresh(refreshToken: string): Promise<Record<string, unknown>> {
+    const endpoint = new URL("/auth/refresh", this.baseUrl);
+    const response = await fetch(endpoint.toString(), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        refreshToken
+      })
+    });
+    const payload = (await safeJson(response)) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new GatewayRpcError(String(payload.error ?? "HTTP_ERROR"), String(payload.message ?? `HTTP ${response.status}`));
+    }
+    const accessToken = typeof payload.access_token === "string" ? payload.access_token : undefined;
+    if (!accessToken) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "auth.refresh missing access_token");
+    }
+    this.setAccessToken(accessToken);
+    return payload;
+  }
+
+  async me(): Promise<Record<string, unknown>> {
+    if (!this.accessToken) {
+      throw new GatewayRpcError("AUTH_REQUIRED", "No access token");
+    }
+    const endpoint = new URL("/auth/me", this.baseUrl);
+    const response = await fetch(endpoint.toString(), {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${this.accessToken}`
+      }
+    });
+    const payload = (await safeJson(response)) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new GatewayRpcError(String(payload.error ?? "HTTP_ERROR"), String(payload.message ?? `HTTP ${response.status}`));
+    }
+    return payload;
+  }
+
+  async logout(refreshToken?: string): Promise<void> {
+    const endpoint = new URL("/auth/logout", this.baseUrl);
+    await fetch(endpoint.toString(), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {})
+      },
+      body: JSON.stringify({
+        ...(refreshToken ? { refreshToken } : {})
+      })
+    });
+    this.setAccessToken(undefined);
+  }
+
   private async request(method: GatewayMethod, params: Record<string, unknown>): Promise<RpcSuccessEnvelope> {
     const id = `r_${++this.requestCounter}`;
     const req: RpcRequestFrame = {
@@ -229,7 +330,8 @@ export class GatewayClient {
       response = await fetch(endpoint.toString(), {
         method: "POST",
         headers: {
-          "content-type": "application/json"
+          "content-type": "application/json",
+          ...(this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {})
         },
         body: JSON.stringify(req)
       });
@@ -266,11 +368,30 @@ export function getGatewayClient(): GatewayClient {
 }
 
 function readDefaultBaseUrl(): string {
+  const runtime = readRuntimeGatewayBaseUrl();
+  if (runtime) {
+    return runtime;
+  }
+
   const raw = import.meta.env.VITE_GATEWAY_BASE_URL;
   if (typeof raw === "string" && raw.trim().length > 0) {
     return raw.trim();
   }
+
+  if (typeof window !== "undefined" && typeof window.location?.origin === "string") {
+    const origin = window.location.origin.trim();
+    if (origin.startsWith("http://") || origin.startsWith("https://")) {
+      return origin;
+    }
+  }
+
   return "http://127.0.0.1:8787";
+}
+
+function readRuntimeGatewayBaseUrl(): string | undefined {
+  const config = (globalThis as { __OPENFOAL_CONFIG__?: { gatewayBaseUrl?: unknown } }).__OPENFOAL_CONFIG__;
+  const value = typeof config?.gatewayBaseUrl === "string" ? config.gatewayBaseUrl.trim() : "";
+  return value.length > 0 ? value : undefined;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -359,4 +480,29 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function safeJson(response: Response): Promise<unknown> {
+  return response
+    .json()
+    .catch(() => ({}));
+}
+
+function readStoredAccessToken(): string | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  const token = window.localStorage.getItem("openfoal_access_token");
+  return token && token.trim().length > 0 ? token.trim() : undefined;
+}
+
+function persistAccessToken(token?: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (!token) {
+    window.localStorage.removeItem("openfoal_access_token");
+    return;
+  }
+  window.localStorage.setItem("openfoal_access_token", token);
 }

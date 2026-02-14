@@ -70,6 +70,10 @@
    - `npm run dev:gateway`
 2. 启动 Personal Web：
    - `npm run dev:personal-web`
+3. 个人版认证口径：
+   - `OPENFOAL_AUTH_MODE=none`
+   - `OPENFOAL_ENTERPRISE_REQUIRE_AUTH=false`
+   - Personal 路径默认不依赖登录。
 
 ### 3.2 测试数据
 
@@ -99,6 +103,13 @@
 1. `npm run test:backend`
 2. `npm run test:p1:smoke`
 3. 手工关键路径 8 条
+
+个人版 Docker 冒烟建议顺序：
+
+1. `npm run up:personal`
+2. 访问 `http://127.0.0.1:5180` 完成首轮问答
+3. `npm run logs:personal` 检查无阻塞错误
+4. `npm run down:personal`
 
 ### 5.2 发布门禁
 

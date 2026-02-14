@@ -11,6 +11,10 @@
 4. P2 单元测试：`P2-UT-###`
 5. P2 集成测试：`P2-IT-###`
 6. P2 端到端测试：`P2-E2E-###`
+7. Auth 契约测试：`AUTH-CT-###`
+8. Auth 单元测试：`AUTH-UT-###`
+9. Auth 集成测试：`AUTH-IT-###`
+10. Auth 端到端测试：`AUTH-E2E-###`
 
 约定：
 
@@ -28,6 +32,10 @@
 | `P2-UT-*` | `apps/gateway`, `packages/storage` | 调度、预算、策略、审计逻辑 |
 | `P2-IT-*` | `apps/gateway`, `packages/storage`, executor adapters | 双目标执行与数据一致性 |
 | `P2-E2E-*` | `apps/web-console`, `apps/gateway` | 企业管控最小闭环 |
+| `AUTH-CT-*` | `apps/gateway`, `packages/protocol` | connect 与鉴权错误码契约 |
+| `AUTH-UT-*` | `apps/gateway/src/auth.ts` | JWT 校验、claim 映射、RBAC 判定 |
+| `AUTH-IT-*` | `apps/gateway`, `packages/storage` | 租户隔离、scope 收口、审计 actor 归属 |
+| `AUTH-E2E-*` | `apps/web-console`, `apps/gateway` | 企业登录、角色权限与多租户隔离闭环 |
 
 ## 3. 自动化与手工归属
 
@@ -39,6 +47,10 @@
 | `P2-UT-*` | 是 | 否 |
 | `P2-IT-*` | 是 | 否 |
 | `P2-E2E-*` | 是（阶段性） | 是（灰度前复核） |
+| `AUTH-CT-*` | 是 | 否 |
+| `AUTH-UT-*` | 是 | 否 |
+| `AUTH-IT-*` | 是 | 否 |
+| `AUTH-E2E-*` | 是（阶段性） | 是（灰度前复核） |
 
 ## 4. 当前已登记用例（首批）
 
@@ -72,3 +84,16 @@
 自动化脚本映射：
 
 1. `P2-E2E-004` 对应命令：`npm run test:p2:e2e`
+2. Docker 已启动场景补充命令：`npm run test:p2:e2e:docker`
+3. `AUTH-CT-001~004` 与 `AUTH-UT-001~004` 对应命令：`npm run test:auth`
+
+### Auth（首批）
+
+1. `AUTH-CT-001` `mode=none` 时 `connect` 无 token 可通过。
+2. `AUTH-CT-002` `mode=external` 时 `connect` 无 token 返回 `AUTH_REQUIRED`。
+3. `AUTH-CT-003` 无效签名 token 返回 `UNAUTHORIZED`。
+4. `AUTH-CT-004` 有效 external token 可连接，`member` 调用 `policy.update` 返回 `FORBIDDEN`。
+5. `AUTH-UT-001` JWKS key rotation 后新 `kid` 可命中。
+6. `AUTH-UT-002` claim 映射（tenant/workspace/roles）正确。
+7. `AUTH-UT-003` tenant/workspace 越权返回 scope mismatch。
+8. `AUTH-UT-004` 三角色矩阵（member/workspace_admin/tenant_admin）判定正确。

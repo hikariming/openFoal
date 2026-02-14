@@ -178,7 +178,46 @@ OpenFoal 将吸收 `openclaw-main` 已验证的记忆/会话管理机制：
 
 - 详细架构和接口契约见：`/Users/rqq/openFoal/DESIGN.md`
 
-## 11. 文档入口（当前有效）
+## 11. Docker 快速启动
+
+一键启动（个人版）：
+
+```bash
+cd /Users/rqq/openFoal
+npm run up:personal
+```
+
+访问：`http://127.0.0.1:5180`
+
+一键启动（企业版）：
+
+```bash
+cd /Users/rqq/openFoal
+npm run up:enterprise
+```
+
+企业版默认鉴权：
+
+1. `OPENFOAL_AUTH_MODE=hybrid`
+2. `OPENFOAL_ENTERPRISE_REQUIRE_AUTH=true`
+3. 默认管理员：`tenant=default` / `username=admin` / `password=admin123!`
+
+访问：
+
+1. 企业控制台：`http://127.0.0.1:5173`
+2. 网关健康：`http://127.0.0.1:8787/health`
+
+常用运维命令：
+
+```bash
+npm run logs:personal
+npm run logs:enterprise
+npm run ps:docker
+npm run down:personal
+npm run down:enterprise
+```
+
+## 12. 文档入口（当前有效）
 
 当前仅以下文档用于产品规划与实施：
 
@@ -188,10 +227,12 @@ OpenFoal 将吸收 `openclaw-main` 已验证的记忆/会话管理机制：
 4. [P1 Personal Access Test Plan](./docs/testing/P1_PERSONAL_ACCESS_TEST_PLAN.md)
 5. [P2 Enterprise Control Test Plan](./docs/testing/P2_ENTERPRISE_CONTROL_TEST_PLAN.md)
 6. [P2 Docker Runner HTTP Protocol](./docs/testing/P2_DOCKER_RUNNER_HTTP_PROTOCOL.md)
-7. [Deploy & Usage Manual](./docs/DEPLOY_AND_USAGE_MANUAL.md)
+7. [Auth & Tenant Test Plan](./docs/testing/AUTH_TENANT_TEST_PLAN.md)
+8. [Deploy & Usage Manual](./docs/DEPLOY_AND_USAGE_MANUAL.md)
 
-## 12. P2 联调脚本
+## 13. P2 联调脚本
 
 一键启动 `mock docker-runner + gateway + web-console`，并验证审计筛选/分页链路：
 
 1. `npm run test:p2:e2e`
+2. Docker 栈已启动时验证：`npm run test:p2:e2e:docker`

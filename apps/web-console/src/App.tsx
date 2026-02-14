@@ -68,6 +68,14 @@ function KpiCard(props: { title: string; value: string; hint?: string }) {
 
 export function App() {
   const client = useMemo(() => getGatewayClient(), []);
+  const [isAuthenticated, setAuthenticated] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginForm, setLoginForm] = useState({
+    username: "admin",
+    password: "admin123!",
+    tenant: "default"
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [sessions, setSessions] = useState<GatewaySession[]>([]);
@@ -91,7 +99,59 @@ export function App() {
   });
   const [metrics, setMetrics] = useState<GatewayMetricsSummary>(EMPTY_METRICS);
 
+  useEffect(() => {
+    let mounted = true;
+    const run = async (): Promise<void> => {
+      setAuthChecking(true);
+      const token = client.getAccessToken();
+      try {
+        if (token) {
+          await client.me();
+        } else {
+          await client.ensureConnected();
+        }
+        if (!mounted) {
+          return;
+        }
+        setAuthenticated(true);
+      } catch {
+        if (token) {
+          client.setAccessToken(undefined);
+          clearStoredRefreshToken();
+          try {
+            await client.ensureConnected();
+            if (!mounted) {
+              return;
+            }
+            setAuthenticated(true);
+          } catch {
+            if (!mounted) {
+              return;
+            }
+            setAuthenticated(false);
+          }
+        } else {
+          if (!mounted) {
+            return;
+          }
+          setAuthenticated(false);
+        }
+      } finally {
+        if (mounted) {
+          setAuthChecking(false);
+        }
+      }
+    };
+    void run();
+    return () => {
+      mounted = false;
+    };
+  }, [client]);
+
   const refreshDashboard = useCallback(async (): Promise<void> => {
+    if (!isAuthenticated) {
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -114,11 +174,14 @@ export function App() {
     } finally {
       setLoading(false);
     }
-  }, [auditFilters, client]);
+  }, [auditFilters, client, isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
     void refreshDashboard();
-  }, [refreshDashboard]);
+  }, [refreshDashboard, isAuthenticated]);
 
   const runsFailedRate = metrics.runsTotal > 0 ? (metrics.runsFailed / metrics.runsTotal) * 100 : 0;
 
@@ -158,6 +221,121 @@ export function App() {
       setAuditLoadMoreLoading(false);
     }
   }, [auditFilters, auditNextCursor, client]);
+
+  const handleLogin = useCallback(async () => {
+    setLoginLoading(true);
+    setError("");
+    try {
+      const payload = await client.login({
+        username: loginForm.username.trim(),
+        password: loginForm.password,
+        tenant: loginForm.tenant.trim() || undefined
+      });
+      const refreshToken = typeof payload.refresh_token === "string" ? payload.refresh_token : undefined;
+      if (refreshToken) {
+        storeRefreshToken(refreshToken);
+      } else {
+        clearStoredRefreshToken();
+      }
+      const user = payload.user;
+      if (user && typeof user === "object" && !Array.isArray(user)) {
+        const tenantId = asString((user as Record<string, unknown>).tenantId);
+        if (tenantId) {
+          setAuditDraft((prev) => ({
+            ...prev,
+            tenantId
+          }));
+          setAuditFilters((prev) => ({
+            ...prev,
+            tenantId
+          }));
+        }
+      }
+      setAuthenticated(true);
+      await refreshDashboard();
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : String(loginError));
+      setAuthenticated(false);
+    } finally {
+      setLoginLoading(false);
+      setAuthChecking(false);
+    }
+  }, [client, loginForm.password, loginForm.tenant, loginForm.username, refreshDashboard]);
+
+  const handleLogout = useCallback(async () => {
+    const refreshToken = readStoredRefreshToken();
+    try {
+      await client.logout(refreshToken);
+    } finally {
+      clearStoredRefreshToken();
+      setAuthenticated(false);
+      setAuthChecking(false);
+      setSessions([]);
+      setPolicy(null);
+      setAudits([]);
+      setMetrics(EMPTY_METRICS);
+    }
+  }, [client]);
+
+  if (authChecking) {
+    return (
+      <Layout className="console-root">
+        <Layout.Content className="console-content">
+          <Card title="OpenFoal Enterprise Login">
+            <Typography.Text>Checking authentication...</Typography.Text>
+          </Card>
+        </Layout.Content>
+      </Layout>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <Layout className="console-root">
+        <Layout.Content className="console-content">
+          <Card title="OpenFoal Enterprise Login" style={{ maxWidth: 460 }}>
+            <Space vertical align="start" style={{ width: "100%" }}>
+              {error ? <Banner type="danger" description={error} closeIcon={null} /> : null}
+              <Input
+                value={loginForm.tenant}
+                placeholder="tenant code"
+                onChange={(value) =>
+                  setLoginForm((prev) => ({
+                    ...prev,
+                    tenant: value
+                  }))
+                }
+              />
+              <Input
+                value={loginForm.username}
+                placeholder="username"
+                onChange={(value) =>
+                  setLoginForm((prev) => ({
+                    ...prev,
+                    username: value
+                  }))
+                }
+              />
+              <Input
+                value={loginForm.password}
+                type="password"
+                placeholder="password"
+                onChange={(value) =>
+                  setLoginForm((prev) => ({
+                    ...prev,
+                    password: value
+                  }))
+                }
+              />
+              <Button theme="solid" loading={loginLoading} onClick={() => void handleLogin()}>
+                登录
+              </Button>
+            </Space>
+          </Card>
+        </Layout.Content>
+      </Layout>
+    );
+  }
 
   return (
     <Layout className="console-root">
@@ -200,6 +378,9 @@ export function App() {
             </Button>
             <Button theme="solid" icon={<IconUserGroup />}>
               切换 Tenant
+            </Button>
+            <Button theme="borderless" onClick={() => void handleLogout()}>
+              退出
             </Button>
           </Space>
         </Layout.Header>
@@ -449,4 +630,26 @@ function clipJson(value: unknown, maxLength: number): string {
     return text;
   }
   return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function readStoredRefreshToken(): string | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  const value = window.localStorage.getItem("openfoal_refresh_token");
+  return value && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function storeRefreshToken(token: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem("openfoal_refresh_token", token);
+}
+
+function clearStoredRefreshToken(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem("openfoal_refresh_token");
 }

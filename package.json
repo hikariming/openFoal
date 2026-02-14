@@ -12,7 +12,16 @@
     "build:desktop": "pnpm --filter @openfoal/desktop build",
     "build:backend": "node scripts/backend-build.mjs",
     "test:backend": "node scripts/backend-test.mjs",
+    "test:auth": "node scripts/auth-test.mjs",
     "test:p1:smoke": "node scripts/p1-smoke-test.mjs",
-    "test:p2:e2e": "node scripts/p2-e2e-test.mjs"
+    "test:p2:e2e": "node scripts/p2-e2e-test.mjs",
+    "test:p2:e2e:docker": "node scripts/p2-e2e-docker-smoke.mjs",
+    "up:personal": "OPENFOAL_AUTH_MODE=none OPENFOAL_ENTERPRISE_REQUIRE_AUTH=false docker compose --profile personal up -d --build",
+    "down:personal": "docker compose --profile personal down",
+    "up:enterprise": "OPENFOAL_AUTH_MODE=hybrid OPENFOAL_ENTERPRISE_REQUIRE_AUTH=true docker compose --profile enterprise up -d --build",
+    "down:enterprise": "docker compose --profile enterprise down",
+    "logs:personal": "docker compose --profile personal logs -f gateway personal-web",
+    "logs:enterprise": "docker compose --profile enterprise logs -f gateway web-console docker-runner bootstrap-enterprise",
+    "ps:docker": "docker compose ps"
   }
 }

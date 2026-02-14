@@ -387,11 +387,30 @@ class GatewayWsPreflightError extends Error {
 }
 
 function readDefaultBaseUrl(): string {
+  const runtime = readRuntimeGatewayBaseUrl();
+  if (runtime) {
+    return runtime;
+  }
+
   const raw = import.meta.env.VITE_GATEWAY_BASE_URL;
   if (typeof raw === "string" && raw.trim().length > 0) {
     return raw.trim();
   }
+
+  if (typeof window !== "undefined" && typeof window.location?.origin === "string") {
+    const origin = window.location.origin.trim();
+    if (origin.startsWith("http://") || origin.startsWith("https://")) {
+      return origin;
+    }
+  }
+
   return "http://127.0.0.1:8787";
+}
+
+function readRuntimeGatewayBaseUrl(): string | undefined {
+  const config = (globalThis as { __OPENFOAL_CONFIG__?: { gatewayBaseUrl?: unknown } }).__OPENFOAL_CONFIG__;
+  const value = typeof config?.gatewayBaseUrl === "string" ? config.gatewayBaseUrl.trim() : "";
+  return value.length > 0 ? value : undefined;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {

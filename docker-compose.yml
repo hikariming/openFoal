@@ -1,0 +1,129 @@
+services:
+  gateway:
+    profiles: ["personal", "enterprise"]
+    build:
+      context: .
+      dockerfile: docker/gateway.Dockerfile
+    container_name: openfoal-gateway
+    environment:
+      OPENFOAL_GATEWAY_HOST: "0.0.0.0"
+      OPENFOAL_GATEWAY_PORT: "8787"
+      OPENFOAL_GATEWAY_SQLITE_PATH: "/data/gateway.sqlite"
+      OPENFOAL_AUTH_MODE: "${OPENFOAL_AUTH_MODE:-none}"
+      OPENFOAL_ENTERPRISE_REQUIRE_AUTH: "${OPENFOAL_ENTERPRISE_REQUIRE_AUTH:-false}"
+      OPENFOAL_LOCAL_JWT_SECRET: "${OPENFOAL_LOCAL_JWT_SECRET:-openfoal-local-dev-secret}"
+      OPENFOAL_LOCAL_JWT_EXPIRES_IN: "${OPENFOAL_LOCAL_JWT_EXPIRES_IN:-1h}"
+      OPENFOAL_LOCAL_ADMIN_USERNAME: "${OPENFOAL_LOCAL_ADMIN_USERNAME:-admin}"
+      OPENFOAL_LOCAL_ADMIN_PASSWORD: "${OPENFOAL_LOCAL_ADMIN_PASSWORD:-admin123!}"
+      OPENFOAL_LOCAL_DEFAULT_TENANT_CODE: "${OPENFOAL_LOCAL_DEFAULT_TENANT_CODE:-default}"
+      OPENFOAL_LOCAL_DEFAULT_WORKSPACE_ID: "${OPENFOAL_LOCAL_DEFAULT_WORKSPACE_ID:-w_default}"
+      OPENFOAL_JWT_ISSUER: "${OPENFOAL_JWT_ISSUER:-}"
+      OPENFOAL_JWT_AUDIENCE: "${OPENFOAL_JWT_AUDIENCE:-}"
+      OPENFOAL_JWKS_URL: "${OPENFOAL_JWKS_URL:-}"
+      OPENFOAL_CORE_ENGINE: "pi"
+      OPENFOAL_PI_STREAM_MODE: "real"
+    volumes:
+      - gateway_data:/data
+    ports:
+      - "8787:8787"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const http=require('node:http');const req=http.get('http://127.0.0.1:8787/health',(res)=>{process.exit(res.statusCode===200?0:1)});req.on('error',()=>process.exit(1));req.setTimeout(2000,()=>{req.destroy();process.exit(1);});"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  personal-web:
+    profiles: ["personal"]
+    build:
+      context: .
+      dockerfile: docker/personal-web.Dockerfile
+    container_name: openfoal-personal-web
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      OPENFOAL_GATEWAY_BASE_URL: "http://localhost:8787"
+    ports:
+      - "5180:80"
+    restart: unless-stopped
+
+  web-console:
+    profiles: ["enterprise"]
+    build:
+      context: .
+      dockerfile: docker/web-console.Dockerfile
+    container_name: openfoal-web-console
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      OPENFOAL_GATEWAY_BASE_URL: "http://localhost:8787"
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+  docker-runner:
+    profiles: ["enterprise"]
+    build:
+      context: .
+      dockerfile: docker/docker-runner.Dockerfile
+    container_name: openfoal-docker-runner
+    environment:
+      RUNNER_HOST: "0.0.0.0"
+      RUNNER_PORT: "8081"
+      RUNNER_AUTH_TOKEN: "runner-demo-token"
+      RUNNER_WORKSPACE_ROOT: "/workspace"
+      RUNNER_DEFAULT_TIMEOUT_MS: "15000"
+    volumes:
+      - runner_workspace:/workspace
+    expose:
+      - "8081"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const http=require('node:http');const req=http.get('http://127.0.0.1:8081/health',(res)=>{process.exit(res.statusCode===200?0:1)});req.on('error',()=>process.exit(1));req.setTimeout(2000,()=>{req.destroy();process.exit(1);});"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  bootstrap-enterprise:
+    profiles: ["enterprise"]
+    image: node:22-alpine
+    container_name: openfoal-bootstrap-enterprise
+    depends_on:
+      gateway:
+        condition: service_healthy
+      docker-runner:
+        condition: service_healthy
+    working_dir: /app
+    environment:
+      GATEWAY_BASE_URL: "http://gateway:8787"
+      BOOTSTRAP_TENANT_ID: "t_default"
+      BOOTSTRAP_WORKSPACE_ID: "w_default"
+      BOOTSTRAP_AGENT_ID: "a_default"
+      BOOTSTRAP_TARGET_ID: "target_enterprise_docker"
+      BOOTSTRAP_RUNNER_ENDPOINT: "http://docker-runner:8081/execute"
+      BOOTSTRAP_RUNNER_TOKEN: "runner-demo-token"
+      BOOTSTRAP_ACTOR: "system-bootstrap"
+    volumes:
+      - ./:/app:ro
+    command: ["node", "scripts/bootstrap-enterprise.mjs"]
+    restart: "no"
+
+volumes:
+  gateway_data:
+  runner_workspace:
