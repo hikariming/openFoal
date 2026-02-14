@@ -40,18 +40,18 @@
 
 | UI 区块 | API | 核心字段 | 备注 |
 |---|---|---|---|
-| 活跃会话 | `sessions.list` | `channel`, `target`, `status` | 取代静态数组 |
-| 策略概览 | `policy.get` | `dmPolicy`, `toolPolicy`, `modelPolicy` | 面板展示 |
-| 审批中心 | `approval.queue` | `approvalId`, `toolName`, `status`, `requester` | pending 队列 |
+| 活跃会话 | `sessions.list` | `id`, `title`, `updatedAt`, `runtimeMode`, `syncState` | 取代静态数组 |
+| 策略概览 | `policy.get` | `scopeKey`, `toolDefault`, `highRisk`, `bashMode`, `tools`, `version`, `updatedAt` | 面板展示 |
+| 审批中心 | `approval.queue` | `approvalId`, `runId`, `toolCallId`, `toolName`, `status`, `decision`, `reason` | pending 队列 |
 | 审计日志 | `audit.query` | `action`, `actor`, `resource`, `createdAt` | 列表与筛选 |
-| 运行健康（预留） | `metrics.summary` | `qps`, `errorRate`, `p95`, `cost` | v1 预留接口 |
+| 运行健康 | `metrics.summary` | `runsTotal`, `runsFailed`, `toolCallsTotal`, `toolFailures`, `p95LatencyMs` | 已接真实聚合 |
 
 ### 2) 策略操作
 
 | UI 操作 | API | 核心字段 | 备注 |
 |---|---|---|---|
-| 修改工具策略 | `policy.update` | `workspaceId`, `agentId`, `patch`, `idempotencyKey` | side-effect |
-| 处理审批 | `approval.resolve` | `approvalId`, `decision`, `comment`, `idempotencyKey` | 审批通过/拒绝 |
+| 修改工具策略 | `policy.update` | `patch.toolDefault/highRisk/bashMode/tools`, `idempotencyKey` | side-effect |
+| 处理审批 | `approval.resolve` | `approvalId`, `decision`, `reason`, `idempotencyKey` | 审批通过/拒绝 |
 
 ## 字段级绑定
 
@@ -62,8 +62,13 @@ type Session = {
   id: string;
   sessionKey: string;
   title: string;
+  preview: string;
   runtimeMode: "local" | "cloud";
   syncState: "local_only" | "syncing" | "synced" | "conflict";
+  contextUsage: number;
+  compactionCount: number;
+  memoryFlushState: "idle" | "pending" | "flushed" | "skipped";
+  memoryFlushAt?: string;
   updatedAt: string;
 };
 ```

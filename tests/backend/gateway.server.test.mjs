@@ -18,14 +18,14 @@ function req(id, method, params = {}) {
   };
 }
 
-test("gateway HTTP exposes health and rpc", async () => {
+test("gateway HTTP exposes health and rpc", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "openfoal-gateway-server-http-"));
   const dbPath = join(dir, "gateway.sqlite");
-  const server = await startGatewayServer({
-    host: "127.0.0.1",
-    port: 0,
-    sqlitePath: dbPath
-  });
+  const server = await startServerOrSkip(t, dbPath);
+  if (!server) {
+    rmSync(dir, { recursive: true, force: true });
+    return;
+  }
   try {
     const health = await httpJson({
       method: "GET",
@@ -59,14 +59,14 @@ test("gateway HTTP exposes health and rpc", async () => {
   }
 });
 
-test("gateway WS handles connect and agent.run stream", async () => {
+test("gateway WS handles connect and agent.run stream", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "openfoal-gateway-server-ws-"));
   const dbPath = join(dir, "gateway.sqlite");
-  const server = await startGatewayServer({
-    host: "127.0.0.1",
-    port: 0,
-    sqlitePath: dbPath
-  });
+  const server = await startServerOrSkip(t, dbPath);
+  if (!server) {
+    rmSync(dir, { recursive: true, force: true });
+    return;
+  }
   const ws = await openWs(server.port);
   try {
     ws.sendJson(req("r_connect", "connect", {}));
@@ -159,6 +159,22 @@ function httpJson({ method, port, path, body }) {
     }
     req.end();
   });
+}
+
+async function startServerOrSkip(t, sqlitePath) {
+  try {
+    return await startGatewayServer({
+      host: "127.0.0.1",
+      port: 0,
+      sqlitePath
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "EPERM") {
+      t.skip("sandbox does not allow binding localhost");
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function openWs(port) {

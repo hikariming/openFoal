@@ -1,19 +1,39 @@
 import { createRuntimeCoreService, type CoreEvent, type CoreService } from "../../../packages/core/dist/index.js";
 import {
+  InMemoryApprovalRepository,
   DEFAULT_SESSION_PREVIEW,
   DEFAULT_SESSION_TITLE,
   InMemoryIdempotencyRepository,
+  InMemoryMetricsRepository,
+  InMemoryPolicyRepository,
   InMemorySessionRepository,
   InMemoryTranscriptRepository,
+  SqliteApprovalRepository,
   SqliteIdempotencyRepository,
+  SqliteMetricsRepository,
+  SqlitePolicyRepository,
   SqliteSessionRepository,
   SqliteTranscriptRepository,
+  type ApprovalRecord,
+  type ApprovalRepository,
+  type ApprovalStatus,
   type IdempotencyRepository,
+  type MetricsRepository,
+  type PolicyDecision,
+  type PolicyPatch,
+  type PolicyRecord,
+  type PolicyRepository,
   type RuntimeMode,
   type SessionRecord,
   type SessionRepository,
   type TranscriptRepository
 } from "../../../packages/storage/dist/index.js";
+import {
+  createLocalToolExecutor,
+  type ToolContext,
+  type ToolExecutor,
+  type ToolResult
+} from "../../../packages/tool-executor/dist/index.js";
 import {
   isSideEffectMethod,
   makeErrorRes,
@@ -68,17 +88,16 @@ export interface GatewayServerHandle {
 
 interface GatewayDeps {
   coreService?: CoreService;
+  toolExecutor?: ToolExecutor;
+  internalToolExecutor?: ToolExecutor;
   sessionRepo?: SessionRepository;
   transcriptRepo?: TranscriptRepository;
   idempotencyRepo?: IdempotencyRepository;
+  policyRepo?: PolicyRepository;
+  approvalRepo?: ApprovalRepository;
+  metricsRepo?: MetricsRepository;
   now?: () => Date;
 }
-
-const DEFAULT_POLICY = {
-  toolDefault: "deny",
-  highRisk: "approval-required",
-  bashMode: "sandbox"
-};
 
 export function createConnectionState(): ConnectionState {
   return {
@@ -91,11 +110,29 @@ export function createConnectionState(): ConnectionState {
 }
 
 export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
-  const coreService = deps.coreService ?? createRuntimeCoreService();
   const sessionRepo = deps.sessionRepo ?? new InMemorySessionRepository();
   const transcriptRepo = deps.transcriptRepo ?? new InMemoryTranscriptRepository();
   const idempotencyRepo = deps.idempotencyRepo ?? new InMemoryIdempotencyRepository();
+  const policyRepo = deps.policyRepo ?? new InMemoryPolicyRepository();
+  const approvalRepo = deps.approvalRepo ?? new InMemoryApprovalRepository();
+  const metricsRepo = deps.metricsRepo ?? new InMemoryMetricsRepository();
   const now = deps.now ?? (() => new Date());
+  const approvalEventSinks = new Map<string, (approval: ApprovalRecord) => void>();
+  const baseToolExecutor = deps.toolExecutor ?? createLocalToolExecutor();
+  const internalToolExecutor = deps.internalToolExecutor ?? baseToolExecutor;
+  const policyAwareToolExecutor = createPolicyAwareToolExecutor({
+    base: baseToolExecutor,
+    policyRepo,
+    approvalRepo,
+    now,
+    onApprovalRequired: (approval, ctx) => {
+      const sink = approvalEventSinks.get(ctx.runId);
+      if (sink) {
+        sink(approval);
+      }
+    }
+  });
+  const coreService = deps.coreService ?? createRuntimeCoreService({ toolExecutor: policyAwareToolExecutor });
 
   return {
     async handle(input: unknown, state: ConnectionState, options: GatewayHandleOptions = {}): Promise<GatewayHandleResult> {
@@ -137,7 +174,20 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         }
       }
 
-      const result = await route(req, state, coreService, sessionRepo, transcriptRepo, now, options);
+      const result = await route(
+        req,
+        state,
+        coreService,
+        sessionRepo,
+        transcriptRepo,
+        policyRepo,
+        approvalRepo,
+        metricsRepo,
+        internalToolExecutor,
+        approvalEventSinks,
+        now,
+        options
+      );
 
       if (idempotencyKey && result.response.ok) {
         await idempotencyRepo.set(idempotencyKey, {
@@ -159,7 +209,10 @@ export async function startGatewayServer(options: GatewayServerOptions = {}): Pr
     createGatewayRouter({
       sessionRepo: new SqliteSessionRepository(options.sqlitePath),
       transcriptRepo: new SqliteTranscriptRepository(options.sqlitePath),
-      idempotencyRepo: new SqliteIdempotencyRepository(options.sqlitePath)
+      idempotencyRepo: new SqliteIdempotencyRepository(options.sqlitePath),
+      policyRepo: new SqlitePolicyRepository(options.sqlitePath),
+      approvalRepo: new SqliteApprovalRepository(options.sqlitePath),
+      metricsRepo: new SqliteMetricsRepository(options.sqlitePath)
     });
   const httpConnections = new Map<string, ConnectionState>();
   const sockets = new Set<any>();
@@ -207,6 +260,11 @@ async function route(
   coreService: CoreService,
   sessionRepo: SessionRepository,
   transcriptRepo: TranscriptRepository,
+  policyRepo: PolicyRepository,
+  approvalRepo: ApprovalRepository,
+  metricsRepo: MetricsRepository,
+  internalToolExecutor: ToolExecutor,
+  approvalEventSinks: Map<string, (approval: ApprovalRecord) => void>,
   now: () => Date,
   options: GatewayHandleOptions
 ): Promise<GatewayHandleResult> {
@@ -363,8 +421,21 @@ async function route(
         }
       }
 
+      session = await prepareSessionForRun({
+        sessionRepo,
+        toolExecutor: internalToolExecutor,
+        session,
+        input,
+        now
+      });
+
       const allEvents: EventFrame[] = [];
       const responseEvents: EventFrame[] = [];
+      const runStartedAt = Date.now();
+      let runStatus: "completed" | "failed" = "completed";
+      let toolCallsTotal = 0;
+      let toolFailures = 0;
+      let completedOutput = "";
       let acceptedRunId = "";
       const emit = (event: EventFrame): void => {
         allEvents.push(event);
@@ -402,12 +473,29 @@ async function route(
             const runId = mapped.payload.runId;
             if (typeof runId === "string") {
               acceptedRunId = runId;
+              approvalEventSinks.set(runId, (approval) => {
+                emit(
+                  createEvent(state, "approval.required", {
+                    approval
+                  })
+                );
+              });
             }
+          } else if (mapped.event === "agent.tool_call") {
+            toolCallsTotal += 1;
+          } else if (mapped.event === "agent.failed") {
+            runStatus = "failed";
+            toolFailures += 1;
+          } else if (mapped.event === "agent.completed") {
+            completedOutput = asString(mapped.payload.output) ?? "";
           }
           emit(createEvent(state, mapped.event, mapped.payload));
         }
       } finally {
         state.runningSessionIds.delete(sessionId);
+        if (acceptedRunId) {
+          approvalEventSinks.delete(acceptedRunId);
+        }
       }
 
       const queuedMode = state.queuedModeChanges.get(sessionId);
@@ -427,12 +515,35 @@ async function route(
       }
 
       if (!acceptedRunId) {
+        await metricsRepo.recordRun({
+          sessionId,
+          status: "failed",
+          durationMs: Date.now() - runStartedAt,
+          toolCalls: toolCallsTotal,
+          toolFailures: Math.max(1, toolFailures),
+          createdAt: now().toISOString()
+        });
         await persistTranscript(sessionId, transcriptRepo, undefined, allEvents, now);
         return {
           response: makeErrorRes(req.id, "INTERNAL_ERROR", "agent.run 未返回 runId"),
           events: responseEvents
         };
       }
+
+      const finalUsage = estimateContextUsage(session.contextUsage, input, completedOutput);
+      await sessionRepo.updateMeta(sessionId, {
+        contextUsage: finalUsage
+      });
+
+      await metricsRepo.recordRun({
+        sessionId,
+        runId: acceptedRunId,
+        status: runStatus,
+        durationMs: Date.now() - runStartedAt,
+        toolCalls: toolCallsTotal,
+        toolFailures,
+        createdAt: now().toISOString()
+      });
 
       await persistTranscript(sessionId, transcriptRepo, acceptedRunId, allEvents, now);
 
@@ -462,19 +573,26 @@ async function route(
     }
 
     case "policy.get": {
+      const scopeKey = requireString(req.params, "scopeKey") ?? "default";
+      const policy = await policyRepo.get(scopeKey);
       return {
         response: makeSuccessRes(req.id, {
-          policy: DEFAULT_POLICY
+          policy
         }),
         events: []
       };
     }
 
     case "policy.update": {
+      const scopeKey = requireString(req.params, "scopeKey") ?? "default";
+      const patch = toPolicyPatch(req.params);
+      if (!patch) {
+        return invalidParams(req.id, "policy.update 需要至少一个可更新字段");
+      }
+      const policy = await policyRepo.update(patch, scopeKey);
       return {
         response: makeSuccessRes(req.id, {
-          updated: true,
-          policy: req.params
+          policy
         }),
         events: [
           createEvent(state, "session.updated", {
@@ -485,23 +603,48 @@ async function route(
     }
 
     case "approval.queue": {
+      const status = asApprovalStatus(req.params.status);
+      if (req.params.status !== undefined && !status) {
+        return invalidParams(req.id, "approval.queue 的 status 仅支持 pending|approved|rejected");
+      }
+      const runId = requireString(req.params, "runId");
+      const sessionId = requireString(req.params, "sessionId");
+      let items = runId && (!status || status === "pending") ? await approvalRepo.listPendingByRun(runId) : await approvalRepo.list(status);
+      if (runId) {
+        items = items.filter((item) => item.runId === runId);
+      }
+      if (sessionId) {
+        items = items.filter((item) => item.sessionId === sessionId);
+      }
       return {
         response: makeSuccessRes(req.id, {
-          items: []
+          items
         }),
         events: []
       };
     }
 
     case "approval.resolve": {
+      const approvalId = requireString(req.params, "approvalId");
+      const decision = asApprovalDecision(req.params.decision ?? req.params.action);
+      const reason = requireString(req.params, "reason") ?? requireString(req.params, "comment");
+      if (!approvalId || !decision) {
+        return invalidParams(req.id, "approval.resolve 需要 approvalId 和 decision(approve|reject)");
+      }
+      const approval = await approvalRepo.resolve(approvalId, decision, reason);
+      if (!approval) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", `未知审批单: ${approvalId}`),
+          events: []
+        };
+      }
       return {
         response: makeSuccessRes(req.id, {
-          resolved: true,
-          action: req.params.action ?? null
+          approval
         }),
         events: [
           createEvent(state, "approval.resolved", {
-            action: req.params.action ?? "approve"
+            approval
           })
         ]
       };
@@ -517,11 +660,10 @@ async function route(
     }
 
     case "metrics.summary": {
+      const metrics = await metricsRepo.summary();
       return {
         response: makeSuccessRes(req.id, {
-          metrics: {
-            todo: true
-          }
+          metrics
         }),
         events: []
       };
@@ -564,7 +706,9 @@ const TRANSCRIPT_KEY_EVENT_NAMES = new Set<EventFrame["event"]>([
   "agent.completed",
   "agent.failed",
   "runtime.mode_changed",
-  "session.updated"
+  "session.updated",
+  "approval.required",
+  "approval.resolved"
 ]);
 
 function filterEventsForTranscript(events: EventFrame[]): EventFrame[] {
@@ -919,6 +1063,9 @@ function createSession(id: string, runtimeMode: RuntimeMode, title = DEFAULT_SES
     preview: DEFAULT_SESSION_PREVIEW,
     runtimeMode,
     syncState: "local_only",
+    contextUsage: 0,
+    compactionCount: 0,
+    memoryFlushState: "idle",
     updatedAt: new Date().toISOString()
   };
 }
@@ -1153,6 +1300,209 @@ function asLlmOptions(
     ...(baseUrl ? { baseUrl } : {}),
     ...(streamMode ? { streamMode } : {})
   };
+}
+
+const HIGH_RISK_TOOLS = new Set(["bash.exec", "http.request", "file.write", "memory.appendDaily"]);
+const PRE_COMPACTION_THRESHOLD = 0.85;
+const APPROVAL_WAIT_TIMEOUT_MS = 90_000;
+
+function asString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return value;
+}
+
+function asPolicyDecision(value: unknown): PolicyDecision | undefined {
+  return value === "deny" || value === "allow" || value === "approval-required" ? value : undefined;
+}
+
+function asApprovalStatus(value: unknown): ApprovalStatus | undefined {
+  return value === "pending" || value === "approved" || value === "rejected" ? value : undefined;
+}
+
+function asApprovalDecision(value: unknown): "approve" | "reject" | undefined {
+  return value === "approve" || value === "reject" ? value : undefined;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function toPolicyPatch(params: Record<string, unknown>): PolicyPatch | undefined {
+  const source = isObjectRecord(params.patch) ? params.patch : params;
+  const toolDefault = asPolicyDecision(source.toolDefault);
+  const highRisk = asPolicyDecision(source.highRisk);
+  const bashMode = source.bashMode === "host" || source.bashMode === "sandbox" ? source.bashMode : undefined;
+  const tools: Record<string, PolicyDecision> = {};
+  if (isObjectRecord(source.tools)) {
+    for (const [name, decision] of Object.entries(source.tools)) {
+      const parsed = asPolicyDecision(decision);
+      if (parsed) {
+        tools[name] = parsed;
+      }
+    }
+  }
+
+  const patch: PolicyPatch = {
+    ...(toolDefault ? { toolDefault } : {}),
+    ...(highRisk ? { highRisk } : {}),
+    ...(bashMode ? { bashMode } : {}),
+    ...(Object.keys(tools).length > 0 ? { tools } : {})
+  };
+  return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
+function resolveToolDecision(policy: PolicyRecord, toolName: string): PolicyDecision {
+  const exact = policy.tools[toolName];
+  if (exact) {
+    return exact;
+  }
+  if (HIGH_RISK_TOOLS.has(toolName)) {
+    return policy.highRisk;
+  }
+  return policy.toolDefault;
+}
+
+function createPolicyAwareToolExecutor(input: {
+  base: ToolExecutor;
+  policyRepo: PolicyRepository;
+  approvalRepo: ApprovalRepository;
+  now: () => Date;
+  onApprovalRequired?: (approval: ApprovalRecord, ctx: ToolContext) => void;
+}): ToolExecutor {
+  return {
+    async execute(call, ctx, hooks): Promise<ToolResult> {
+      const policy = await input.policyRepo.get("default");
+      const decision = resolveToolDecision(policy, call.name);
+
+      if (decision === "deny") {
+        return {
+          ok: false,
+          error: {
+            code: "POLICY_DENIED",
+            message: `策略拒绝执行工具: ${call.name}`
+          }
+        };
+      }
+
+      if (decision === "approval-required") {
+        const argsFingerprint = stableStringify(call.args ?? {});
+        let approval = await input.approvalRepo.findByMatch(ctx.sessionId, ctx.runId, call.name, argsFingerprint);
+        if (!approval) {
+          approval = await input.approvalRepo.create({
+            sessionId: ctx.sessionId,
+            runId: ctx.runId,
+            toolName: call.name,
+            toolCallId: ctx.toolCallId,
+            argsFingerprint,
+            createdAt: input.now().toISOString()
+          });
+          input.onApprovalRequired?.(approval, ctx);
+        }
+
+        if (approval.status === "pending") {
+          const resolved = await input.approvalRepo.waitForResolution(approval.approvalId, APPROVAL_WAIT_TIMEOUT_MS);
+          if (!resolved || resolved.status === "pending") {
+            return {
+              ok: false,
+              error: {
+                code: "APPROVAL_REQUIRED",
+                message: `工具执行等待审批: ${approval.approvalId}`
+              }
+            };
+          }
+          approval = resolved;
+        }
+
+        if (approval.status === "rejected") {
+          return {
+            ok: false,
+            error: {
+              code: "POLICY_DENIED",
+              message: approval.reason
+                ? `审批拒绝(${approval.approvalId}): ${approval.reason}`
+                : `审批拒绝: ${approval.approvalId}`
+            }
+          };
+        }
+      }
+
+      return await input.base.execute(call, ctx, hooks);
+    }
+  };
+}
+
+async function prepareSessionForRun(input: {
+  sessionRepo: SessionRepository;
+  toolExecutor: ToolExecutor;
+  session: SessionRecord;
+  input: string;
+  now: () => Date;
+}): Promise<SessionRecord> {
+  let current = input.session;
+  const projectedUsage = estimateContextUsage(current.contextUsage, input.input);
+  const initialMeta = await input.sessionRepo.updateMeta(current.id, {
+    contextUsage: projectedUsage,
+    memoryFlushState: projectedUsage >= PRE_COMPACTION_THRESHOLD ? "pending" : "idle"
+  });
+  if (initialMeta) {
+    current = initialMeta;
+  }
+
+  if (projectedUsage < PRE_COMPACTION_THRESHOLD) {
+    return current;
+  }
+
+  let flushState: "flushed" | "skipped" = "skipped";
+  try {
+    const flush = await input.toolExecutor.execute(
+      {
+        name: "memory.appendDaily",
+        args: {
+          content: `[NO_REPLY] pre-compaction session=${current.id} ${summarizeForMemory(input.input)}`,
+          includeLongTerm: false
+        }
+      },
+      {
+        runId: `flush_${Date.now().toString(36)}`,
+        sessionId: current.id,
+        runtimeMode: current.runtimeMode
+      }
+    );
+    flushState = flush.ok ? "flushed" : "skipped";
+  } catch {
+    flushState = "skipped";
+  }
+
+  const flushedMeta = await input.sessionRepo.updateMeta(current.id, {
+    memoryFlushState: flushState,
+    ...(flushState === "flushed"
+      ? {
+          memoryFlushAt: input.now().toISOString(),
+          compactionCount: current.compactionCount + 1,
+          contextUsage: Math.max(0.35, projectedUsage - 0.45)
+        }
+      : {})
+  });
+  if (flushedMeta) {
+    current = flushedMeta;
+  }
+  return current;
+}
+
+function summarizeForMemory(input: string): string {
+  const compact = input.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return "(empty input)";
+  }
+  return compact.slice(0, 320);
+}
+
+function estimateContextUsage(current: number, inputText: string, outputText = ""): number {
+  const base = Number.isFinite(current) ? Math.max(0, Math.min(1, current)) : 0;
+  const delta = Math.min(0.45, (inputText.length + outputText.length) / 12_000);
+  return Math.min(1, Number((base + delta).toFixed(6)));
 }
 
 function getIdempotencyKey(req: ReqFrame): string | undefined {

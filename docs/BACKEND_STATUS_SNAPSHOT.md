@@ -1,95 +1,62 @@
-# 后端现状快照（基于当前代码）
+# 后端现状快照（Local-First）
 
-更新时间：以当前仓库 `main` 代码为准。
+更新时间：2026-02-13
 
-## 已完成（可运行）
+## 已落地（真实实现）
 
-### 1) Protocol 层（`packages/protocol`）
+1. `packages/protocol`
+- 已定义并校验 `connect/agent.run/agent.abort/runtime.setMode/sessions.create|list|get|history/policy.get|update/approval.queue|resolve/audit.query/metrics.summary`。
+- side-effect 方法强制 `idempotencyKey`。
+- 错误码包含 `POLICY_DENIED`、`APPROVAL_REQUIRED` 等治理语义。
 
-- 已定义方法枚举：`connect`、`agent.run`、`agent.abort`、`runtime.setMode`、`sessions.list/get`、`policy.get/update`、`approval.queue/resolve`、`audit.query`、`metrics.summary`。
-- 已定义事件枚举：`agent.accepted/delta/tool_call/tool_result/completed/failed`、`runtime.mode_changed`、`session.updated`、`approval.required/resolved`。
-- 已定义标准错误码集合。
-- 已实现 `validateReqFrame`：
-  - 校验 `req` 结构；
-  - 校验 method 是否存在；
-  - 强制 side-effect 方法必须携带 `idempotencyKey`。
+2. `apps/gateway`
+- 已提供 HTTP(`/health`, `/rpc`) + WS(`/ws`) 网关服务。
+- 已实现连接态、事件序号、会话运行锁、模式切换排队。
+- 已实现 side-effect 幂等缓存与参数冲突检测。
+- `sessions.get` 已返回 `contextUsage/compactionCount/memoryFlushState(/memoryFlushAt)`。
+- `policy.get/update` 已接 SQLite/InMemory repository，返回结构化 policy（含 `version/updatedAt`）。
+- `approval.queue/resolve` 已接 SQLite/InMemory repository，返回真实审批对象。
+- `metrics.summary` 已接真实聚合（`runsTotal/runsFailed/toolCallsTotal/toolFailures/p95LatencyMs`）。
+- `agent.run` 已记录 transcript、run metrics，并在高风险工具上执行 policy gate（allow/deny/approval-required）。
 
-### 2) Gateway 路由层（`apps/gateway`）
+3. `packages/storage`
+- 已实现 SQLite + InMemory 仓储：
+  - Session（含元数据扩展与迁移补列）
+  - Transcript
+  - Idempotency
+  - Policy
+  - Approval
+  - Metrics
+- 已支持重启后恢复 policy/approval/session 元数据。
 
-- 已实现连接状态模型（连接态、事件序号、状态版本、会话运行锁、模式切换队列）。
-- 已实现通用请求入口：
-  - 参数校验；
-  - 未 `connect` 前拒绝其他方法；
-  - side-effect 请求的幂等缓存与冲突检测。
-- 已实现核心路由能力：
-  - `connect`；
-  - `sessions.list/get`；
-  - `runtime.setMode`（运行中排队，空闲时应用）；
-  - `agent.run`（接 core 事件流并映射为协议事件）；
-  - `agent.abort`；
-  - `policy.get/update`（当前为默认策略 + 回显更新）；
-  - `approval.queue/resolve`（当前为占位实现）；
-  - `audit.query`（当前为占位实现）；
-  - `metrics.summary`（当前为占位实现）。
+4. `packages/tool-executor`
+- 已实现 local driver：`bash.exec`、`file.read/write/list`、`http.request`、`math.add`、`text.upper`、`echo`。
+- 已实现记忆工具：`memory.get`、`memory.appendDaily`（local only）。
+- `memory.get` 已做白名单路径限制：仅 `MEMORY.md` 与 `memory/*.md`。
 
-### 3) Core 层（`packages/core`）
+5. `packages/core`
+- 已接入 legacy + pi runtime。
+- 已注册 memory 工具到 public tool 集合。
+- 已支持引导文件最小集注入（`AGENTS.md/SOUL.md/TOOLS.md/USER.md`）：
+  - 缺失创建
+  - 不覆盖已有
+  - 注入长度上限
 
-- 已定义 `CoreService` 接口：`run/continue/abort`。
-- 已提供 `createMockCoreService`：可产出 `accepted -> delta -> completed` 的 mock 事件流。
+## 当前轮次边界（明确不做）
 
-### 4) Storage 层（`packages/storage`）
+1. Cloud runtime（Docker/Postgres/S3）暂缓。
+2. 向量/BM25 记忆检索暂缓。
+3. 高级 persona hook/插件化暂缓。
 
-- 已定义 `SessionRepository` 接口。
-- 已实现 `InMemorySessionRepository`，支持：
-  - `list/get/upsert/setRuntimeMode`；
-  - 默认种子会话。
+## 回归验证现状
 
-### 5) Tool Executor 层（`packages/tool-executor`）
+1. 已通过（带 web-api polyfill）的后端关键测试：
+- `tests/backend/gateway.router.test.mjs`
+- `tests/backend/gateway.persistence.test.mjs`
+- `tests/backend/storage.sqlite.test.mjs`
+- `tests/backend/protocol.contract.test.mjs`
+- `tests/backend/tool-executor.driver.test.mjs`
 
-- 已定义 `ToolExecutor.execute()`、`ToolCall`、`ToolContext`、`ToolResult` 类型接口。
-- 尚未提供 local/cloud driver 实现。
-
-### 6) 测试基线
-
-- 已有后端测试：
-  - 协议校验测试（method 校验、side-effect 幂等键要求）；
-  - 网关路由测试（connect 约束、agent.run 事件流、幂等重放/冲突、模式切换排队与应用）。
-
----
-
-## 下一步建议（优先级）
-
-### P0（先补“能跑真链路”）
-
-1. **Gateway 网络服务化**
-   - 当前是纯路由函数，需补 WS/HTTP server 启动与真实连接管理。
-2. **Core 接真实 runtime**
-   - 用真实模型调用替换 `createMockCoreService`，打通 tool loop。
-3. **Tool Executor 落地 local driver**
-   - 先支持 `bash/file/http` 最小闭环，建立统一执行结果与错误语义。
-4. **Storage 从内存切 SQLite**
-   - 至少补 `sessions + messages/transcript` 持久化，保证重启可恢复。
-
-### P1（补“可运维可治理”）
-
-5. **policy / approval / audit 真数据化**
-   - 当前多数接口为占位返回，需接 repository 与审计流水。
-6. **幂等持久化**
-   - 当前幂等缓存在进程内存，重启丢失；需持久化并按 TTL 清理。
-7. **metrics.summary 真指标**
-   - 接入 run 成功率、时延、失败原因等统计。
-
-### P2（补“云端与企业能力”）
-
-8. **cloud runtime + Docker sandbox**
-   - 完成 `runtimeMode=cloud` 的真实隔离执行路径。
-9. **同步状态与冲突处理**
-   - 兑现 `syncState(local_only/syncing/synced/conflict)` 的生命周期。
-10. **多租户预留字段落库**
-    - 当前代码未见 `tenant_id` 贯穿，建议在 schema 与 repository 先加字段与索引预留。
-
----
-
-## 一句话结论
-
-后端已经从“纯文档阶段”进入“协议 + 路由 + mock core + 内存存储 + 基础测试”的**可联调骨架阶段**，下一阶段重点是把 mock/内存/占位接口逐步替换成真实服务与持久化实现。
+2. 运行全量 `backend-test` 仍受环境限制影响：
+- 某些环境缺少 `TransformStream`（已可通过 polyfill 绕过）。
+- 沙箱环境可能禁止本地端口监听（`EPERM`），相关网络测试需在允许监听的环境跑。

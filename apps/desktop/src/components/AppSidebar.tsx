@@ -46,6 +46,7 @@ export function AppSidebar() {
   const [activeSettingsMenu, setActiveSettingsMenu] = useState<SettingsMenu>("account");
   const [runtimePending, setRuntimePending] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
+  const [runtimeNotice, setRuntimeNotice] = useState("");
   const [llmSavedNotice, setLlmSavedNotice] = useState("");
   const { sessions, activeSessionId, setSessions, upsertSession, setActiveSession, setRuntimeMode, llmConfig, setLlmConfig } =
     useAppStore();
@@ -121,12 +122,18 @@ export function AppSidebar() {
       return;
     }
     setRuntimeError("");
+    setRuntimeNotice("");
     setRuntimePending(true);
     const prevMode = runtimeMode;
-    setRuntimeMode(nextMode);
     try {
       const client = getGatewayClient();
-      await client.setRuntimeMode(activeSessionId, nextMode);
+      const modeResult = await client.setRuntimeMode(activeSessionId, nextMode);
+      if (modeResult.status === "queued-change") {
+        setRuntimeNotice(t("sidebar.runtimeQueuedNotice"));
+      } else {
+        setRuntimeMode(nextMode);
+        setRuntimeNotice(t("sidebar.runtimeAppliedNotice"));
+      }
       const refreshed = await client.getSession(activeSessionId);
       if (refreshed) {
         upsertSession(mapGatewaySessionToStoreSession(refreshed));
@@ -272,6 +279,17 @@ export function AppSidebar() {
             }}
           >
             <Typography.Text className="session-title">{session.title}</Typography.Text>
+            <Typography.Text type="tertiary" className="session-preview">
+              {session.preview.trim().length > 0 ? session.preview : t("sidebar.noPreview")}
+            </Typography.Text>
+            <Space spacing={4} className="session-meta">
+              <Tag size="small" color={session.runtimeMode === "local" ? "cyan" : "purple"}>
+                {session.runtimeMode === "local" ? t("sidebar.runtimeLocal") : t("sidebar.runtimeCloud")}
+              </Tag>
+              <Tag size="small" color={syncStateColor(session.syncState)}>
+                {renderSyncStateLabel(session.syncState)}
+              </Tag>
+            </Space>
           </button>
         ))}
       </div>
@@ -474,9 +492,13 @@ export function AppSidebar() {
                       </Typography.Text>
                     </button>
                   </div>
-                  {runtimePending ? <Typography.Text type="tertiary">Syncing runtime mode...</Typography.Text> : null}
+                  {runtimePending ? <Typography.Text type="tertiary">{t("sidebar.runtimeSyncing")}</Typography.Text> : null}
+                  {runtimeNotice ? <Typography.Text type="success">{runtimeNotice}</Typography.Text> : null}
                   {runtimeError ? (
-                    <Typography.Text type="danger">Runtime mode sync failed: {runtimeError}</Typography.Text>
+                    <Typography.Text type="danger">
+                      {t("sidebar.runtimeSyncFailed")}
+                      {runtimeError}
+                    </Typography.Text>
                   ) : null}
 
                   <div className="llm-config-wrap">
@@ -676,6 +698,36 @@ function mapGatewaySessionToStoreSession(session: GatewaySession) {
     preview: session.preview,
     runtimeMode: session.runtimeMode,
     syncState: session.syncState as "local_only" | "syncing" | "synced" | "conflict",
+    contextUsage: session.contextUsage,
+    compactionCount: session.compactionCount,
+    memoryFlushState: session.memoryFlushState,
+    ...(session.memoryFlushAt ? { memoryFlushAt: session.memoryFlushAt } : {}),
     updatedAt: session.updatedAt
   };
+}
+
+function renderSyncStateLabel(syncState: "local_only" | "syncing" | "synced" | "conflict"): string {
+  if (syncState === "syncing") {
+    return "syncing";
+  }
+  if (syncState === "synced") {
+    return "synced";
+  }
+  if (syncState === "conflict") {
+    return "conflict";
+  }
+  return "local_only";
+}
+
+function syncStateColor(syncState: "local_only" | "syncing" | "synced" | "conflict"): "grey" | "blue" | "green" | "red" {
+  if (syncState === "syncing") {
+    return "blue";
+  }
+  if (syncState === "synced") {
+    return "green";
+  }
+  if (syncState === "conflict") {
+    return "red";
+  }
+  return "grey";
 }

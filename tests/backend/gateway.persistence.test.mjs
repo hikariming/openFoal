@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 
 import { createConnectionState, createGatewayRouter } from "../../apps/gateway/dist/index.js";
 import {
+  SqliteApprovalRepository,
   SqliteIdempotencyRepository,
+  SqliteMetricsRepository,
+  SqlitePolicyRepository,
   SqliteSessionRepository,
   SqliteTranscriptRepository
 } from "../../packages/storage/dist/index.js";
@@ -28,7 +31,10 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
     const routerA = createGatewayRouter({
       sessionRepo: new SqliteSessionRepository(dbPath),
       idempotencyRepo: new SqliteIdempotencyRepository(dbPath),
-      transcriptRepo: new SqliteTranscriptRepository(dbPath)
+      transcriptRepo: new SqliteTranscriptRepository(dbPath),
+      policyRepo: new SqlitePolicyRepository(dbPath),
+      approvalRepo: new SqliteApprovalRepository(dbPath),
+      metricsRepo: new SqliteMetricsRepository(dbPath)
     });
     const stateA = createConnectionState();
     await routerA.handle(req("r_connect_a", "connect", {}), stateA);
@@ -44,10 +50,22 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
     );
     assert.equal(firstRun.response.ok, true);
 
+    const policyUpdated = await routerA.handle(
+      req("r_policy_update_1", "policy.update", {
+        idempotencyKey: "idem_policy_update_persist_1",
+        toolDefault: "allow"
+      }),
+      stateA
+    );
+    assert.equal(policyUpdated.response.ok, true);
+
     const routerB = createGatewayRouter({
       sessionRepo: new SqliteSessionRepository(dbPath),
       idempotencyRepo: new SqliteIdempotencyRepository(dbPath),
-      transcriptRepo: new SqliteTranscriptRepository(dbPath)
+      transcriptRepo: new SqliteTranscriptRepository(dbPath),
+      policyRepo: new SqlitePolicyRepository(dbPath),
+      approvalRepo: new SqliteApprovalRepository(dbPath),
+      metricsRepo: new SqliteMetricsRepository(dbPath)
     });
     const stateB = createConnectionState();
     await routerB.handle(req("r_connect_b", "connect", {}), stateB);
@@ -64,12 +82,41 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
 
     assert.deepEqual(replay, firstRun);
 
+    const policyGet = await routerB.handle(req("r_policy_get_1", "policy.get", {}), stateB);
+    assert.equal(policyGet.response.ok, true);
+    if (policyGet.response.ok) {
+      assert.equal(policyGet.response.payload.policy.toolDefault, "allow");
+      assert.equal(policyGet.response.payload.policy.version >= 2, true);
+    }
+
     const transcriptRepo = new SqliteTranscriptRepository(dbPath);
     const transcript = await transcriptRepo.list("s_default", 100);
     assert.equal(transcript.length > 0, true);
     assert.equal(transcript.some((item) => item.event === "agent.tool_call_start"), true);
     assert.equal(transcript.some((item) => item.event === "agent.tool_result_start"), true);
     assert.equal(transcript.some((item) => item.event === "agent.completed"), true);
+
+    const sessionRepo = new SqliteSessionRepository(dbPath);
+    const persistedSession = await sessionRepo.get("s_default");
+    assert.equal(Boolean(persistedSession), true);
+    assert.equal(typeof persistedSession?.contextUsage, "number");
+    assert.equal(typeof persistedSession?.compactionCount, "number");
+    assert.equal(typeof persistedSession?.memoryFlushState, "string");
+
+    const approvalRepoA = new SqliteApprovalRepository(dbPath);
+    const createdApproval = await approvalRepoA.create({
+      sessionId: "s_default",
+      runId: "run_persist_approval",
+      toolName: "bash.exec",
+      toolCallId: "tc_persist_1",
+      argsFingerprint: "{\"cmd\":\"echo\"}"
+    });
+    const resolvedApproval = await approvalRepoA.resolve(createdApproval.approvalId, "approve", "persist check");
+    assert.equal(resolvedApproval?.status, "approved");
+
+    const approvalRepoB = new SqliteApprovalRepository(dbPath);
+    const fetchedApproval = await approvalRepoB.get(createdApproval.approvalId);
+    assert.equal(fetchedApproval?.status, "approved");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

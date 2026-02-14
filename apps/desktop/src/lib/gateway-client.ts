@@ -8,7 +8,13 @@ type GatewayMethod =
   | "sessions.create"
   | "sessions.list"
   | "sessions.get"
-  | "sessions.history";
+  | "sessions.history"
+  | "policy.get"
+  | "policy.update"
+  | "approval.queue"
+  | "approval.resolve"
+  | "audit.query"
+  | "metrics.summary";
 
 type ErrorCode =
   | "UNAUTHORIZED"
@@ -63,6 +69,11 @@ interface RpcEnvelope {
   events: RpcEvent[];
 }
 
+interface RpcSuccessEnvelope {
+  response: RpcResponseSuccess;
+  events: RpcEvent[];
+}
+
 export class GatewayRpcError extends Error {
   readonly code: string;
 
@@ -78,7 +89,16 @@ interface GatewayClientOptions {
   connectionId?: string;
 }
 
-const SIDE_EFFECT_METHODS = new Set<GatewayMethod>(["agent.run", "agent.abort", "runtime.setMode", "sessions.create"]);
+const SIDE_EFFECT_METHODS = new Set<GatewayMethod>([
+  "agent.run",
+  "agent.abort",
+  "runtime.setMode",
+  "sessions.create",
+  "policy.update",
+  "approval.resolve"
+]);
+
+export type MemoryFlushState = "idle" | "pending" | "flushed" | "skipped";
 
 export type GatewaySession = {
   id: string;
@@ -87,6 +107,10 @@ export type GatewaySession = {
   preview: string;
   runtimeMode: RuntimeMode;
   syncState: string;
+  contextUsage: number;
+  compactionCount: number;
+  memoryFlushState: MemoryFlushState;
+  memoryFlushAt?: string;
   updatedAt: string;
 };
 
@@ -97,6 +121,51 @@ export type GatewayTranscriptItem = {
   event: string;
   payload: Record<string, unknown>;
   createdAt: string;
+};
+
+export type PolicyDecision = "deny" | "allow" | "approval-required";
+
+export type GatewayPolicy = {
+  scopeKey: string;
+  toolDefault: PolicyDecision;
+  highRisk: PolicyDecision;
+  bashMode: "sandbox" | "host";
+  tools: Record<string, PolicyDecision>;
+  version: number;
+  updatedAt: string;
+};
+
+export type GatewayApprovalStatus = "pending" | "approved" | "rejected";
+
+export type GatewayApproval = {
+  approvalId: string;
+  sessionId: string;
+  runId: string;
+  toolName: string;
+  toolCallId?: string;
+  argsFingerprint: string;
+  status: GatewayApprovalStatus;
+  decision?: "approve" | "reject";
+  reason?: string;
+  createdAt: string;
+  resolvedAt?: string;
+};
+
+export type GatewayMetricsSummary = {
+  runsTotal: number;
+  runsFailed: number;
+  toolCallsTotal: number;
+  toolFailures: number;
+  p95LatencyMs: number;
+};
+
+export type GatewayAuditItem = {
+  id?: string;
+  action?: string;
+  actor?: string;
+  resource?: string;
+  createdAt?: string;
+  [key: string]: unknown;
 };
 
 export interface RunAgentParams {
@@ -138,16 +207,13 @@ export class GatewayHttpClient {
     }
 
     this.connectPromise = (async () => {
-      const result = await this.request("connect", {
+      await this.request("connect", {
         client: {
           name: "desktop",
           version: "0.1.0"
         },
         workspaceId: "w_default"
       });
-      if (!result.response.ok) {
-        throw new GatewayRpcError(result.response.error.code, result.response.error.message);
-      }
       this.connected = true;
     })();
 
@@ -161,7 +227,7 @@ export class GatewayHttpClient {
   async listSessions(): Promise<GatewaySession[]> {
     await this.ensureConnected();
     const result = await this.request("sessions.list", {});
-    const items = result.response.ok ? result.response.payload.items : [];
+    const items = result.response.payload.items;
     if (!Array.isArray(items)) {
       return [];
     }
@@ -174,7 +240,7 @@ export class GatewayHttpClient {
       ...(params?.title ? { title: params.title } : {}),
       ...(params?.runtimeMode ? { runtimeMode: params.runtimeMode } : {})
     });
-    const session = result.response.ok ? result.response.payload.session : null;
+    const session = result.response.payload.session;
     if (!isGatewaySession(session)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid sessions.create payload");
     }
@@ -184,7 +250,7 @@ export class GatewayHttpClient {
   async getSession(sessionId: string): Promise<GatewaySession | null> {
     await this.ensureConnected();
     const result = await this.request("sessions.get", { sessionId });
-    const session = result.response.ok ? result.response.payload.session : null;
+    const session = result.response.payload.session;
     if (session == null) {
       return null;
     }
@@ -205,19 +271,125 @@ export class GatewayHttpClient {
       ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       ...(typeof params.beforeId === "number" ? { beforeId: params.beforeId } : {})
     });
-    const items = result.response.ok ? result.response.payload.items : [];
+    const items = result.response.payload.items;
     if (!Array.isArray(items)) {
       return [];
     }
     return items.filter(isGatewayTranscriptItem);
   }
 
-  async setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode): Promise<void> {
+  async setRuntimeMode(
+    sessionId: string,
+    runtimeMode: RuntimeMode
+  ): Promise<{ sessionId: string; runtimeMode: RuntimeMode; status: string; effectiveOn?: string }> {
     await this.ensureConnected();
-    await this.request("runtime.setMode", {
+    const result = await this.request("runtime.setMode", {
       sessionId,
       runtimeMode
     });
+    return {
+      sessionId: asString(result.response.payload.sessionId) ?? sessionId,
+      runtimeMode: asRuntimeMode(result.response.payload.runtimeMode) ?? runtimeMode,
+      status: asString(result.response.payload.status) ?? "applied",
+      ...(asString(result.response.payload.effectiveOn) ? { effectiveOn: asString(result.response.payload.effectiveOn) } : {})
+    };
+  }
+
+  async getPolicy(scopeKey = "default"): Promise<GatewayPolicy> {
+    await this.ensureConnected();
+    const result = await this.request("policy.get", {
+      scopeKey
+    });
+    const policy = result.response.payload.policy;
+    if (!isGatewayPolicy(policy)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid policy.get payload");
+    }
+    return policy;
+  }
+
+  async updatePolicy(
+    patch: {
+      toolDefault?: PolicyDecision;
+      highRisk?: PolicyDecision;
+      bashMode?: "sandbox" | "host";
+      tools?: Record<string, PolicyDecision>;
+    },
+    scopeKey = "default"
+  ): Promise<GatewayPolicy> {
+    await this.ensureConnected();
+    const result = await this.request("policy.update", {
+      scopeKey,
+      patch
+    });
+    const policy = result.response.payload.policy;
+    if (!isGatewayPolicy(policy)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid policy.update payload");
+    }
+    return policy;
+  }
+
+  async listApprovals(params: {
+    status?: GatewayApprovalStatus;
+    runId?: string;
+    sessionId?: string;
+  } = {}): Promise<GatewayApproval[]> {
+    await this.ensureConnected();
+    const result = await this.request("approval.queue", {
+      ...(params.status ? { status: params.status } : {}),
+      ...(params.runId ? { runId: params.runId } : {}),
+      ...(params.sessionId ? { sessionId: params.sessionId } : {})
+    });
+    const items = result.response.payload.items;
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.filter(isGatewayApproval);
+  }
+
+  async resolveApproval(params: {
+    approvalId: string;
+    decision: "approve" | "reject";
+    reason?: string;
+  }): Promise<GatewayApproval> {
+    await this.ensureConnected();
+    const result = await this.request("approval.resolve", {
+      approvalId: params.approvalId,
+      decision: params.decision,
+      ...(params.reason ? { reason: params.reason } : {})
+    });
+    const approval = result.response.payload.approval;
+    if (!isGatewayApproval(approval)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid approval.resolve payload");
+    }
+    return approval;
+  }
+
+  async queryAudit(params: {
+    from?: string;
+    to?: string;
+    limit?: number;
+  } = {}): Promise<GatewayAuditItem[]> {
+    await this.ensureConnected();
+    const result = await this.request("audit.query", {
+      ...(params.from ? { from: params.from } : {}),
+      ...(params.to ? { to: params.to } : {}),
+      ...(typeof params.limit === "number" ? { limit: params.limit } : {})
+    });
+    const items = result.response.payload.items;
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.filter(isGatewayAuditItem);
+  }
+
+  async getMetricsSummary(): Promise<GatewayMetricsSummary> {
+    await this.ensureConnected();
+    const result = await this.request("metrics.summary", {});
+    const metrics = result.response.payload.metrics;
+    if (!isGatewayMetricsSummary(metrics)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid metrics.summary payload");
+    }
+    return metrics;
   }
 
   async runAgent(params: RunAgentParams): Promise<{ runId?: string; events: RpcEvent[] }> {
@@ -228,9 +400,6 @@ export class GatewayHttpClient {
       runtimeMode: params.runtimeMode,
       ...(params.llm ? { llm: params.llm } : {})
     });
-    if (!result.response.ok) {
-      throw new GatewayRpcError(result.response.error.code, result.response.error.message);
-    }
     const runId = asString(result.response.payload.runId);
     return {
       runId,
@@ -402,7 +571,7 @@ export class GatewayHttpClient {
     });
   }
 
-  private async request(method: GatewayMethod, params: Record<string, unknown>): Promise<RpcEnvelope> {
+  private async request(method: GatewayMethod, params: Record<string, unknown>): Promise<RpcSuccessEnvelope> {
     const id = `r_${++this.requestCounter}`;
     const req: RpcRequestFrame = {
       type: "req",
@@ -443,7 +612,10 @@ export class GatewayHttpClient {
     if (!payload.response.ok) {
       throw new GatewayRpcError(payload.response.error.code, payload.response.error.message);
     }
-    return payload;
+    return {
+      response: payload.response,
+      events: payload.events
+    };
   }
 }
 
@@ -583,8 +755,69 @@ function isGatewaySession(value: unknown): value is GatewaySession {
     typeof item.preview === "string" &&
     (item.runtimeMode === "local" || item.runtimeMode === "cloud") &&
     typeof item.syncState === "string" &&
+    typeof item.contextUsage === "number" &&
+    typeof item.compactionCount === "number" &&
+    (item.memoryFlushState === "idle" ||
+      item.memoryFlushState === "pending" ||
+      item.memoryFlushState === "flushed" ||
+      item.memoryFlushState === "skipped") &&
+    (item.memoryFlushAt === undefined || typeof item.memoryFlushAt === "string") &&
     typeof item.updatedAt === "string"
   );
+}
+
+function isGatewayPolicy(value: unknown): value is GatewayPolicy {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.scopeKey === "string" &&
+    isPolicyDecision(item.toolDefault) &&
+    isPolicyDecision(item.highRisk) &&
+    (item.bashMode === "sandbox" || item.bashMode === "host") &&
+    Boolean(item.tools && typeof item.tools === "object" && !Array.isArray(item.tools)) &&
+    typeof item.version === "number" &&
+    typeof item.updatedAt === "string"
+  );
+}
+
+function isGatewayApproval(value: unknown): value is GatewayApproval {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.approvalId === "string" &&
+    typeof item.sessionId === "string" &&
+    typeof item.runId === "string" &&
+    typeof item.toolName === "string" &&
+    typeof item.argsFingerprint === "string" &&
+    (item.status === "pending" || item.status === "approved" || item.status === "rejected") &&
+    (item.decision === undefined || item.decision === "approve" || item.decision === "reject") &&
+    (item.reason === undefined || typeof item.reason === "string") &&
+    typeof item.createdAt === "string" &&
+    (item.toolCallId === undefined || typeof item.toolCallId === "string") &&
+    (item.resolvedAt === undefined || typeof item.resolvedAt === "string")
+  );
+}
+
+function isGatewayMetricsSummary(value: unknown): value is GatewayMetricsSummary {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.runsTotal === "number" &&
+    typeof item.runsFailed === "number" &&
+    typeof item.toolCallsTotal === "number" &&
+    typeof item.toolFailures === "number" &&
+    typeof item.p95LatencyMs === "number"
+  );
+}
+
+function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function isGatewayTranscriptItem(value: unknown): value is GatewayTranscriptItem {
@@ -604,6 +837,14 @@ function isGatewayTranscriptItem(value: unknown): value is GatewayTranscriptItem
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function asRuntimeMode(value: unknown): RuntimeMode | undefined {
+  return value === "local" || value === "cloud" ? value : undefined;
+}
+
+function isPolicyDecision(value: unknown): value is PolicyDecision {
+  return value === "deny" || value === "allow" || value === "approval-required";
 }
 
 function toErrorMessage(error: unknown): string {

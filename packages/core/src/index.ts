@@ -3,6 +3,7 @@ import {
   type ToolExecutor,
   type ToolResult
 } from "../../../packages/tool-executor/dist/index.js";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { Agent, type AgentEvent, type AgentTool, type StreamFn } from "@mariozechner/pi-agent-core";
 import {
   Type,
@@ -22,6 +23,7 @@ import {
   type OpenFoalLlmModelConfig,
   type OpenFoalLlmProviderConfig
 } from "./config.js";
+import { join, resolve } from "node:path";
 
 declare const process: any;
 
@@ -125,6 +127,9 @@ export interface PiCoreOptions {
   apiKey?: string;
   baseUrl?: string;
   systemPrompt?: string;
+  workspaceRoot?: string;
+  ensureBootstrapFiles?: boolean;
+  bootstrapMaxChars?: number;
   streamMode?: "real" | "mock";
   streamFn?: StreamFn;
   configPath?: string;
@@ -172,12 +177,16 @@ interface ParsedInput {
 
 const TOOL_DIRECTIVE_PATTERN = /\[\[tool:([a-zA-Z0-9._-]+)(?:\s+([\s\S]*?))?\]\]/g;
 const DEFAULT_SYSTEM_PROMPT = "You are OpenFoal assistant.";
+const DEFAULT_BOOTSTRAP_MAX_CHARS = 8_000;
+const DEFAULT_BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "TOOLS.md", "USER.md"] as const;
 const PUBLIC_TOOL_NAMES = [
   "bash.exec",
   "file.read",
   "file.write",
   "file.list",
   "http.request",
+  "memory.get",
+  "memory.appendDaily",
   "math.add",
   "text.upper",
   "echo"
@@ -242,6 +251,7 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
           ...piOptions,
           ...(input.llm ?? {})
         });
+        const systemPrompt = buildSystemPromptWithWorkspace(piOptions);
         const streamFn = resolvePiStreamFn(piOptions, runtimeSettings.streamMode);
         const tools = createPiTools(toolExecutor, {
           runId,
@@ -252,7 +262,7 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
         const agent = new Agent({
           initialState: {
             ...(runtimeSettings.model ? { model: runtimeSettings.model as Model<any> } : {}),
-            systemPrompt: piOptions.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
+            systemPrompt,
             tools
           },
           streamFn,
@@ -528,6 +538,105 @@ export function createMockCoreService(): CoreService {
 
 export function createBuiltinToolExecutor(): ToolExecutor {
   return createLocalToolExecutor();
+}
+
+function buildSystemPromptWithWorkspace(options: PiCoreOptions): string {
+  const basePrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+  const workspaceRoot = resolveWorkspaceRoot(options.workspaceRoot);
+  const ensureFiles = options.ensureBootstrapFiles !== false;
+  const maxChars = Number.isFinite(Number(options.bootstrapMaxChars))
+    ? Math.max(500, Math.floor(Number(options.bootstrapMaxChars)))
+    : DEFAULT_BOOTSTRAP_MAX_CHARS;
+
+  if (ensureFiles) {
+    ensureWorkspaceBootstrapFiles(workspaceRoot);
+  }
+
+  const files = loadWorkspaceBootstrapFiles(workspaceRoot, maxChars);
+  if (files.length === 0) {
+    return basePrompt;
+  }
+
+  const lines: string[] = [basePrompt, "", "## Project Context"];
+  lines.push(
+    "Follow workspace guidance files. Security/policy/system constraints always take precedence over style/persona rules."
+  );
+  lines.push("");
+  for (const file of files) {
+    lines.push(`### ${file.name}`);
+    lines.push(file.content);
+    lines.push("");
+  }
+  return lines.join("\n").trim();
+}
+
+function resolveWorkspaceRoot(input: string | undefined): string {
+  const explicit = firstNonEmpty(input, process.env.OPENFOAL_WORKSPACE_ROOT);
+  if (explicit) {
+    return resolve(explicit);
+  }
+  return resolve(process.cwd());
+}
+
+function ensureWorkspaceBootstrapFiles(workspaceRoot: string): void {
+  mkdirSync(workspaceRoot, { recursive: true });
+  for (const fileName of DEFAULT_BOOTSTRAP_FILES) {
+    const filePath = join(workspaceRoot, fileName);
+    if (existsSync(filePath)) {
+      continue;
+    }
+    writeFileSync(filePath, defaultBootstrapContent(fileName), {
+      encoding: "utf8",
+      flag: "wx"
+    });
+  }
+}
+
+function loadWorkspaceBootstrapFiles(
+  workspaceRoot: string,
+  maxChars: number
+): Array<{ name: string; content: string }> {
+  const items: Array<{ name: string; content: string }> = [];
+  for (const fileName of DEFAULT_BOOTSTRAP_FILES) {
+    const filePath = join(workspaceRoot, fileName);
+    if (!existsSync(filePath)) {
+      continue;
+    }
+    try {
+      const raw = readFileSync(filePath, "utf8");
+      items.push({
+        name: fileName,
+        content: truncateBootstrapContent(raw, maxChars, fileName)
+      });
+    } catch {
+      // ignore unreadable context file
+    }
+  }
+  return items;
+}
+
+function truncateBootstrapContent(content: string, maxChars: number, fileName: string): string {
+  if (content.length <= maxChars) {
+    return content;
+  }
+  const head = content.slice(0, Math.floor(maxChars * 0.75));
+  const tail = content.slice(content.length - Math.floor(maxChars * 0.2));
+  return `${head}\n\n[...truncated, read ${fileName} for full content...]\n\n${tail}`;
+}
+
+function defaultBootstrapContent(fileName: (typeof DEFAULT_BOOTSTRAP_FILES)[number]): string {
+  switch (fileName) {
+    case "AGENTS.md":
+      return "# AGENTS.md\n\n- Follow project coding and safety policies.\n- Keep responses concise and executable.\n";
+    case "SOUL.md":
+      return "# SOUL.md\n\nPragmatic, direct engineering assistant persona.\n";
+    case "TOOLS.md":
+      return "# TOOLS.md\n\n- Prefer workspace-safe tools.\n- Explain side effects before destructive actions.\n";
+    case "USER.md":
+      return "# USER.md\n\n- Preferred language: zh-CN\n- Style: concise and practical\n";
+    default:
+      return "";
+  }
 }
 
 function resolveEngine(engine: RuntimeCoreOptions["engine"]): "pi" | "legacy" | "auto" {
@@ -894,7 +1003,7 @@ function createPiTools(
     label: publicToolName,
     description: `OpenFoal tool: ${publicToolName}`,
     parameters: Type.Object({}, { additionalProperties: true }),
-    execute: async (_toolCallId, params, signal, onUpdate) => {
+    execute: async (toolCallId, params, signal, onUpdate) => {
       const result = await toolExecutor.execute(
         {
           name: publicToolName,
@@ -903,7 +1012,8 @@ function createPiTools(
         {
           runId: ctx.runId,
           sessionId: ctx.sessionId,
-          runtimeMode: ctx.runtimeMode
+          runtimeMode: ctx.runtimeMode,
+          toolCallId: typeof toolCallId === "string" ? toolCallId : undefined
         },
         {
           signal: signal as { aborted: boolean; addEventListener?: (...args: any[]) => void; removeEventListener?: (...args: any[]) => void } | undefined,
@@ -1436,7 +1546,8 @@ async function executeLegacyToolLoop(input: {
         {
           runId: input.runId,
           sessionId: input.sessionId,
-          runtimeMode: input.runtimeMode
+          runtimeMode: input.runtimeMode,
+          toolCallId
         },
         {
           onUpdate: (update) => {

@@ -86,7 +86,82 @@ test("tool executor supports file.write/file.read/file.list", async () => {
   }
 });
 
-test("tool executor supports http.request", async () => {
+test("tool executor supports memory.get/memory.appendDaily", async () => {
+  const root = mkdtempSync(join(tmpdir(), "openfoal-tool-memory-"));
+  const executor = createLocalToolExecutor({
+    workspaceRoot: root
+  });
+
+  try {
+    const append = await executor.execute(
+      {
+        name: "memory.appendDaily",
+        args: {
+          date: "2026-02-13",
+          content: "remember this item",
+          includeLongTerm: true
+        }
+      },
+      TOOL_CTX
+    );
+    assert.equal(append.ok, true);
+
+    const getDaily = await executor.execute(
+      {
+        name: "memory.get",
+        args: {
+          path: "memory/2026-02-13.md"
+        }
+      },
+      TOOL_CTX
+    );
+    assert.equal(getDaily.ok, true);
+    if (getDaily.ok) {
+      const payload = JSON.parse(getDaily.output ?? "{}");
+      assert.match(payload.text ?? "", /remember this item/);
+    }
+
+    const getLongTerm = await executor.execute(
+      {
+        name: "memory.get",
+        args: {
+          path: "MEMORY.md"
+        }
+      },
+      TOOL_CTX
+    );
+    assert.equal(getLongTerm.ok, true);
+    if (getLongTerm.ok) {
+      const payload = JSON.parse(getLongTerm.output ?? "{}");
+      assert.match(payload.text ?? "", /remember this item/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tool executor memory.get rejects non-whitelisted path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "openfoal-tool-memory-safe-"));
+  const executor = createLocalToolExecutor({
+    workspaceRoot: root
+  });
+  try {
+    const result = await executor.execute(
+      {
+        name: "memory.get",
+        args: {
+          path: "../etc/passwd"
+        }
+      },
+      TOOL_CTX
+    );
+    assert.equal(result.ok, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tool executor supports http.request", async (t) => {
   const server = createHttpServer((req, res) => {
     if (req.url === "/health" && req.method === "GET") {
       res.statusCode = 200;
@@ -97,7 +172,15 @@ test("tool executor supports http.request", async () => {
     res.statusCode = 404;
     res.end("not found");
   });
-  await listen(server);
+  try {
+    await listen(server);
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "EPERM") {
+      t.skip("sandbox does not allow binding localhost");
+      return;
+    }
+    throw error;
+  }
 
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;

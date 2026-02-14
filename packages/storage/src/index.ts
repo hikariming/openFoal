@@ -9,6 +9,11 @@ declare const process: any;
 
 export type RuntimeMode = "local" | "cloud";
 export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
+export type MemoryFlushState = "idle" | "pending" | "flushed" | "skipped";
+export type PolicyDecision = "deny" | "allow" | "approval-required";
+export type ApprovalDecision = "approve" | "reject";
+export type ApprovalStatus = "pending" | "approved" | "rejected";
+
 export const DEFAULT_SESSION_TITLE = "new-session";
 export const DEFAULT_SESSION_PREVIEW = "";
 
@@ -19,7 +24,18 @@ export interface SessionRecord {
   preview: string;
   runtimeMode: RuntimeMode;
   syncState: SyncState;
+  contextUsage: number;
+  compactionCount: number;
+  memoryFlushState: MemoryFlushState;
+  memoryFlushAt?: string;
   updatedAt: string;
+}
+
+export interface SessionMetaPatch {
+  contextUsage?: number;
+  compactionCount?: number;
+  memoryFlushState?: MemoryFlushState;
+  memoryFlushAt?: string;
 }
 
 export interface SessionRepository {
@@ -27,6 +43,7 @@ export interface SessionRepository {
   get(sessionId: string): Promise<SessionRecord | undefined>;
   upsert(session: SessionRecord): Promise<void>;
   setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode): Promise<SessionRecord | undefined>;
+  updateMeta(sessionId: string, patch: SessionMetaPatch): Promise<SessionRecord | undefined>;
 }
 
 export interface TranscriptRecord {
@@ -72,13 +89,106 @@ export interface IdempotencyRepository {
   ): Promise<void>;
 }
 
+export interface PolicyRecord {
+  scopeKey: string;
+  toolDefault: PolicyDecision;
+  highRisk: PolicyDecision;
+  bashMode: "sandbox" | "host";
+  tools: Record<string, PolicyDecision>;
+  version: number;
+  updatedAt: string;
+}
+
+export interface PolicyPatch {
+  toolDefault?: PolicyDecision;
+  highRisk?: PolicyDecision;
+  bashMode?: "sandbox" | "host";
+  tools?: Record<string, PolicyDecision>;
+}
+
+export interface PolicyRepository {
+  get(scopeKey?: string): Promise<PolicyRecord>;
+  update(patch: PolicyPatch, scopeKey?: string): Promise<PolicyRecord>;
+}
+
+export interface ApprovalRecord {
+  approvalId: string;
+  sessionId: string;
+  runId: string;
+  toolName: string;
+  toolCallId?: string;
+  argsFingerprint: string;
+  status: ApprovalStatus;
+  decision?: ApprovalDecision;
+  reason?: string;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface ApprovalCreateInput {
+  approvalId?: string;
+  sessionId: string;
+  runId: string;
+  toolName: string;
+  toolCallId?: string;
+  argsFingerprint: string;
+  createdAt?: string;
+}
+
+export interface ApprovalRepository {
+  list(status?: ApprovalStatus): Promise<ApprovalRecord[]>;
+  listPendingByRun(runId: string): Promise<ApprovalRecord[]>;
+  get(approvalId: string): Promise<ApprovalRecord | undefined>;
+  findByMatch(
+    sessionId: string,
+    runId: string,
+    toolName: string,
+    argsFingerprint: string
+  ): Promise<ApprovalRecord | undefined>;
+  create(input: ApprovalCreateInput): Promise<ApprovalRecord>;
+  resolve(approvalId: string, decision: ApprovalDecision, reason?: string): Promise<ApprovalRecord | undefined>;
+  waitForResolution(approvalId: string, timeoutMs?: number): Promise<ApprovalRecord | undefined>;
+}
+
+export interface MetricsRunRecord {
+  id: number;
+  sessionId: string;
+  runId?: string;
+  status: "completed" | "failed";
+  durationMs: number;
+  toolCalls: number;
+  toolFailures: number;
+  createdAt: string;
+}
+
+export interface MetricsSummary {
+  runsTotal: number;
+  runsFailed: number;
+  toolCallsTotal: number;
+  toolFailures: number;
+  p95LatencyMs: number;
+}
+
+export interface MetricsRepository {
+  recordRun(entry: {
+    sessionId: string;
+    runId?: string;
+    status: "completed" | "failed";
+    durationMs: number;
+    toolCalls: number;
+    toolFailures: number;
+    createdAt?: string;
+  }): Promise<void>;
+  summary(): Promise<MetricsSummary>;
+}
+
 export class InMemorySessionRepository implements SessionRepository {
   private readonly sessions = new Map<string, SessionRecord>();
 
   constructor(initialSessions?: SessionRecord[]) {
     const seed = initialSessions ?? [defaultSession()];
     for (const session of seed) {
-      this.sessions.set(session.id, session);
+      this.sessions.set(session.id, normalizeSession(session));
     }
   }
 
@@ -91,7 +201,10 @@ export class InMemorySessionRepository implements SessionRepository {
   }
 
   async upsert(session: SessionRecord): Promise<void> {
-    this.sessions.set(session.id, { ...session, updatedAt: nowIso() });
+    this.sessions.set(session.id, {
+      ...normalizeSession(session),
+      updatedAt: nowIso()
+    });
   }
 
   async setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode): Promise<SessionRecord | undefined> {
@@ -103,6 +216,24 @@ export class InMemorySessionRepository implements SessionRepository {
     const next: SessionRecord = {
       ...current,
       runtimeMode,
+      updatedAt: nowIso()
+    };
+    this.sessions.set(sessionId, next);
+    return next;
+  }
+
+  async updateMeta(sessionId: string, patch: SessionMetaPatch): Promise<SessionRecord | undefined> {
+    const current = this.sessions.get(sessionId);
+    if (!current) {
+      return undefined;
+    }
+
+    const next: SessionRecord = {
+      ...current,
+      ...(patch.contextUsage !== undefined ? { contextUsage: normalizeUsage(patch.contextUsage) } : {}),
+      ...(patch.compactionCount !== undefined ? { compactionCount: normalizeCompactionCount(patch.compactionCount) } : {}),
+      ...(patch.memoryFlushState !== undefined ? { memoryFlushState: patch.memoryFlushState } : {}),
+      ...(patch.memoryFlushAt !== undefined ? { memoryFlushAt: patch.memoryFlushAt } : {}),
       updatedAt: nowIso()
     };
     this.sessions.set(sessionId, next);
@@ -160,6 +291,157 @@ export class InMemoryIdempotencyRepository implements IdempotencyRepository {
   }
 }
 
+export class InMemoryPolicyRepository implements PolicyRepository {
+  private readonly store = new Map<string, PolicyRecord>();
+
+  constructor(seed?: PolicyRecord[]) {
+    const initial = seed ?? [defaultPolicy()];
+    for (const item of initial) {
+      this.store.set(item.scopeKey, normalizePolicy(item));
+    }
+  }
+
+  async get(scopeKey = "default"): Promise<PolicyRecord> {
+    const existing = this.store.get(scopeKey);
+    if (existing) {
+      return { ...existing, tools: { ...existing.tools } };
+    }
+    const created = { ...defaultPolicy(), scopeKey };
+    this.store.set(scopeKey, created);
+    return { ...created, tools: { ...created.tools } };
+  }
+
+  async update(patch: PolicyPatch, scopeKey = "default"): Promise<PolicyRecord> {
+    const current = await this.get(scopeKey);
+    const merged: PolicyRecord = normalizePolicy({
+      ...current,
+      ...(patch.toolDefault ? { toolDefault: patch.toolDefault } : {}),
+      ...(patch.highRisk ? { highRisk: patch.highRisk } : {}),
+      ...(patch.bashMode ? { bashMode: patch.bashMode } : {}),
+      ...(patch.tools ? { tools: { ...current.tools, ...sanitizePolicyMap(patch.tools) } } : {}),
+      version: current.version + 1,
+      updatedAt: nowIso()
+    });
+    this.store.set(scopeKey, merged);
+    return { ...merged, tools: { ...merged.tools } };
+  }
+}
+
+export class InMemoryApprovalRepository implements ApprovalRepository {
+  private readonly store = new Map<string, ApprovalRecord>();
+
+  async list(status?: ApprovalStatus): Promise<ApprovalRecord[]> {
+    return Array.from(this.store.values())
+      .filter((item) => (status ? item.status === status : true))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async listPendingByRun(runId: string): Promise<ApprovalRecord[]> {
+    return Array.from(this.store.values())
+      .filter((item) => item.runId === runId && item.status === "pending")
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async get(approvalId: string): Promise<ApprovalRecord | undefined> {
+    return this.store.get(approvalId);
+  }
+
+  async findByMatch(
+    sessionId: string,
+    runId: string,
+    toolName: string,
+    argsFingerprint: string
+  ): Promise<ApprovalRecord | undefined> {
+    const matched = Array.from(this.store.values())
+      .filter(
+        (item) =>
+          item.sessionId === sessionId &&
+          item.runId === runId &&
+          item.toolName === toolName &&
+          item.argsFingerprint === argsFingerprint
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return matched[0];
+  }
+
+  async create(input: ApprovalCreateInput): Promise<ApprovalRecord> {
+    const approval: ApprovalRecord = {
+      approvalId: input.approvalId ?? createApprovalId(),
+      sessionId: input.sessionId,
+      runId: input.runId,
+      toolName: input.toolName,
+      ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
+      argsFingerprint: input.argsFingerprint,
+      status: "pending",
+      createdAt: input.createdAt ?? nowIso()
+    };
+    this.store.set(approval.approvalId, approval);
+    return approval;
+  }
+
+  async resolve(approvalId: string, decision: ApprovalDecision, reason?: string): Promise<ApprovalRecord | undefined> {
+    const current = this.store.get(approvalId);
+    if (!current) {
+      return undefined;
+    }
+
+    const next: ApprovalRecord = {
+      ...current,
+      status: decision === "approve" ? "approved" : "rejected",
+      decision,
+      ...(reason ? { reason } : {}),
+      resolvedAt: nowIso()
+    };
+    this.store.set(approvalId, next);
+    return next;
+  }
+
+  async waitForResolution(approvalId: string, timeoutMs = 30_000): Promise<ApprovalRecord | undefined> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = this.store.get(approvalId);
+      if (!current) {
+        return undefined;
+      }
+      if (current.status !== "pending") {
+        return current;
+      }
+      await sleep(200);
+    }
+    return this.store.get(approvalId);
+  }
+}
+
+export class InMemoryMetricsRepository implements MetricsRepository {
+  private readonly rows: MetricsRunRecord[] = [];
+  private nextId = 1;
+
+  async recordRun(entry: {
+    sessionId: string;
+    runId?: string;
+    status: "completed" | "failed";
+    durationMs: number;
+    toolCalls: number;
+    toolFailures: number;
+    createdAt?: string;
+  }): Promise<void> {
+    this.rows.push({
+      id: this.nextId++,
+      sessionId: entry.sessionId,
+      runId: entry.runId,
+      status: entry.status,
+      durationMs: Math.max(0, Math.round(entry.durationMs)),
+      toolCalls: Math.max(0, Math.floor(entry.toolCalls)),
+      toolFailures: Math.max(0, Math.floor(entry.toolFailures)),
+      createdAt: entry.createdAt ?? nowIso()
+    });
+  }
+
+  async summary(): Promise<MetricsSummary> {
+    return summarizeMetrics(this.rows);
+  }
+}
+
 export class SqliteSessionRepository implements SessionRepository {
   private readonly dbPath: string;
 
@@ -179,11 +461,15 @@ export class SqliteSessionRepository implements SessionRepository {
           preview AS preview,
           runtime_mode AS runtimeMode,
           sync_state AS syncState,
+          context_usage AS contextUsage,
+          compaction_count AS compactionCount,
+          memory_flush_state AS memoryFlushState,
+          memory_flush_at AS memoryFlushAt,
           updated_at AS updatedAt
         FROM sessions
         ORDER BY updated_at DESC;
       `
-    );
+    ).map(normalizeSession);
   }
 
   async get(sessionId: string): Promise<SessionRecord | undefined> {
@@ -198,29 +484,50 @@ export class SqliteSessionRepository implements SessionRepository {
           preview AS preview,
           runtime_mode AS runtimeMode,
           sync_state AS syncState,
+          context_usage AS contextUsage,
+          compaction_count AS compactionCount,
+          memory_flush_state AS memoryFlushState,
+          memory_flush_at AS memoryFlushAt,
           updated_at AS updatedAt
         FROM sessions
         WHERE id = ${sqlString(sessionId)}
         LIMIT 1;
       `
     );
-    return rows[0];
+    return rows[0] ? normalizeSession(rows[0]) : undefined;
   }
 
   async upsert(session: SessionRecord): Promise<void> {
     ensureSchema(this.dbPath);
+    const normalized = normalizeSession(session);
     const updatedAt = nowIso();
     execSql(
       this.dbPath,
       `
-        INSERT INTO sessions (id, session_key, title, preview, runtime_mode, sync_state, updated_at)
+        INSERT INTO sessions (
+          id,
+          session_key,
+          title,
+          preview,
+          runtime_mode,
+          sync_state,
+          context_usage,
+          compaction_count,
+          memory_flush_state,
+          memory_flush_at,
+          updated_at
+        )
         VALUES (
-          ${sqlString(session.id)},
-          ${sqlString(session.sessionKey)},
-          ${sqlString(session.title)},
-          ${sqlString(session.preview)},
-          ${sqlString(session.runtimeMode)},
-          ${sqlString(session.syncState)},
+          ${sqlString(normalized.id)},
+          ${sqlString(normalized.sessionKey)},
+          ${sqlString(normalized.title)},
+          ${sqlString(normalized.preview)},
+          ${sqlString(normalized.runtimeMode)},
+          ${sqlString(normalized.syncState)},
+          ${sqlNumber(normalized.contextUsage)},
+          ${sqlInt(normalized.compactionCount)},
+          ${sqlString(normalized.memoryFlushState)},
+          ${sqlMaybeString(normalized.memoryFlushAt)},
           ${sqlString(updatedAt)}
         )
         ON CONFLICT(id) DO UPDATE SET
@@ -229,6 +536,10 @@ export class SqliteSessionRepository implements SessionRepository {
           preview = excluded.preview,
           runtime_mode = excluded.runtime_mode,
           sync_state = excluded.sync_state,
+          context_usage = excluded.context_usage,
+          compaction_count = excluded.compaction_count,
+          memory_flush_state = excluded.memory_flush_state,
+          memory_flush_at = excluded.memory_flush_at,
           updated_at = excluded.updated_at;
       `
     );
@@ -247,6 +558,39 @@ export class SqliteSessionRepository implements SessionRepository {
       `
         UPDATE sessions
         SET runtime_mode = ${sqlString(runtimeMode)}, updated_at = ${sqlString(updatedAt)}
+        WHERE id = ${sqlString(sessionId)};
+      `
+    );
+
+    return await this.get(sessionId);
+  }
+
+  async updateMeta(sessionId: string, patch: SessionMetaPatch): Promise<SessionRecord | undefined> {
+    ensureSchema(this.dbPath);
+    const existing = await this.get(sessionId);
+    if (!existing) {
+      return undefined;
+    }
+
+    const merged = {
+      contextUsage: patch.contextUsage !== undefined ? normalizeUsage(patch.contextUsage) : existing.contextUsage,
+      compactionCount:
+        patch.compactionCount !== undefined ? normalizeCompactionCount(patch.compactionCount) : existing.compactionCount,
+      memoryFlushState: patch.memoryFlushState ?? existing.memoryFlushState,
+      memoryFlushAt: patch.memoryFlushAt !== undefined ? patch.memoryFlushAt : existing.memoryFlushAt,
+      updatedAt: nowIso()
+    };
+
+    execSql(
+      this.dbPath,
+      `
+        UPDATE sessions
+        SET
+          context_usage = ${sqlNumber(merged.contextUsage)},
+          compaction_count = ${sqlInt(merged.compactionCount)},
+          memory_flush_state = ${sqlString(merged.memoryFlushState)},
+          memory_flush_at = ${sqlMaybeString(merged.memoryFlushAt)},
+          updated_at = ${sqlString(merged.updatedAt)}
         WHERE id = ${sqlString(sessionId)};
       `
     );
@@ -400,6 +744,425 @@ export class SqliteIdempotencyRepository implements IdempotencyRepository {
   }
 }
 
+export class SqlitePolicyRepository implements PolicyRepository {
+  private readonly dbPath: string;
+
+  constructor(dbPath = defaultSqlitePath()) {
+    this.dbPath = normalizeDbPath(dbPath);
+  }
+
+  async get(scopeKey = "default"): Promise<PolicyRecord> {
+    ensureSchema(this.dbPath);
+    const rows = queryJson<{
+      scopeKey: string;
+      policyJson: string;
+      version: number;
+      updatedAt: string;
+    }>(
+      this.dbPath,
+      `
+        SELECT
+          scope_key AS scopeKey,
+          policy_json AS policyJson,
+          version AS version,
+          updated_at AS updatedAt
+        FROM policy
+        WHERE scope_key = ${sqlString(scopeKey)}
+        LIMIT 1;
+      `
+    );
+
+    if (rows.length === 0) {
+      const created = normalizePolicy({ ...defaultPolicy(), scopeKey });
+      await this.update(created, scopeKey);
+      return await this.get(scopeKey);
+    }
+
+    return parsePolicyRow(rows[0]);
+  }
+
+  async update(patch: PolicyPatch, scopeKey = "default"): Promise<PolicyRecord> {
+    ensureSchema(this.dbPath);
+    const current = await this.get(scopeKey);
+    const merged = normalizePolicy({
+      ...current,
+      ...(patch.toolDefault ? { toolDefault: patch.toolDefault } : {}),
+      ...(patch.highRisk ? { highRisk: patch.highRisk } : {}),
+      ...(patch.bashMode ? { bashMode: patch.bashMode } : {}),
+      ...(patch.tools ? { tools: { ...current.tools, ...sanitizePolicyMap(patch.tools) } } : {}),
+      version: current.version + 1,
+      updatedAt: nowIso()
+    });
+
+    execSql(
+      this.dbPath,
+      `
+        INSERT INTO policy (scope_key, policy_json, version, updated_at)
+        VALUES (
+          ${sqlString(scopeKey)},
+          ${sqlString(JSON.stringify({
+            toolDefault: merged.toolDefault,
+            highRisk: merged.highRisk,
+            bashMode: merged.bashMode,
+            tools: merged.tools
+          }))},
+          ${sqlInt(merged.version)},
+          ${sqlString(merged.updatedAt)}
+        )
+        ON CONFLICT(scope_key) DO UPDATE SET
+          policy_json = excluded.policy_json,
+          version = excluded.version,
+          updated_at = excluded.updated_at;
+      `
+    );
+
+    return await this.get(scopeKey);
+  }
+}
+
+export class SqliteApprovalRepository implements ApprovalRepository {
+  private readonly dbPath: string;
+
+  constructor(dbPath = defaultSqlitePath()) {
+    this.dbPath = normalizeDbPath(dbPath);
+  }
+
+  async list(status?: ApprovalStatus): Promise<ApprovalRecord[]> {
+    ensureSchema(this.dbPath);
+    const where = status ? `WHERE status = ${sqlString(status)}` : "";
+    const rows = queryJson<ApprovalRow>(
+      this.dbPath,
+      `
+        SELECT
+          approval_id AS approvalId,
+          session_id AS sessionId,
+          run_id AS runId,
+          tool_name AS toolName,
+          tool_call_id AS toolCallId,
+          args_fingerprint AS argsFingerprint,
+          status AS status,
+          decision AS decision,
+          reason AS reason,
+          created_at AS createdAt,
+          resolved_at AS resolvedAt
+        FROM approval_queue
+        ${where}
+        ORDER BY created_at DESC;
+      `
+    );
+    return rows.map(parseApprovalRow);
+  }
+
+  async listPendingByRun(runId: string): Promise<ApprovalRecord[]> {
+    ensureSchema(this.dbPath);
+    const rows = queryJson<ApprovalRow>(
+      this.dbPath,
+      `
+        SELECT
+          approval_id AS approvalId,
+          session_id AS sessionId,
+          run_id AS runId,
+          tool_name AS toolName,
+          tool_call_id AS toolCallId,
+          args_fingerprint AS argsFingerprint,
+          status AS status,
+          decision AS decision,
+          reason AS reason,
+          created_at AS createdAt,
+          resolved_at AS resolvedAt
+        FROM approval_queue
+        WHERE run_id = ${sqlString(runId)} AND status = 'pending'
+        ORDER BY created_at DESC;
+      `
+    );
+    return rows.map(parseApprovalRow);
+  }
+
+  async get(approvalId: string): Promise<ApprovalRecord | undefined> {
+    ensureSchema(this.dbPath);
+    const rows = queryJson<ApprovalRow>(
+      this.dbPath,
+      `
+        SELECT
+          approval_id AS approvalId,
+          session_id AS sessionId,
+          run_id AS runId,
+          tool_name AS toolName,
+          tool_call_id AS toolCallId,
+          args_fingerprint AS argsFingerprint,
+          status AS status,
+          decision AS decision,
+          reason AS reason,
+          created_at AS createdAt,
+          resolved_at AS resolvedAt
+        FROM approval_queue
+        WHERE approval_id = ${sqlString(approvalId)}
+        LIMIT 1;
+      `
+    );
+    return rows[0] ? parseApprovalRow(rows[0]) : undefined;
+  }
+
+  async findByMatch(
+    sessionId: string,
+    runId: string,
+    toolName: string,
+    argsFingerprint: string
+  ): Promise<ApprovalRecord | undefined> {
+    ensureSchema(this.dbPath);
+    const rows = queryJson<ApprovalRow>(
+      this.dbPath,
+      `
+        SELECT
+          approval_id AS approvalId,
+          session_id AS sessionId,
+          run_id AS runId,
+          tool_name AS toolName,
+          tool_call_id AS toolCallId,
+          args_fingerprint AS argsFingerprint,
+          status AS status,
+          decision AS decision,
+          reason AS reason,
+          created_at AS createdAt,
+          resolved_at AS resolvedAt
+        FROM approval_queue
+        WHERE
+          session_id = ${sqlString(sessionId)}
+          AND run_id = ${sqlString(runId)}
+          AND tool_name = ${sqlString(toolName)}
+          AND args_fingerprint = ${sqlString(argsFingerprint)}
+        ORDER BY created_at DESC
+        LIMIT 1;
+      `
+    );
+    return rows[0] ? parseApprovalRow(rows[0]) : undefined;
+  }
+
+  async create(input: ApprovalCreateInput): Promise<ApprovalRecord> {
+    ensureSchema(this.dbPath);
+    const approvalId = input.approvalId ?? createApprovalId();
+    const createdAt = input.createdAt ?? nowIso();
+
+    execSql(
+      this.dbPath,
+      `
+        INSERT INTO approval_queue (
+          approval_id,
+          session_id,
+          run_id,
+          tool_name,
+          tool_call_id,
+          args_fingerprint,
+          status,
+          created_at
+        )
+        VALUES (
+          ${sqlString(approvalId)},
+          ${sqlString(input.sessionId)},
+          ${sqlString(input.runId)},
+          ${sqlString(input.toolName)},
+          ${sqlMaybeString(input.toolCallId)},
+          ${sqlString(input.argsFingerprint)},
+          'pending',
+          ${sqlString(createdAt)}
+        );
+      `
+    );
+
+    const created = await this.get(approvalId);
+    if (!created) {
+      throw new Error(`approval create failed: ${approvalId}`);
+    }
+    return created;
+  }
+
+  async resolve(approvalId: string, decision: ApprovalDecision, reason?: string): Promise<ApprovalRecord | undefined> {
+    ensureSchema(this.dbPath);
+    const existing = await this.get(approvalId);
+    if (!existing) {
+      return undefined;
+    }
+
+    const status = decision === "approve" ? "approved" : "rejected";
+    execSql(
+      this.dbPath,
+      `
+        UPDATE approval_queue
+        SET
+          status = ${sqlString(status)},
+          decision = ${sqlString(decision)},
+          reason = ${sqlMaybeString(reason)},
+          resolved_at = ${sqlString(nowIso())}
+        WHERE approval_id = ${sqlString(approvalId)};
+      `
+    );
+
+    return await this.get(approvalId);
+  }
+
+  async waitForResolution(approvalId: string, timeoutMs = 30_000): Promise<ApprovalRecord | undefined> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = await this.get(approvalId);
+      if (!current) {
+        return undefined;
+      }
+      if (current.status !== "pending") {
+        return current;
+      }
+      await sleep(200);
+    }
+    return await this.get(approvalId);
+  }
+}
+
+export class SqliteMetricsRepository implements MetricsRepository {
+  private readonly dbPath: string;
+
+  constructor(dbPath = defaultSqlitePath()) {
+    this.dbPath = normalizeDbPath(dbPath);
+  }
+
+  async recordRun(entry: {
+    sessionId: string;
+    runId?: string;
+    status: "completed" | "failed";
+    durationMs: number;
+    toolCalls: number;
+    toolFailures: number;
+    createdAt?: string;
+  }): Promise<void> {
+    ensureSchema(this.dbPath);
+    execSql(
+      this.dbPath,
+      `
+        INSERT INTO run_metrics (
+          session_id,
+          run_id,
+          status,
+          duration_ms,
+          tool_calls,
+          tool_failures,
+          created_at
+        )
+        VALUES (
+          ${sqlString(entry.sessionId)},
+          ${sqlMaybeString(entry.runId)},
+          ${sqlString(entry.status)},
+          ${sqlInt(Math.max(0, Math.round(entry.durationMs)))},
+          ${sqlInt(Math.max(0, Math.floor(entry.toolCalls)))},
+          ${sqlInt(Math.max(0, Math.floor(entry.toolFailures)))},
+          ${sqlString(entry.createdAt ?? nowIso())}
+        );
+      `
+    );
+  }
+
+  async summary(): Promise<MetricsSummary> {
+    ensureSchema(this.dbPath);
+    const rows = queryJson<MetricsRunRecord>(
+      this.dbPath,
+      `
+        SELECT
+          id AS id,
+          session_id AS sessionId,
+          run_id AS runId,
+          status AS status,
+          duration_ms AS durationMs,
+          tool_calls AS toolCalls,
+          tool_failures AS toolFailures,
+          created_at AS createdAt
+        FROM run_metrics
+        ORDER BY id ASC;
+      `
+    );
+    return summarizeMetrics(rows);
+  }
+}
+
+type ApprovalRow = {
+  approvalId: string;
+  sessionId: string;
+  runId: string;
+  toolName: string;
+  toolCallId: string | null;
+  argsFingerprint: string;
+  status: string;
+  decision: string | null;
+  reason: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+};
+
+function parseApprovalRow(row: ApprovalRow): ApprovalRecord {
+  const status = row.status === "approved" || row.status === "rejected" ? row.status : "pending";
+  return {
+    approvalId: row.approvalId,
+    sessionId: row.sessionId,
+    runId: row.runId,
+    toolName: row.toolName,
+    ...(row.toolCallId ? { toolCallId: row.toolCallId } : {}),
+    argsFingerprint: row.argsFingerprint,
+    status,
+    ...(row.decision === "approve" || row.decision === "reject" ? { decision: row.decision } : {}),
+    ...(row.reason ? { reason: row.reason } : {}),
+    createdAt: row.createdAt,
+    ...(row.resolvedAt ? { resolvedAt: row.resolvedAt } : {})
+  };
+}
+
+function parsePolicyRow(row: { scopeKey: string; policyJson: string; version: number; updatedAt: string }): PolicyRecord {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const value = JSON.parse(row.policyJson);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      parsed = value as Record<string, unknown>;
+    }
+  } catch {
+    parsed = {};
+  }
+
+  return normalizePolicy({
+    scopeKey: row.scopeKey,
+    toolDefault: asPolicyDecision(parsed.toolDefault) ?? defaultPolicy().toolDefault,
+    highRisk: asPolicyDecision(parsed.highRisk) ?? defaultPolicy().highRisk,
+    bashMode: parsed.bashMode === "host" ? "host" : "sandbox",
+    tools: sanitizePolicyMap(parsed.tools),
+    version: Number.isFinite(Number(row.version)) ? Number(row.version) : 1,
+    updatedAt: row.updatedAt
+  });
+}
+
+function summarizeMetrics(rows: Array<{
+  status: string;
+  durationMs: number;
+  toolCalls: number;
+  toolFailures: number;
+}>): MetricsSummary {
+  const runsTotal = rows.length;
+  const runsFailed = rows.filter((row) => row.status === "failed").length;
+  const toolCallsTotal = rows.reduce((sum, row) => sum + normalizeInt(row.toolCalls), 0);
+  const toolFailures = rows.reduce((sum, row) => sum + normalizeInt(row.toolFailures), 0);
+  const durations = rows.map((row) => normalizeInt(row.durationMs)).sort((a, b) => a - b);
+  const p95LatencyMs = percentile95(durations);
+
+  return {
+    runsTotal,
+    runsFailed,
+    toolCallsTotal,
+    toolFailures,
+    p95LatencyMs
+  };
+}
+
+function percentile95(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const index = Math.max(0, Math.ceil(values.length * 0.95) - 1);
+  return values[Math.min(values.length - 1, index)] ?? 0;
+}
+
 function defaultSession(): SessionRecord {
   return {
     id: "s_default",
@@ -408,6 +1171,28 @@ function defaultSession(): SessionRecord {
     preview: DEFAULT_SESSION_PREVIEW,
     runtimeMode: "local",
     syncState: "local_only",
+    contextUsage: 0,
+    compactionCount: 0,
+    memoryFlushState: "idle",
+    updatedAt: nowIso()
+  };
+}
+
+function defaultPolicy(): PolicyRecord {
+  return {
+    scopeKey: "default",
+    toolDefault: "deny",
+    highRisk: "approval-required",
+    bashMode: "sandbox",
+    tools: {
+      "math.add": "allow",
+      "text.upper": "allow",
+      echo: "allow",
+      "file.read": "allow",
+      "file.list": "allow",
+      "memory.get": "allow"
+    },
+    version: 1,
     updatedAt: nowIso()
   };
 }
@@ -444,6 +1229,10 @@ function ensureSchema(dbPath: string): void {
         preview TEXT NOT NULL DEFAULT '',
         runtime_mode TEXT NOT NULL,
         sync_state TEXT NOT NULL,
+        context_usage REAL NOT NULL DEFAULT 0,
+        compaction_count INTEGER NOT NULL DEFAULT 0,
+        memory_flush_state TEXT NOT NULL DEFAULT 'idle',
+        memory_flush_at TEXT,
         updated_at TEXT NOT NULL
       );
 
@@ -468,23 +1257,99 @@ function ensureSchema(dbPath: string): void {
         result_json TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS policy (
+        scope_key TEXT PRIMARY KEY,
+        policy_json TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS approval_queue (
+        approval_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_call_id TEXT,
+        args_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        decision TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_approval_run_id
+      ON approval_queue(run_id, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_approval_match
+      ON approval_queue(session_id, run_id, tool_name, args_fingerprint, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS run_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        run_id TEXT,
+        status TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        tool_calls INTEGER NOT NULL,
+        tool_failures INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `
   );
 
   ensureSessionColumns(dbPath);
 
+  const seed = defaultSession();
   execSql(
     dbPath,
     `
-      INSERT OR IGNORE INTO sessions (id, session_key, title, preview, runtime_mode, sync_state, updated_at)
+      INSERT OR IGNORE INTO sessions (
+        id,
+        session_key,
+        title,
+        preview,
+        runtime_mode,
+        sync_state,
+        context_usage,
+        compaction_count,
+        memory_flush_state,
+        memory_flush_at,
+        updated_at
+      )
       VALUES (
-        ${sqlString("s_default")},
-        ${sqlString("workspace:w_default/agent:a_default/main")},
-        ${sqlString(DEFAULT_SESSION_TITLE)},
-        ${sqlString(DEFAULT_SESSION_PREVIEW)},
-        ${sqlString("local")},
-        ${sqlString("local_only")},
-        ${sqlString(nowIso())}
+        ${sqlString(seed.id)},
+        ${sqlString(seed.sessionKey)},
+        ${sqlString(seed.title)},
+        ${sqlString(seed.preview)},
+        ${sqlString(seed.runtimeMode)},
+        ${sqlString(seed.syncState)},
+        ${sqlNumber(seed.contextUsage)},
+        ${sqlInt(seed.compactionCount)},
+        ${sqlString(seed.memoryFlushState)},
+        ${sqlMaybeString(seed.memoryFlushAt)},
+        ${sqlString(seed.updatedAt)}
+      );
+    `
+  );
+
+  const policy = defaultPolicy();
+  execSql(
+    dbPath,
+    `
+      INSERT OR IGNORE INTO policy (scope_key, policy_json, version, updated_at)
+      VALUES (
+        ${sqlString(policy.scopeKey)},
+        ${sqlString(
+          JSON.stringify({
+            toolDefault: policy.toolDefault,
+            highRisk: policy.highRisk,
+            bashMode: policy.bashMode,
+            tools: policy.tools
+          })
+        )},
+        ${sqlInt(policy.version)},
+        ${sqlString(policy.updatedAt)}
       );
     `
   );
@@ -517,6 +1382,46 @@ function ensureSessionColumns(dbPath: string): void {
       `
         ALTER TABLE sessions
         ADD COLUMN preview TEXT NOT NULL DEFAULT ${sqlString(DEFAULT_SESSION_PREVIEW)};
+      `
+    );
+  }
+
+  if (!names.has("context_usage")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN context_usage REAL NOT NULL DEFAULT 0;
+      `
+    );
+  }
+
+  if (!names.has("compaction_count")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN compaction_count INTEGER NOT NULL DEFAULT 0;
+      `
+    );
+  }
+
+  if (!names.has("memory_flush_state")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN memory_flush_state TEXT NOT NULL DEFAULT 'idle';
+      `
+    );
+  }
+
+  if (!names.has("memory_flush_at")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN memory_flush_at TEXT;
       `
     );
   }
@@ -556,6 +1461,20 @@ function sqlMaybeString(value: string | undefined): string {
     return "NULL";
   }
   return sqlString(value);
+}
+
+function sqlNumber(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  return String(value);
+}
+
+function sqlInt(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  return String(Math.floor(value));
 }
 
 function normalizeDbPath(dbPath: string): string {
@@ -599,6 +1518,94 @@ function parseIdempotencyResult(value: string): IdempotencyResult {
   };
 }
 
+function normalizeSession(input: SessionRecord): SessionRecord {
+  return {
+    id: input.id,
+    sessionKey: input.sessionKey,
+    title: input.title,
+    preview: input.preview,
+    runtimeMode: input.runtimeMode,
+    syncState: input.syncState,
+    contextUsage: normalizeUsage((input as { contextUsage?: unknown }).contextUsage),
+    compactionCount: normalizeCompactionCount((input as { compactionCount?: unknown }).compactionCount),
+    memoryFlushState: normalizeMemoryFlushState((input as { memoryFlushState?: unknown }).memoryFlushState),
+    ...(typeof input.memoryFlushAt === "string" && input.memoryFlushAt.length > 0 ? { memoryFlushAt: input.memoryFlushAt } : {}),
+    updatedAt: input.updatedAt
+  };
+}
+
+function normalizeUsage(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+  if (value <= 0) {
+    return 0;
+  }
+  if (value >= 1) {
+    return 1;
+  }
+  return Number(value.toFixed(6));
+}
+
+function normalizeCompactionCount(value: unknown): number {
+  return normalizeInt(value);
+}
+
+function normalizeInt(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+  const num = Math.floor(value);
+  return num < 0 ? 0 : num;
+}
+
+function normalizeMemoryFlushState(value: unknown): MemoryFlushState {
+  if (value === "pending" || value === "flushed" || value === "skipped") {
+    return value;
+  }
+  return "idle";
+}
+
+function normalizePolicy(policy: PolicyRecord): PolicyRecord {
+  return {
+    scopeKey: policy.scopeKey,
+    toolDefault: asPolicyDecision(policy.toolDefault) ?? "deny",
+    highRisk: asPolicyDecision(policy.highRisk) ?? "approval-required",
+    bashMode: policy.bashMode === "host" ? "host" : "sandbox",
+    tools: sanitizePolicyMap(policy.tools),
+    version: Number.isFinite(Number(policy.version)) ? Math.max(1, Math.floor(Number(policy.version))) : 1,
+    updatedAt: policy.updatedAt
+  };
+}
+
+function sanitizePolicyMap(input: unknown): Record<string, PolicyDecision> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+  const out: Record<string, PolicyDecision> = {};
+  for (const [key, value] of Object.entries(input)) {
+    const parsed = asPolicyDecision(value);
+    if (parsed) {
+      out[key] = parsed;
+    }
+  }
+  return out;
+}
+
+function asPolicyDecision(value: unknown): PolicyDecision | undefined {
+  return value === "deny" || value === "allow" || value === "approval-required" ? value : undefined;
+}
+
+function createApprovalId(): string {
+  return `ap_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

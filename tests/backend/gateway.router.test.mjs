@@ -59,6 +59,9 @@ test("sessions.create creates a session and sessions.list returns it", async () 
     assert.equal(typeof session?.id, "string");
     assert.equal(session?.title, "my workspace session");
     assert.equal(session?.runtimeMode, "cloud");
+    assert.equal(typeof session?.contextUsage, "number");
+    assert.equal(typeof session?.compactionCount, "number");
+    assert.equal(typeof session?.memoryFlushState, "string");
   }
 
   const listed = await router.handle(req("r_list_after_create", "sessions.list", {}), state);
@@ -122,6 +125,9 @@ test("agent.run updates default title and sessions.history includes user.input",
   if (details.response.ok) {
     assert.equal(details.response.payload.session?.title, "first message becomes title");
     assert.equal(details.response.payload.session?.preview, "first message becomes title");
+    assert.equal(typeof details.response.payload.session?.contextUsage, "number");
+    assert.equal(typeof details.response.payload.session?.compactionCount, "number");
+    assert.equal(typeof details.response.payload.session?.memoryFlushState, "string");
   }
 
   const history = await router.handle(
@@ -291,3 +297,126 @@ test("runtime.setMode queues when running and applies when idle", async () => {
   }
   assert.equal(applied.events.some((event) => event.event === "runtime.mode_changed"), true);
 });
+
+test("policy.get/policy.update returns structured policy", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const before = await router.handle(req("r_policy_get_before", "policy.get", {}), state);
+  assert.equal(before.response.ok, true);
+  let beforeVersion = 0;
+  if (before.response.ok) {
+    const policy = before.response.payload.policy;
+    assert.equal(typeof policy?.version, "number");
+    assert.equal(typeof policy?.updatedAt, "string");
+    beforeVersion = policy.version;
+  }
+
+  const updated = await router.handle(
+    req("r_policy_update", "policy.update", {
+      idempotencyKey: "idem_policy_update_1",
+      patch: {
+        toolDefault: "allow"
+      }
+    }),
+    state
+  );
+  assert.equal(updated.response.ok, true);
+  if (updated.response.ok) {
+    const policy = updated.response.payload.policy;
+    assert.equal(policy.toolDefault, "allow");
+    assert.equal(policy.version > beforeVersion, true);
+    assert.equal(typeof policy.updatedAt, "string");
+  }
+});
+
+test("approval.queue/approval.resolve closes approval-required tool run", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const runPromise = router.handle(
+    req("r_run_need_approval", "agent.run", {
+      idempotencyKey: "idem_run_need_approval_1",
+      sessionId: "s_default",
+      input: "run [[tool:bash.exec {\"cmd\":\"echo approval-flow\"}]]",
+      runtimeMode: "local"
+    }),
+    state
+  );
+
+  const pending = await waitForPendingApproval(router, state);
+  const resolved = await router.handle(
+    req("r_approval_resolve", "approval.resolve", {
+      idempotencyKey: "idem_approval_resolve_1",
+      approvalId: pending.approvalId,
+      decision: "approve",
+      reason: "allow for test"
+    }),
+    state
+  );
+  assert.equal(resolved.response.ok, true);
+  if (resolved.response.ok) {
+    assert.equal(resolved.response.payload.approval.approvalId, pending.approvalId);
+    assert.equal(resolved.response.payload.approval.status, "approved");
+  }
+
+  const run = await runPromise;
+  assert.equal(run.response.ok, true);
+  assert.equal(run.events.some((event) => event.event === "approval.required"), true);
+  assert.equal(run.events.some((event) => event.event === "agent.completed"), true);
+});
+
+test("metrics.summary returns real aggregate fields", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  await router.handle(
+    req("r_run_metrics_1", "agent.run", {
+      idempotencyKey: "idem_run_metrics_1",
+      sessionId: "s_default",
+      input: "hello metrics",
+      runtimeMode: "local"
+    }),
+    state
+  );
+
+  await router.handle(
+    req("r_run_metrics_2", "agent.run", {
+      idempotencyKey: "idem_run_metrics_2",
+      sessionId: "s_default",
+      input: "run [[tool:unknown.tool {\"x\":1}]]",
+      runtimeMode: "local"
+    }),
+    state
+  );
+
+  const summary = await router.handle(req("r_metrics", "metrics.summary", {}), state);
+  assert.equal(summary.response.ok, true);
+  if (summary.response.ok) {
+    const metrics = summary.response.payload.metrics;
+    assert.equal(typeof metrics.runsTotal, "number");
+    assert.equal(typeof metrics.runsFailed, "number");
+    assert.equal(typeof metrics.toolCallsTotal, "number");
+    assert.equal(typeof metrics.toolFailures, "number");
+    assert.equal(typeof metrics.p95LatencyMs, "number");
+    assert.equal(metrics.runsTotal >= 2, true);
+    assert.equal(metrics.runsFailed >= 1, true);
+  }
+});
+
+async function waitForPendingApproval(router, state) {
+  for (let i = 0; i < 60; i += 1) {
+    const queued = await router.handle(req(`r_approval_queue_${i}`, "approval.queue", { status: "pending" }), state);
+    if (queued.response.ok) {
+      const first = queued.response.payload.items[0];
+      if (first) {
+        return first;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("pending approval not found");
+}

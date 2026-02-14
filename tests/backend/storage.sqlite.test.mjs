@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  SqliteApprovalRepository,
   SqliteIdempotencyRepository,
+  SqliteMetricsRepository,
+  SqlitePolicyRepository,
   SqliteSessionRepository,
   SqliteTranscriptRepository
 } from "../../packages/storage/dist/index.js";
@@ -27,14 +30,27 @@ test("sqlite session repository persists across instances", async () => {
       preview: "persisted preview",
       runtimeMode: "local",
       syncState: "local_only",
+      contextUsage: 0.2,
+      compactionCount: 1,
+      memoryFlushState: "idle",
       updatedAt: "2026-02-13T00:00:00.000Z"
     });
     await repoA.setRuntimeMode("s_persist", "cloud");
+    await repoA.updateMeta("s_persist", {
+      contextUsage: 0.73,
+      compactionCount: 3,
+      memoryFlushState: "flushed",
+      memoryFlushAt: "2026-02-13T12:00:00.000Z"
+    });
 
     const repoB = new SqliteSessionRepository(dbPath);
     const persisted = await repoB.get("s_persist");
     assert.equal(Boolean(persisted), true);
     assert.equal(persisted?.runtimeMode, "cloud");
+    assert.equal(persisted?.contextUsage, 0.73);
+    assert.equal(persisted?.compactionCount, 3);
+    assert.equal(persisted?.memoryFlushState, "flushed");
+    assert.equal(persisted?.memoryFlushAt, "2026-02-13T12:00:00.000Z");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -78,6 +94,9 @@ test("sqlite session repository migrates old schema with title and preview", asy
       preview: "updated preview",
       runtimeMode: "cloud",
       syncState: "local_only",
+      contextUsage: 0.11,
+      compactionCount: 2,
+      memoryFlushState: "idle",
       updatedAt: "2026-02-13T00:00:00.000Z"
     });
 
@@ -147,6 +166,72 @@ test("sqlite idempotency repository persists cached result", async () => {
     assert.equal(Boolean(cached), true);
     assert.equal(cached?.fingerprint, "{\"input\":\"hello\"}");
     assert.equal(cached?.result?.response?.ok, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sqlite policy/approval/metrics repositories persist across instances", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openfoal-storage-extra-"));
+  const dbPath = join(dir, "storage.sqlite");
+
+  try {
+    const policyA = new SqlitePolicyRepository(dbPath);
+    const current = await policyA.get();
+    const updated = await policyA.update({
+      toolDefault: "allow",
+      tools: {
+        "bash.exec": "approval-required"
+      }
+    });
+    assert.equal(updated.version > current.version, true);
+    assert.equal(updated.toolDefault, "allow");
+
+    const approvalA = new SqliteApprovalRepository(dbPath);
+    const created = await approvalA.create({
+      sessionId: "s_default",
+      runId: "run_repo_1",
+      toolName: "bash.exec",
+      toolCallId: "tc_repo_1",
+      argsFingerprint: "{\"cmd\":\"echo hi\"}"
+    });
+    assert.equal(created.status, "pending");
+    const resolved = await approvalA.resolve(created.approvalId, "reject", "not allowed");
+    assert.equal(resolved?.status, "rejected");
+
+    const metricsA = new SqliteMetricsRepository(dbPath);
+    await metricsA.recordRun({
+      sessionId: "s_default",
+      runId: "run_repo_1",
+      status: "completed",
+      durationMs: 120,
+      toolCalls: 2,
+      toolFailures: 0
+    });
+    await metricsA.recordRun({
+      sessionId: "s_default",
+      runId: "run_repo_2",
+      status: "failed",
+      durationMs: 300,
+      toolCalls: 1,
+      toolFailures: 1
+    });
+
+    const policyB = new SqlitePolicyRepository(dbPath);
+    const approvalB = new SqliteApprovalRepository(dbPath);
+    const metricsB = new SqliteMetricsRepository(dbPath);
+
+    const persistedPolicy = await policyB.get();
+    const persistedApproval = await approvalB.get(created.approvalId);
+    const summary = await metricsB.summary();
+
+    assert.equal(persistedPolicy.toolDefault, "allow");
+    assert.equal(persistedApproval?.status, "rejected");
+    assert.equal(summary.runsTotal, 2);
+    assert.equal(summary.runsFailed, 1);
+    assert.equal(summary.toolCallsTotal, 3);
+    assert.equal(summary.toolFailures, 1);
+    assert.equal(summary.p95LatencyMs >= 120, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

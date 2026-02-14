@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Banner,
@@ -9,7 +10,6 @@ import {
   Layout,
   List,
   Nav,
-  Progress,
   Row,
   Space,
   Tag,
@@ -25,36 +25,23 @@ import {
   IconSetting,
   IconUserGroup
 } from "@douyinfe/semi-icons";
+import {
+  getGatewayClient,
+  type ApprovalStatus,
+  type GatewayApproval,
+  type GatewayAuditItem,
+  type GatewayMetricsSummary,
+  type GatewayPolicy,
+  type GatewaySession
+} from "./lib/gateway-client";
 
-const sessions = [
-  { channel: "slack", target: "#ops / thread-4432", status: "streaming" },
-  { channel: "telegram", target: "dm / u-2931", status: "needs-review" },
-  { channel: "discord", target: "channel-23", status: "active" },
-  { channel: "web", target: "console-session", status: "active" }
-];
-
-const approvals = [
-  "bash.exec: kubectl apply -f prod.yaml",
-  "http.request: api.external-risky.com",
-  "file.write: /secrets/runtime.env"
-];
-
-const audits = [
-  "23:10 model.policy.update by admin@tenant",
-  "23:09 tool.exec.approved by owner@tenant",
-  "23:07 session.reset.manual by developer@workspace",
-  "23:04 memory.flush.run by system"
-];
-
-function statusTag(status: string) {
-  if (status === "needs-review") {
-    return <Tag color="orange">needs review</Tag>;
-  }
-  if (status === "streaming") {
-    return <Tag color="blue">streaming</Tag>;
-  }
-  return <Tag color="green">active</Tag>;
-}
+const EMPTY_METRICS: GatewayMetricsSummary = {
+  runsTotal: 0,
+  runsFailed: 0,
+  toolCallsTotal: 0,
+  toolFailures: 0,
+  p95LatencyMs: 0
+};
 
 function KpiCard(props: { title: string; value: string; hint?: string }) {
   return (
@@ -73,6 +60,66 @@ function KpiCard(props: { title: string; value: string; hint?: string }) {
 }
 
 export function App() {
+  const client = useMemo(() => getGatewayClient(), []);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [resolvingApprovalId, setResolvingApprovalId] = useState("");
+  const [sessions, setSessions] = useState<GatewaySession[]>([]);
+  const [policy, setPolicy] = useState<GatewayPolicy | null>(null);
+  const [approvals, setApprovals] = useState<GatewayApproval[]>([]);
+  const [audits, setAudits] = useState<GatewayAuditItem[]>([]);
+  const [metrics, setMetrics] = useState<GatewayMetricsSummary>(EMPTY_METRICS);
+
+  const refreshDashboard = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setError("");
+    try {
+      const [nextSessions, nextPolicy, nextApprovals, nextAudits, nextMetrics] = await Promise.all([
+        client.listSessions(),
+        client.getPolicy(),
+        client.listApprovals({ status: "pending" }),
+        client.queryAudit({ limit: 20 }),
+        client.getMetricsSummary()
+      ]);
+      setSessions(nextSessions);
+      setPolicy(nextPolicy);
+      setApprovals(nextApprovals);
+      setAudits(nextAudits);
+      setMetrics(nextMetrics);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void refreshDashboard();
+  }, [refreshDashboard]);
+
+  const handleResolveApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "reject"): Promise<void> => {
+      setResolvingApprovalId(approvalId);
+      setError("");
+      try {
+        await client.resolveApproval({
+          approvalId,
+          decision,
+          reason: decision === "approve" ? "approved from console" : "rejected from console"
+        });
+        await refreshDashboard();
+      } catch (resolveError) {
+        setError(resolveError instanceof Error ? resolveError.message : String(resolveError));
+      } finally {
+        setResolvingApprovalId("");
+      }
+    },
+    [client, refreshDashboard]
+  );
+
+  const approvalCount = approvals.length;
+  const runsFailedRate = metrics.runsTotal > 0 ? (metrics.runsFailed / metrics.runsTotal) * 100 : 0;
+
   return (
     <Layout className="console-root">
       <Layout.Sider className="console-sider">
@@ -93,11 +140,11 @@ export function App() {
         />
         <Divider margin="12px" />
         <Typography.Text type="tertiary" size="small">
-          Workspace: w-enterprise
+          Workspace: w_default
         </Typography.Text>
         <br />
         <Typography.Text type="tertiary" size="small">
-          Agent: support-main
+          Scope: default
         </Typography.Text>
       </Layout.Sider>
 
@@ -105,94 +152,180 @@ export function App() {
         <Layout.Header className="console-header">
           <Space>
             <Typography.Title heading={4} style={{ margin: 0 }}>
-              企业控制台原型
+              企业控制台
             </Typography.Title>
-            <Badge count="Prototype v0.1" type="primary" />
+            <Badge count={loading ? "Loading..." : "Live"} type={loading ? "warning" : "primary"} />
           </Space>
-          <Button theme="solid" icon={<IconUserGroup />}>
-            切换 Tenant
-          </Button>
+          <Space>
+            <Button theme="light" onClick={() => void refreshDashboard()} loading={loading}>
+              刷新
+            </Button>
+            <Button theme="solid" icon={<IconUserGroup />}>
+              切换 Tenant
+            </Button>
+          </Space>
         </Layout.Header>
 
         <Layout.Content className="console-content">
           <Banner
-            type="info"
-            description="当前原型用于冻结 IA 与流程，后续绑定 Gateway API（sessions.list/policy.get/audit.query）。"
+            type={error ? "danger" : "info"}
+            description={error ? `加载失败：${error}` : "已接入 Gateway API（sessions/policy/approval/audit/metrics）。"}
             closeIcon={null}
           />
 
           <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
             <Col span={6}>
-              <KpiCard title="今日请求" value="12,430" hint="QPS / 渠道趋势" />
+              <KpiCard title="Runs Total" value={String(metrics.runsTotal)} hint="metrics.summary.runsTotal" />
             </Col>
             <Col span={6}>
-              <KpiCard title="错误率" value="0.82%" hint="按 connector 细分" />
+              <KpiCard
+                title="Runs Failed"
+                value={`${metrics.runsFailed} (${runsFailedRate.toFixed(1)}%)`}
+                hint="metrics.summary.runsFailed"
+              />
             </Col>
             <Col span={6}>
-              <KpiCard title="模型成本" value="$142" hint="tenant 日预算 64%" />
+              <KpiCard title="Tool Calls" value={String(metrics.toolCallsTotal)} hint="metrics.summary.toolCallsTotal" />
             </Col>
             <Col span={6}>
-              <KpiCard title="待审批" value="9" hint="高风险工具调用" />
+              <KpiCard title="Pending Approvals" value={String(approvalCount)} hint="approval.queue(status=pending)" />
             </Col>
           </Row>
 
           <Row gutter={[12, 12]} style={{ marginTop: 4 }}>
             <Col span={14}>
               <Card title="活跃会话（sessions.list）">
-                <List
-                  dataSource={sessions}
-                  renderItem={(item) => (
-                    <List.Item
-                      main={
-                        <Space>
-                          <Tag>{item.channel}</Tag>
-                          <Typography.Text>{item.target}</Typography.Text>
-                        </Space>
-                      }
-                      extra={statusTag(item.status)}
-                    />
-                  )}
-                />
+                {sessions.length === 0 ? (
+                  <Typography.Text type="tertiary">No sessions</Typography.Text>
+                ) : (
+                  <List
+                    dataSource={sessions}
+                    renderItem={(item: GatewaySession) => (
+                      <List.Item
+                        main={
+                          <div>
+                            <Space spacing={6}>
+                              <Tag>{item.runtimeMode}</Tag>
+                              <Typography.Text>{item.title}</Typography.Text>
+                              {renderSyncStateTag(item.syncState)}
+                            </Space>
+                            <Typography.Text type="tertiary" size="small">
+                              {item.id} · context {Math.round(item.contextUsage * 100)}% · compaction {item.compactionCount} ·
+                              flush {item.memoryFlushState} · {formatDate(item.updatedAt)}
+                            </Typography.Text>
+                          </div>
+                        }
+                      />
+                    )}
+                  />
+                )}
               </Card>
             </Col>
 
             <Col span={10}>
               <Card title="审批中心（approval.queue）">
-                <List
-                  dataSource={approvals}
-                  renderItem={(item) => (
-                    <List.Item
-                      main={<Typography.Text>{item}</Typography.Text>}
-                      extra={<Tag color="red">pending</Tag>}
-                    />
-                  )}
-                />
+                {approvals.length === 0 ? (
+                  <Typography.Text type="tertiary">No pending approvals</Typography.Text>
+                ) : (
+                  <List
+                    dataSource={approvals}
+                    renderItem={(item: GatewayApproval) => (
+                      <List.Item
+                        main={
+                          <div>
+                            <Typography.Text>{item.toolName}</Typography.Text>
+                            <Typography.Text type="tertiary" size="small">
+                              {item.approvalId} · {item.runId}
+                            </Typography.Text>
+                          </div>
+                        }
+                        extra={
+                          <Space spacing={8}>
+                            {renderApprovalStatusTag(item.status)}
+                            <Button
+                              theme="light"
+                              type="primary"
+                              size="small"
+                              loading={resolvingApprovalId === item.approvalId}
+                              onClick={() => void handleResolveApproval(item.approvalId, "approve")}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              theme="light"
+                              type="danger"
+                              size="small"
+                              loading={resolvingApprovalId === item.approvalId}
+                              onClick={() => void handleResolveApproval(item.approvalId, "reject")}
+                            >
+                              Reject
+                            </Button>
+                          </Space>
+                        }
+                      />
+                    )}
+                  />
+                )}
               </Card>
             </Col>
 
             <Col span={12}>
               <Card title="策略概览（policy.get）">
-                <Descriptions
-                  data={[
-                    { key: "DM 策略", value: "pairing" },
-                    { key: "Tool 默认策略", value: "deny" },
-                    { key: "高风险工具", value: "approval-required" },
-                    { key: "模型 fallback", value: "enabled" }
-                  ]}
-                />
-                <Divider margin="10px" />
-                <Typography.Text type="tertiary">日预算使用率</Typography.Text>
-                <Progress percent={64} showInfo />
+                {policy ? (
+                  <>
+                    <Descriptions
+                      data={[
+                        { key: "scopeKey", value: policy.scopeKey },
+                        { key: "toolDefault", value: policy.toolDefault },
+                        { key: "highRisk", value: policy.highRisk },
+                        { key: "bashMode", value: policy.bashMode },
+                        { key: "version", value: String(policy.version) },
+                        { key: "updatedAt", value: formatDate(policy.updatedAt) }
+                      ]}
+                    />
+                    <Divider margin="10px" />
+                    <Typography.Text type="tertiary">tools overrides: {Object.keys(policy.tools).length}</Typography.Text>
+                  </>
+                ) : (
+                  <Typography.Text type="tertiary">No policy</Typography.Text>
+                )}
               </Card>
             </Col>
 
             <Col span={12}>
               <Card title="审计日志（audit.query）">
-                <List
-                  dataSource={audits}
-                  renderItem={(item) => (
-                    <List.Item main={<Typography.Text>{item}</Typography.Text>} />
-                  )}
+                {audits.length === 0 ? (
+                  <Typography.Text type="tertiary">No audit records</Typography.Text>
+                ) : (
+                  <List
+                    dataSource={audits}
+                    renderItem={(item: GatewayAuditItem) => (
+                      <List.Item
+                        main={
+                          <Typography.Text>
+                            {asString(item.action) ?? "audit.event"} · {asString(item.actor) ?? "unknown"} ·{" "}
+                            {formatDate(asString(item.createdAt))}
+                          </Typography.Text>
+                        }
+                      />
+                    )}
+                  />
+                )}
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} style={{ marginTop: 4 }}>
+            <Col span={24}>
+              <Card title="Metrics（metrics.summary）">
+                <Descriptions
+                  data={[
+                    { key: "runsTotal", value: String(metrics.runsTotal) },
+                    { key: "runsFailed", value: String(metrics.runsFailed) },
+                    { key: "toolCallsTotal", value: String(metrics.toolCallsTotal) },
+                    { key: "toolFailures", value: String(metrics.toolFailures) },
+                    { key: "p95LatencyMs", value: `${metrics.p95LatencyMs} ms` }
+                  ]}
                 />
               </Card>
             </Col>
@@ -201,4 +334,42 @@ export function App() {
       </Layout>
     </Layout>
   );
+}
+
+function renderSyncStateTag(syncState: GatewaySession["syncState"]): JSX.Element {
+  if (syncState === "synced") {
+    return <Tag color="green">synced</Tag>;
+  }
+  if (syncState === "syncing") {
+    return <Tag color="blue">syncing</Tag>;
+  }
+  if (syncState === "conflict") {
+    return <Tag color="red">conflict</Tag>;
+  }
+  return <Tag color="grey">local_only</Tag>;
+}
+
+function renderApprovalStatusTag(status: ApprovalStatus): JSX.Element {
+  if (status === "approved") {
+    return <Tag color="green">approved</Tag>;
+  }
+  if (status === "rejected") {
+    return <Tag color="red">rejected</Tag>;
+  }
+  return <Tag color="orange">pending</Tag>;
+}
+
+function formatDate(input: string | undefined): string {
+  if (!input) {
+    return "-";
+  }
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) {
+    return input;
+  }
+  return date.toLocaleString();
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }

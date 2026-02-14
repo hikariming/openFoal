@@ -26,6 +26,10 @@ export type SessionItem = {
   preview: string;
   runtimeMode: RuntimeMode;
   syncState: SyncState;
+  contextUsage: number;
+  compactionCount: number;
+  memoryFlushState: "idle" | "pending" | "flushed" | "skipped";
+  memoryFlushAt?: string;
 };
 
 type AppStore = {
@@ -83,7 +87,7 @@ export const useAppStore = create<AppStore>((set) => ({
   llmConfig: readLlmConfig(),
   setSessions: (sessions) =>
     set((prev) => {
-      const sorted = sortSessions(sessions);
+      const sorted = sortSessions(sessions.map(normalizeSessionItem));
       const activeExists = sorted.some((session) => session.id === prev.activeSessionId);
       return {
         sessions: sorted,
@@ -92,14 +96,15 @@ export const useAppStore = create<AppStore>((set) => ({
     }),
   upsertSession: (session) =>
     set((prev) => {
+      const normalizedSession = normalizeSessionItem(session);
       const exists = prev.sessions.some((item) => item.id === session.id);
       const merged = exists
-        ? prev.sessions.map((item) => (item.id === session.id ? session : item))
-        : [...prev.sessions, session];
+        ? prev.sessions.map((item) => (item.id === session.id ? normalizedSession : item))
+        : [...prev.sessions, normalizedSession];
       const sorted = sortSessions(merged);
       return {
         sessions: sorted,
-        activeSessionId: prev.activeSessionId || session.id
+        activeSessionId: prev.activeSessionId || normalizedSession.id
       };
     }),
   setActiveSession: (sessionId) =>
@@ -274,6 +279,21 @@ function baseUrlByProvider(provider: string): string {
 
 function sortSessions(sessions: SessionItem[]): SessionItem[] {
   return [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function normalizeSessionItem(session: SessionItem): SessionItem {
+  return {
+    ...session,
+    contextUsage: typeof session.contextUsage === "number" ? session.contextUsage : 0,
+    compactionCount: typeof session.compactionCount === "number" ? session.compactionCount : 0,
+    memoryFlushState:
+      session.memoryFlushState === "pending" ||
+      session.memoryFlushState === "flushed" ||
+      session.memoryFlushState === "skipped"
+        ? session.memoryFlushState
+        : "idle",
+    ...(typeof session.memoryFlushAt === "string" ? { memoryFlushAt: session.memoryFlushAt } : {})
+  };
 }
 
 function firstNonEmpty(...values: Array<string | undefined>): string | undefined {

@@ -60,7 +60,7 @@
 | `approval.queue` | 查询待审批队列 | 否 | 否 |
 | `approval.resolve` | 审批通过/拒绝 | 是 | 是 |
 | `audit.query` | 审计检索 | 否 | 否 |
-| `metrics.summary` | 指标汇总（预留） | 否 | 否 |
+| `metrics.summary` | 指标汇总（真实聚合） | 否 | 否 |
 
 ## 事件列表
 
@@ -106,7 +106,7 @@
 
 1. 同一 `method + idempotencyKey + actor + sessionId` 且参数相同：返回首次结果。
 2. 若同 key 但参数不同：返回 `IDEMPOTENCY_CONFLICT`。
-3. 幂等记录至少保留 24 小时。
+3. 幂等记录的保留策略由部署配置决定（当前 local 实现为持久化保留，未内建 TTL 回收）。
 
 ## 鉴权握手
 
@@ -147,8 +147,15 @@
 type Session = {
   id: string;
   sessionKey: string;
+  title: string;
+  preview: string;
   runtimeMode: "local" | "cloud";
   syncState: "local_only" | "syncing" | "synced" | "conflict";
+  contextUsage: number;
+  compactionCount: number;
+  memoryFlushState: "idle" | "pending" | "flushed" | "skipped";
+  memoryFlushAt?: string;
+  updatedAt: string;
 };
 ```
 
@@ -276,7 +283,8 @@ interface ToolExecutor {
   "payload": {
     "sessionId": "s_001",
     "runtimeMode": "cloud",
-    "effectiveAt": "next_turn"
+    "status": "queued-change",
+    "effectiveOn": "next_turn"
   }
 }
 ```
@@ -333,11 +341,19 @@ interface ToolExecutor {
   "id": "r_sessions_get_1",
   "ok": true,
   "payload": {
-    "id": "s_001",
-    "runtimeMode": "local",
-    "syncState": "local_only",
-    "contextUsage": 0.68,
-    "compactionCount": 2
+    "session": {
+      "id": "s_001",
+      "sessionKey": "workspace:w_default/agent:a_default/main:thread:s_001",
+      "title": "new-session",
+      "preview": "",
+      "runtimeMode": "local",
+      "syncState": "local_only",
+      "contextUsage": 0.68,
+      "compactionCount": 2,
+      "memoryFlushState": "flushed",
+      "memoryFlushAt": "2026-02-13T12:03:00Z",
+      "updatedAt": "2026-02-13T12:04:00Z"
+    }
   }
 }
 ```
@@ -350,8 +366,7 @@ interface ToolExecutor {
   "id": "r_policy_get_1",
   "method": "policy.get",
   "params": {
-    "workspaceId": "w_default",
-    "agentId": "main"
+    "scopeKey": "default"
   }
 }
 ```
@@ -362,13 +377,21 @@ interface ToolExecutor {
   "id": "r_policy_get_1",
   "ok": true,
   "payload": {
-    "toolPolicy": {
-      "defaultAction": "deny",
-      "bash.exec": "approval-required"
-    },
-    "modelPolicy": {
-      "primary": "anthropic/claude-sonnet-4-5",
-      "fallbacks": ["openai/gpt-5.1"]
+    "policy": {
+      "scopeKey": "default",
+      "toolDefault": "deny",
+      "highRisk": "approval-required",
+      "bashMode": "sandbox",
+      "tools": {
+        "math.add": "allow",
+        "text.upper": "allow",
+        "echo": "allow",
+        "file.read": "allow",
+        "file.list": "allow",
+        "memory.get": "allow"
+      },
+      "version": 3,
+      "updatedAt": "2026-02-13T12:05:00Z"
     }
   }
 }
@@ -383,12 +406,8 @@ interface ToolExecutor {
   "method": "policy.update",
   "params": {
     "idempotencyKey": "idem_policy_20260213_001",
-    "workspaceId": "w_default",
-    "agentId": "main",
     "patch": {
-      "toolPolicy": {
-        "http.request": "allow"
-      }
+      "toolDefault": "allow"
     }
   }
 }
@@ -400,8 +419,17 @@ interface ToolExecutor {
   "id": "r_policy_update_1",
   "ok": true,
   "payload": {
-    "version": 8,
-    "updatedAt": "2026-02-13T12:05:00Z"
+    "policy": {
+      "scopeKey": "default",
+      "toolDefault": "allow",
+      "highRisk": "approval-required",
+      "bashMode": "sandbox",
+      "tools": {
+        "math.add": "allow"
+      },
+      "version": 4,
+      "updatedAt": "2026-02-13T12:06:00Z"
+    }
   }
 }
 ```
@@ -414,7 +442,6 @@ interface ToolExecutor {
   "id": "r_approval_queue_1",
   "method": "approval.queue",
   "params": {
-    "workspaceId": "w_default",
     "status": "pending"
   }
 }
@@ -460,8 +487,19 @@ interface ToolExecutor {
   "id": "r_approval_resolve_1",
   "ok": true,
   "payload": {
-    "approvalId": "ap_001",
-    "status": "approved"
+    "approval": {
+      "approvalId": "ap_001",
+      "sessionId": "s_001",
+      "runId": "run_001",
+      "toolName": "bash.exec",
+      "toolCallId": "tc_run_001_1",
+      "argsFingerprint": "{\"cmd\":\"echo hi\"}",
+      "status": "approved",
+      "decision": "approve",
+      "reason": "owner approved",
+      "createdAt": "2026-02-13T12:07:00Z",
+      "resolvedAt": "2026-02-13T12:08:00Z"
+    }
   }
 }
 ```
@@ -478,6 +516,34 @@ interface ToolExecutor {
     "from": "2026-02-13T00:00:00Z",
     "to": "2026-02-13T23:59:59Z",
     "limit": 50
+  }
+}
+```
+
+### 12) `metrics.summary`
+
+```json
+{
+  "type": "req",
+  "id": "r_metrics_summary_1",
+  "method": "metrics.summary",
+  "params": {}
+}
+```
+
+```json
+{
+  "type": "res",
+  "id": "r_metrics_summary_1",
+  "ok": true,
+  "payload": {
+    "metrics": {
+      "runsTotal": 42,
+      "runsFailed": 3,
+      "toolCallsTotal": 29,
+      "toolFailures": 2,
+      "p95LatencyMs": 1234
+    }
   }
 }
 ```

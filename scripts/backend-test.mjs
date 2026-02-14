@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 
 run(["scripts/backend-build.mjs"]);
 run([
@@ -14,8 +15,17 @@ run([
 ]);
 
 function run(args) {
+  const polyfillPath = "/tmp/openfoal-webapi-polyfill.cjs";
+  const nodeOptions = process.env.NODE_OPTIONS ?? "";
+  const withPolyfill = existsSync(polyfillPath)
+    ? [nodeOptions, `--require=${polyfillPath}`].filter((item) => item && item.trim().length > 0).join(" ")
+    : nodeOptions;
   const result = spawnSync(process.execPath, args, {
-    stdio: "inherit"
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      ...(withPolyfill ? { NODE_OPTIONS: withPolyfill } : {})
+    }
   });
 
   if (result.status !== 0) {

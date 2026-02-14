@@ -67,6 +67,10 @@ export interface Session {
   preview: string;
   runtimeMode: RuntimeMode;
   syncState: SyncState;
+  contextUsage: number;
+  compactionCount: number;
+  memoryFlushState: "idle" | "pending" | "flushed" | "skipped";
+  memoryFlushAt?: string;
   updatedAt: string;
 }
 
