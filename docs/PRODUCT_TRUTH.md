@@ -32,6 +32,10 @@ OpenFoal 统一为 3 个产品块：
    - `runtime.setMode`
    - `sessions.create/list/get/history`
    - `policy.get/update`
+   - `agents.list/upsert`
+   - `executionTargets.list/upsert`
+   - `budget.get/update`
+   - `audit.query`（真实过滤 + 分页）
    - `metrics.summary`
    - `memory.get/appendDaily/archive`
 2. 策略门禁：
@@ -42,16 +46,20 @@ OpenFoal 统一为 3 个产品块：
 4. 数据存储：
    - SQLite + InMemory 仓储可运行
    - 会话、转录、幂等、策略、指标
+   - `agent_definitions`、`execution_targets`、`budget_policies`、`budget_usage_daily`、`audit_logs`
 5. P1 基线：
    - 已新增 `apps/personal-web` 最小聊天入口骨架
    - 已新增 `test:p1:smoke` 自动化基线
+6. P2 基线（后端 + 控制台最小闭环）：
+   - `docker-runner` 目标选择后可走远程 HTTP 执行
+   - `web-console` 已支持 `audit.query` 筛选与分页加载
 
 ### 2.2 未实现 / 仅占位
 
 1. `runtimeMode=cloud` 仅语义存在，尚未形成独立云执行闭环。
-2. `audit.query` 当前为空实现（无真实查询结果）。
-3. 企业多租户/RBAC/SSO 未落地。
-4. 个人 Web 聊天入口已落地最小版本，仍需补齐更完整 UI 冒烟自动化。
+2. 企业多租户/RBAC/SSO 未落地。
+3. 个人 Web 聊天入口已落地最小版本，仍需补齐更完整 UI 冒烟自动化。
+4. `docker-runner` 当前为最小 HTTP 协议版，尚未覆盖 mTLS/证书轮换/重试队列等生产级能力。
 
 ### 2.3 本期不做（P0-P2 范围外）
 
@@ -157,6 +165,7 @@ OpenFoal 统一为 3 个产品块：
 1. `/Users/rqq/openFoal/docs/testing/TEST_CASE_INDEX.md`
 2. `/Users/rqq/openFoal/docs/testing/P1_PERSONAL_ACCESS_TEST_PLAN.md`
 3. `/Users/rqq/openFoal/docs/testing/P2_ENTERPRISE_CONTROL_TEST_PLAN.md`
+4. `/Users/rqq/openFoal/docs/testing/P2_DOCKER_RUNNER_HTTP_PROTOCOL.md`
 
 执行约定：
 

@@ -187,3 +187,11 @@ OpenFoal 将吸收 `openclaw-main` 已验证的记忆/会话管理机制：
 3. [Test Case Index](./docs/testing/TEST_CASE_INDEX.md)
 4. [P1 Personal Access Test Plan](./docs/testing/P1_PERSONAL_ACCESS_TEST_PLAN.md)
 5. [P2 Enterprise Control Test Plan](./docs/testing/P2_ENTERPRISE_CONTROL_TEST_PLAN.md)
+6. [P2 Docker Runner HTTP Protocol](./docs/testing/P2_DOCKER_RUNNER_HTTP_PROTOCOL.md)
+7. [Deploy & Usage Manual](./docs/DEPLOY_AND_USAGE_MANUAL.md)
+
+## 12. P2 联调脚本
+
+一键启动 `mock docker-runner + gateway + web-console`，并验证审计筛选/分页链路：
+
+1. `npm run test:p2:e2e`

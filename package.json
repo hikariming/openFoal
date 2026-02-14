@@ -12,6 +12,7 @@
     "build:desktop": "pnpm --filter @openfoal/desktop build",
     "build:backend": "node scripts/backend-build.mjs",
     "test:backend": "node scripts/backend-test.mjs",
-    "test:p1:smoke": "node scripts/p1-smoke-test.mjs"
+    "test:p1:smoke": "node scripts/p1-smoke-test.mjs",
+    "test:p2:e2e": "node scripts/p2-e2e-test.mjs"
   }
 }

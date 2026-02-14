@@ -80,6 +80,14 @@
 3. 控制台策略变更影响下次 run。
 4. 审计页可追溯预算拒绝与策略变更。
 
+### 5.3 联调脚本门禁（新增）
+
+1. `npm run test:p2:e2e` 必须通过。
+2. 联调脚本必须同时验证：
+   - docker-runner 远程执行命中
+   - `audit.query` 的筛选 + 分页闭环
+3. `docker-runner` 协议冲突时以 `P2_DOCKER_RUNNER_HTTP_PROTOCOL.md` 为准。
+
 ## 6. 关键测试用例（首批）
 
 | ID | 场景 | 期望 |
