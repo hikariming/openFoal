@@ -1,3 +1,8 @@
+> [!WARNING]
+> ARCHIVED (2026-02-14): This document is kept for historical reference only.
+> Active source of truth: `/Users/rqq/openFoal/docs/PRODUCT_TRUTH.md`.
+> Do not use this file for planning or implementation.
+
 # OpenFoal API Contract v1
 
 关联文档：
@@ -475,10 +480,10 @@ interface ToolExecutor {
 ```json
 {
   "type": "req",
-  "id": "r_approval_resolve_1",
+  "id": "r_policy_history_resolve_1",
   "method": "（已移除）",
   "params": {
-    "idempotencyKey": "idem_approval_20260213_001",
+    "idempotencyKey": "idem_policy_history_20260213_001",
     "runId": "ap_001",
     "decision": "approve",
     "comment": "owner approved"
@@ -489,7 +494,7 @@ interface ToolExecutor {
 ```json
 {
   "type": "res",
-  "id": "r_approval_resolve_1",
+  "id": "r_policy_history_resolve_1",
   "ok": true,
   "payload": {
     "policy-gate": {

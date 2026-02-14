@@ -1,3 +1,8 @@
+> [!WARNING]
+> ARCHIVED (2026-02-14): This document is kept for historical reference only.
+> Active source of truth: `/Users/rqq/openFoal/docs/PRODUCT_TRUTH.md`.
+> Do not use this file for planning or implementation.
+
 # OpenFoal Backend 测试策略 v1
 
 ## 1. 目标

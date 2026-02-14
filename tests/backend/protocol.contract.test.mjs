@@ -84,6 +84,23 @@ test("memory.archive requires idempotencyKey", () => {
   }
 });
 
+test("budget.update requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_budget_update_1",
+    method: "budget.update",
+    params: {
+      scopeKey: "workspace:t_default:w_default",
+      tokenDailyLimit: 10000
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
 test("unknown method returns METHOD_NOT_FOUND", () => {
   const result = validateReqFrame({
     type: "req",

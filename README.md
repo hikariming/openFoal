@@ -178,15 +178,12 @@ OpenFoal 将吸收 `openclaw-main` 已验证的记忆/会话管理机制：
 
 - 详细架构和接口契约见：`/Users/rqq/openFoal/DESIGN.md`
 
-## 11. v1 文档入口
+## 11. 文档入口（当前有效）
 
-为便于直接开工，v1 规划已沉淀在 `docs/`：
+当前仅以下文档用于产品规划与实施：
 
-1. [Backend 架构（v1）](./docs/BACKEND_ARCHITECTURE_V1.md)
-2. [Agent 设计（v1）](./docs/AGENT_DESIGN_V1.md)
-3. [API 契约（v1）](./docs/API_CONTRACT_V1.md)
-4. [实施路线图（v1）](./docs/IMPLEMENTATION_ROADMAP_V1.md)
-5. [UI 到 API 映射（v1）](./docs/UI_API_MAPPING_V1.md)
-6. [多租户设计（演进版）](./docs/MULTI_TENANCY_DESIGN.md)
-7. [实施路径（执行版）](./docs/IMPLEMENTATION_EXECUTION_PATH_V1.md)
-8. [后端测试策略（v1）](./docs/BACKEND_TEST_STRATEGY_V1.md)
+1. [Product Truth（唯一真相）](./docs/PRODUCT_TRUTH.md)
+2. [Archived Docs（归档索引）](./docs/ARCHIVED_DOCS.md)
+3. [Test Case Index](./docs/testing/TEST_CASE_INDEX.md)
+4. [P1 Personal Access Test Plan](./docs/testing/P1_PERSONAL_ACCESS_TEST_PLAN.md)
+5. [P2 Enterprise Control Test Plan](./docs/testing/P2_ENTERPRISE_CONTROL_TEST_PLAN.md)

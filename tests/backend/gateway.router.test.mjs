@@ -331,6 +331,221 @@ test("policy.get/policy.update returns structured policy", async () => {
   }
 });
 
+test("agents/executionTargets/budget APIs are available and audit.query returns records", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const targetUpsert = await router.handle(
+    req("r_target_upsert", "executionTargets.upsert", {
+      idempotencyKey: "idem_target_upsert_1",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      targetId: "target_router_docker",
+      kind: "docker-runner",
+      endpoint: "http://runner.internal",
+      isDefault: true,
+      enabled: true
+    }),
+    state
+  );
+  assert.equal(targetUpsert.response.ok, true);
+
+  const agentUpsert = await router.handle(
+    req("r_agent_upsert", "agents.upsert", {
+      idempotencyKey: "idem_agent_upsert_1",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      agentId: "a_support",
+      name: "support",
+      executionTargetId: "target_router_docker",
+      runtimeMode: "cloud"
+    }),
+    state
+  );
+  assert.equal(agentUpsert.response.ok, true);
+
+  const budgetUpdate = await router.handle(
+    req("r_budget_update", "budget.update", {
+      idempotencyKey: "idem_budget_update_1",
+      scopeKey: "workspace:t_default:w_default",
+      tokenDailyLimit: 2000,
+      costMonthlyUsdLimit: 20,
+      hardLimit: true
+    }),
+    state
+  );
+  assert.equal(budgetUpdate.response.ok, true);
+
+  const targetsList = await router.handle(
+    req("r_targets_list", "executionTargets.list", {
+      tenantId: "t_default",
+      workspaceId: "w_default"
+    }),
+    state
+  );
+  assert.equal(targetsList.response.ok, true);
+  if (targetsList.response.ok) {
+    assert.equal(Array.isArray(targetsList.response.payload.items), true);
+    assert.equal(targetsList.response.payload.items.some((item) => item.targetId === "target_router_docker"), true);
+  }
+
+  const agentsList = await router.handle(
+    req("r_agents_list", "agents.list", {
+      tenantId: "t_default",
+      workspaceId: "w_default"
+    }),
+    state
+  );
+  assert.equal(agentsList.response.ok, true);
+  if (agentsList.response.ok) {
+    assert.equal(Array.isArray(agentsList.response.payload.items), true);
+    assert.equal(agentsList.response.payload.items.some((item) => item.agentId === "a_support"), true);
+  }
+
+  const budgetGet = await router.handle(
+    req("r_budget_get", "budget.get", {
+      scopeKey: "workspace:t_default:w_default"
+    }),
+    state
+  );
+  assert.equal(budgetGet.response.ok, true);
+  if (budgetGet.response.ok) {
+    assert.equal(budgetGet.response.payload.policy.scopeKey, "workspace:t_default:w_default");
+    assert.equal(typeof budgetGet.response.payload.usage.tokensUsedDaily, "number");
+  }
+
+  const audit = await router.handle(
+    req("r_audit_query", "audit.query", {
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      limit: 20
+    }),
+    state
+  );
+  assert.equal(audit.response.ok, true);
+  if (audit.response.ok) {
+    assert.equal(Array.isArray(audit.response.payload.items), true);
+    assert.equal(audit.response.payload.items.length >= 3, true);
+  }
+});
+
+test("budget hard limit rejects new agent.run and writes audit", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const policy = await router.handle(
+    req("r_budget_update_hard", "budget.update", {
+      idempotencyKey: "idem_budget_hard_1",
+      scopeKey: "workspace:t_default:w_default",
+      tokenDailyLimit: 0,
+      hardLimit: true
+    }),
+    state
+  );
+  assert.equal(policy.response.ok, true);
+
+  const run = await router.handle(
+    req("r_run_budget_reject", "agent.run", {
+      idempotencyKey: "idem_run_budget_reject_1",
+      sessionId: "s_default",
+      input: "hello should reject by budget",
+      runtimeMode: "local",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      budgetLevel: "workspace"
+    }),
+    state
+  );
+  assert.equal(run.response.ok, false);
+  if (!run.response.ok) {
+    assert.equal(run.response.error.code, "POLICY_DENIED");
+    assert.match(run.response.error.message, /预算超限/);
+  }
+
+  const audit = await router.handle(
+    req("r_audit_budget_reject", "audit.query", {
+      action: "budget.rejected",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      limit: 10
+    }),
+    state
+  );
+  assert.equal(audit.response.ok, true);
+  if (audit.response.ok) {
+    assert.equal(Array.isArray(audit.response.payload.items), true);
+    assert.equal(audit.response.payload.items.length >= 1, true);
+  }
+});
+
+test("docker-runner target executes tool via remote endpoint", async () => {
+  let capturedInvoke = null;
+  const router = createGatewayRouter({
+    dockerRunnerInvoker: async (invokeInput) => {
+      capturedInvoke = invokeInput;
+      return {
+        ok: true,
+        output: "from-remote-runner"
+      };
+    }
+  });
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const target = await router.handle(
+    req("r_target_remote", "executionTargets.upsert", {
+      idempotencyKey: "idem_target_remote_1",
+      tenantId: "t_remote",
+      workspaceId: "w_remote",
+      targetId: "target_remote_runner",
+      kind: "docker-runner",
+      endpoint: "http://runner.internal/execute",
+      authToken: "runner-secret",
+      isDefault: true,
+      enabled: true
+    }),
+    state
+  );
+  assert.equal(target.response.ok, true);
+
+  const agent = await router.handle(
+    req("r_agent_remote", "agents.upsert", {
+      idempotencyKey: "idem_agent_remote_1",
+      tenantId: "t_remote",
+      workspaceId: "w_remote",
+      agentId: "a_remote",
+      name: "remote",
+      executionTargetId: "target_remote_runner",
+      runtimeMode: "local"
+    }),
+    state
+  );
+  assert.equal(agent.response.ok, true);
+
+  const run = await router.handle(
+    req("r_run_remote", "agent.run", {
+      idempotencyKey: "idem_run_remote_1",
+      sessionId: "s_remote",
+      input: "run [[tool:bash.exec {\"cmd\":\"printf local\"}]]",
+      runtimeMode: "local",
+      tenantId: "t_remote",
+      workspaceId: "w_remote",
+      agentId: "a_remote"
+    }),
+    state
+  );
+  assert.equal(run.response.ok, true);
+  assert.equal(capturedInvoke?.target?.targetId, "target_remote_runner");
+  assert.equal(capturedInvoke?.target?.kind, "docker-runner");
+  assert.equal(capturedInvoke?.call?.name, "bash.exec");
+  assert.equal(capturedInvoke?.ctx?.sessionId, "s_remote");
+
+  const toolResult = run.events.find((event) => event.event === "agent.tool_result");
+  assert.match(String(toolResult?.payload?.output ?? ""), /from-remote-runner/);
+});
+
 test("high-risk tools run directly", async () => {
   const router = createGatewayRouter();
   const state = createConnectionState();
@@ -385,6 +600,52 @@ test("metrics.summary returns real aggregate fields", async () => {
     assert.equal(typeof metrics.p95LatencyMs, "number");
     assert.equal(metrics.runsTotal >= 2, true);
     assert.equal(metrics.runsFailed >= 1, true);
+  }
+});
+
+test("metrics.summary supports tenant/workspace/agent scope filters", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  await router.handle(
+    req("r_run_scope_1", "agent.run", {
+      idempotencyKey: "idem_run_scope_1",
+      sessionId: "s_default",
+      input: "scope one",
+      runtimeMode: "local",
+      tenantId: "t_scope",
+      workspaceId: "w_scope",
+      agentId: "a_scope"
+    }),
+    state
+  );
+
+  await router.handle(
+    req("r_run_scope_2", "agent.run", {
+      idempotencyKey: "idem_run_scope_2",
+      sessionId: "s_default",
+      input: "scope two",
+      runtimeMode: "local",
+      tenantId: "t_other",
+      workspaceId: "w_other",
+      agentId: "a_other"
+    }),
+    state
+  );
+
+  const scoped = await router.handle(
+    req("r_metrics_scope", "metrics.summary", {
+      tenantId: "t_scope",
+      workspaceId: "w_scope",
+      agentId: "a_scope"
+    }),
+    state
+  );
+  assert.equal(scoped.response.ok, true);
+  if (scoped.response.ok) {
+    const metrics = scoped.response.payload.metrics;
+    assert.equal(metrics.runsTotal >= 1, true);
   }
 });
 

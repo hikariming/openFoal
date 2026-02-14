@@ -1,3 +1,8 @@
+> [!WARNING]
+> ARCHIVED (2026-02-14): This document is kept for historical reference only.
+> Active source of truth: `/Users/rqq/openFoal/docs/PRODUCT_TRUTH.md`.
+> Do not use this file for planning or implementation.
+
 # OpenFoal UI ↔ API Mapping v1
 
 本文件把当前原型页面与后端接口做字段级映射，作为前后端联调的唯一对齐文档。

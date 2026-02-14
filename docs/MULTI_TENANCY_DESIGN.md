@@ -1,3 +1,8 @@
+> [!WARNING]
+> ARCHIVED (2026-02-14): This document is kept for historical reference only.
+> Active source of truth: `/Users/rqq/openFoal/docs/PRODUCT_TRUTH.md`.
+> Do not use this file for planning or implementation.
+
 # OpenFoal 多租户设计（演进版）
 
 ## 1. 目标

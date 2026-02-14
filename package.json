@@ -4,11 +4,14 @@
   "version": "0.1.0",
   "scripts": {
     "dev:web": "pnpm --filter @openfoal/web-console dev",
+    "dev:personal-web": "pnpm --filter @openfoal/personal-web dev",
     "dev:desktop": "pnpm --filter @openfoal/desktop dev",
     "dev:gateway": "npm run build:backend && node scripts/gateway-dev.mjs",
     "build:web": "pnpm --filter @openfoal/web-console build",
+    "build:personal-web": "pnpm --filter @openfoal/personal-web build",
     "build:desktop": "pnpm --filter @openfoal/desktop build",
     "build:backend": "node scripts/backend-build.mjs",
-    "test:backend": "node scripts/backend-test.mjs"
+    "test:backend": "node scripts/backend-test.mjs",
+    "test:p1:smoke": "node scripts/p1-smoke-test.mjs"
   }
 }

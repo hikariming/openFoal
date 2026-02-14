@@ -7,6 +7,7 @@ import {
   Col,
   Descriptions,
   Divider,
+  Input,
   Layout,
   List,
   Nav,
@@ -27,6 +28,7 @@ import {
 import {
   getGatewayClient,
   type GatewayAuditItem,
+  type GatewayAuditQueryParams,
   type GatewayMetricsSummary,
   type GatewayPolicy,
   type GatewaySession
@@ -38,6 +40,14 @@ const EMPTY_METRICS: GatewayMetricsSummary = {
   toolCallsTotal: 0,
   toolFailures: 0,
   p95LatencyMs: 0
+};
+
+type AuditFilters = {
+  tenantId: string;
+  workspaceId: string;
+  action: string;
+  from: string;
+  to: string;
 };
 
 function KpiCard(props: { title: string; value: string; hint?: string }) {
@@ -63,6 +73,22 @@ export function App() {
   const [sessions, setSessions] = useState<GatewaySession[]>([]);
   const [policy, setPolicy] = useState<GatewayPolicy | null>(null);
   const [audits, setAudits] = useState<GatewayAuditItem[]>([]);
+  const [auditNextCursor, setAuditNextCursor] = useState<number | undefined>(undefined);
+  const [auditLoadMoreLoading, setAuditLoadMoreLoading] = useState(false);
+  const [auditFilters, setAuditFilters] = useState<AuditFilters>({
+    tenantId: "t_default",
+    workspaceId: "w_default",
+    action: "",
+    from: "",
+    to: ""
+  });
+  const [auditDraft, setAuditDraft] = useState<AuditFilters>({
+    tenantId: "t_default",
+    workspaceId: "w_default",
+    action: "",
+    from: "",
+    to: ""
+  });
   const [metrics, setMetrics] = useState<GatewayMetricsSummary>(EMPTY_METRICS);
 
   const refreshDashboard = useCallback(async (): Promise<void> => {
@@ -72,25 +98,66 @@ export function App() {
       const [nextSessions, nextPolicy, nextAudits, nextMetrics] = await Promise.all([
         client.listSessions(),
         client.getPolicy(),
-        client.queryAudit({ limit: 20 }),
+        client.queryAudit({
+          ...toAuditQueryParams(auditFilters),
+          limit: 20
+        }),
         client.getMetricsSummary()
       ]);
       setSessions(nextSessions);
       setPolicy(nextPolicy);
-      setAudits(nextAudits);
+      setAudits(nextAudits.items);
+      setAuditNextCursor(nextAudits.nextCursor);
       setMetrics(nextMetrics);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
       setLoading(false);
     }
-  }, [client]);
+  }, [auditFilters, client]);
 
   useEffect(() => {
     void refreshDashboard();
   }, [refreshDashboard]);
 
   const runsFailedRate = metrics.runsTotal > 0 ? (metrics.runsFailed / metrics.runsTotal) * 100 : 0;
+
+  const applyAuditFilters = useCallback(() => {
+    const normalized = normalizeAuditFilters(auditDraft);
+    setAuditFilters(normalized);
+  }, [auditDraft]);
+
+  const resetAuditFilters = useCallback(() => {
+    const next = {
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      action: "",
+      from: "",
+      to: ""
+    };
+    setAuditDraft(next);
+    setAuditFilters(next);
+  }, []);
+
+  const loadMoreAudits = useCallback(async () => {
+    if (!auditNextCursor) {
+      return;
+    }
+    setAuditLoadMoreLoading(true);
+    try {
+      const next = await client.queryAudit({
+        ...toAuditQueryParams(auditFilters),
+        limit: 20,
+        cursor: auditNextCursor
+      });
+      setAudits((prev) => [...prev, ...next.items]);
+      setAuditNextCursor(next.nextCursor);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setAuditLoadMoreLoading(false);
+    }
+  }, [auditFilters, auditNextCursor, client]);
 
   return (
     <Layout className="console-root">
@@ -218,6 +285,49 @@ export function App() {
 
             <Col span={12}>
               <Card title="审计日志（audit.query）">
+                <Space wrap style={{ marginBottom: 10 }}>
+                  <Input
+                    style={{ width: 150 }}
+                    size="small"
+                    placeholder="tenantId"
+                    value={auditDraft.tenantId}
+                    onChange={(value) => setAuditDraft((prev) => ({ ...prev, tenantId: value }))}
+                  />
+                  <Input
+                    style={{ width: 150 }}
+                    size="small"
+                    placeholder="workspaceId"
+                    value={auditDraft.workspaceId}
+                    onChange={(value) => setAuditDraft((prev) => ({ ...prev, workspaceId: value }))}
+                  />
+                  <Input
+                    style={{ width: 140 }}
+                    size="small"
+                    placeholder="action"
+                    value={auditDraft.action}
+                    onChange={(value) => setAuditDraft((prev) => ({ ...prev, action: value }))}
+                  />
+                  <Input
+                    style={{ width: 180 }}
+                    size="small"
+                    placeholder="from (ISO)"
+                    value={auditDraft.from}
+                    onChange={(value) => setAuditDraft((prev) => ({ ...prev, from: value }))}
+                  />
+                  <Input
+                    style={{ width: 180 }}
+                    size="small"
+                    placeholder="to (ISO)"
+                    value={auditDraft.to}
+                    onChange={(value) => setAuditDraft((prev) => ({ ...prev, to: value }))}
+                  />
+                  <Button theme="solid" size="small" onClick={applyAuditFilters} loading={loading}>
+                    应用筛选
+                  </Button>
+                  <Button theme="light" size="small" onClick={resetAuditFilters} disabled={loading}>
+                    重置
+                  </Button>
+                </Space>
                 {audits.length === 0 ? (
                   <Typography.Text type="tertiary">No audit records</Typography.Text>
                 ) : (
@@ -226,15 +336,37 @@ export function App() {
                     renderItem={(item: GatewayAuditItem) => (
                       <List.Item
                         main={
-                          <Typography.Text>
-                            {asString(item.action) ?? "audit.event"} · {asString(item.actor) ?? "unknown"} ·{" "}
-                            {formatDate(asString(item.createdAt))}
-                          </Typography.Text>
+                          <div>
+                            <Typography.Text>
+                              {asString(item.action) ?? "audit.event"} · {asString(item.actor) ?? "unknown"} ·{" "}
+                              {formatDate(asString(item.createdAt))}
+                            </Typography.Text>
+                            <br />
+                            <Typography.Text type="tertiary" size="small">
+                              {asString(item.tenantId) ?? "-"} / {asString(item.workspaceId) ?? "-"} ·{" "}
+                              {asString(item.resourceType) ?? "resource"}:{asString(item.resourceId) ?? "-"}
+                            </Typography.Text>
+                            {item.metadata && typeof item.metadata === "object" ? (
+                              <>
+                                <br />
+                                <Typography.Text type="tertiary" size="small">
+                                  {clipJson(item.metadata, 180)}
+                                </Typography.Text>
+                              </>
+                            ) : null}
+                          </div>
                         }
                       />
                     )}
                   />
                 )}
+                {auditNextCursor ? (
+                  <div style={{ marginTop: 10 }}>
+                    <Button theme="light" size="small" onClick={() => void loadMoreAudits()} loading={auditLoadMoreLoading}>
+                      加载更多
+                    </Button>
+                  </div>
+                ) : null}
               </Card>
             </Col>
           </Row>
@@ -286,4 +418,35 @@ function formatDate(input: string | undefined): string {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function normalizeAuditFilters(source: AuditFilters): AuditFilters {
+  return {
+    tenantId: source.tenantId.trim(),
+    workspaceId: source.workspaceId.trim(),
+    action: source.action.trim(),
+    from: source.from.trim(),
+    to: source.to.trim()
+  };
+}
+
+function toAuditQueryParams(filters: AuditFilters): GatewayAuditQueryParams {
+  return {
+    ...(filters.tenantId ? { tenantId: filters.tenantId } : {}),
+    ...(filters.workspaceId ? { workspaceId: filters.workspaceId } : {}),
+    ...(filters.action ? { action: filters.action } : {}),
+    ...(filters.from ? { from: filters.from } : {}),
+    ...(filters.to ? { to: filters.to } : {})
+  };
+}
+
+function clipJson(value: unknown, maxLength: number): string {
+  const text = JSON.stringify(value);
+  if (!text) {
+    return "";
+  }
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
 }

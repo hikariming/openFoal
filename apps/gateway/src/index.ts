@@ -3,17 +3,34 @@ import {
   DEFAULT_SESSION_PREVIEW,
   DEFAULT_SESSION_TITLE,
   InMemoryIdempotencyRepository,
+  InMemoryAgentRepository,
+  InMemoryAuditRepository,
+  InMemoryBudgetRepository,
+  InMemoryExecutionTargetRepository,
   InMemoryMetricsRepository,
   InMemoryPolicyRepository,
   InMemorySessionRepository,
   InMemoryTranscriptRepository,
+  SqliteAgentRepository,
+  SqliteAuditRepository,
+  SqliteBudgetRepository,
+  SqliteExecutionTargetRepository,
   SqliteIdempotencyRepository,
   SqliteMetricsRepository,
   SqlitePolicyRepository,
   SqliteSessionRepository,
   SqliteTranscriptRepository,
+  type AgentDefinitionRecord,
+  type AgentRepository,
+  type AuditQuery,
+  type AuditRepository,
+  type BudgetPolicyPatch,
+  type BudgetRepository,
+  type ExecutionTargetRecord,
+  type ExecutionTargetRepository,
   type IdempotencyRepository,
   type MetricsRepository,
+  type MetricsScopeFilter,
   type PolicyDecision,
   type PolicyPatch,
   type PolicyRecord,
@@ -26,6 +43,9 @@ import {
 import {
   createLocalToolExecutor,
   type ToolExecutor,
+  type ToolExecutionHooks,
+  type ToolContext,
+  type ToolCall,
   type ToolResult
 } from "../../../packages/tool-executor/dist/index.js";
 import {
@@ -39,7 +59,9 @@ import {
   validateReqFrame
 } from "../../../packages/protocol/dist/index.js";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+// @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
+import { request as httpsRequest } from "node:https";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { createHash } from "node:crypto";
 
@@ -80,13 +102,27 @@ export interface GatewayServerHandle {
   close(): Promise<void>;
 }
 
+type DockerRunnerInvokeInput = {
+  target: ExecutionTargetRecord;
+  call: ToolCall;
+  ctx: ToolContext;
+  hooks?: ToolExecutionHooks;
+};
+
+type DockerRunnerInvoker = (input: DockerRunnerInvokeInput) => Promise<ToolResult>;
+
 interface GatewayDeps {
   coreService?: CoreService;
   toolExecutor?: ToolExecutor;
   internalToolExecutor?: ToolExecutor;
+  dockerRunnerInvoker?: DockerRunnerInvoker;
   sessionRepo?: SessionRepository;
   transcriptRepo?: TranscriptRepository;
   idempotencyRepo?: IdempotencyRepository;
+  agentRepo?: AgentRepository;
+  executionTargetRepo?: ExecutionTargetRepository;
+  budgetRepo?: BudgetRepository;
+  auditRepo?: AuditRepository;
   policyRepo?: PolicyRepository;
   metricsRepo?: MetricsRepository;
   now?: () => Date;
@@ -106,13 +142,24 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const sessionRepo = deps.sessionRepo ?? new InMemorySessionRepository();
   const transcriptRepo = deps.transcriptRepo ?? new InMemoryTranscriptRepository();
   const idempotencyRepo = deps.idempotencyRepo ?? new InMemoryIdempotencyRepository();
+  const agentRepo = deps.agentRepo ?? new InMemoryAgentRepository();
+  const executionTargetRepo = deps.executionTargetRepo ?? new InMemoryExecutionTargetRepository();
+  const budgetRepo = deps.budgetRepo ?? new InMemoryBudgetRepository();
+  const auditRepo = deps.auditRepo ?? new InMemoryAuditRepository();
   const policyRepo = deps.policyRepo ?? new InMemoryPolicyRepository();
   const metricsRepo = deps.metricsRepo ?? new InMemoryMetricsRepository();
   const now = deps.now ?? (() => new Date());
   const baseToolExecutor = deps.toolExecutor ?? createLocalToolExecutor();
   const internalToolExecutor = deps.internalToolExecutor ?? baseToolExecutor;
+  const dockerRunnerInvoker = deps.dockerRunnerInvoker ?? invokeDockerRunnerOverHttp;
+  const sessionExecutionTargets = new Map<string, ExecutionTargetRecord>();
+  const targetAwareToolExecutor = createExecutionTargetToolExecutor({
+    local: baseToolExecutor,
+    dockerRunnerInvoker,
+    getExecutionTarget: (sessionId) => sessionExecutionTargets.get(sessionId)
+  });
   const policyAwareToolExecutor = createPolicyAwareToolExecutor({
-    base: baseToolExecutor,
+    base: targetAwareToolExecutor,
     policyRepo
   });
   const coreService = deps.coreService ?? createRuntimeCoreService({ toolExecutor: policyAwareToolExecutor });
@@ -163,9 +210,14 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         coreService,
         sessionRepo,
         transcriptRepo,
+        agentRepo,
+        executionTargetRepo,
+        budgetRepo,
+        auditRepo,
         policyRepo,
         metricsRepo,
         internalToolExecutor,
+        sessionExecutionTargets,
         now,
         options
       );
@@ -191,6 +243,10 @@ export async function startGatewayServer(options: GatewayServerOptions = {}): Pr
       sessionRepo: new SqliteSessionRepository(options.sqlitePath),
       transcriptRepo: new SqliteTranscriptRepository(options.sqlitePath),
       idempotencyRepo: new SqliteIdempotencyRepository(options.sqlitePath),
+      agentRepo: new SqliteAgentRepository(options.sqlitePath),
+      executionTargetRepo: new SqliteExecutionTargetRepository(options.sqlitePath),
+      budgetRepo: new SqliteBudgetRepository(options.sqlitePath),
+      auditRepo: new SqliteAuditRepository(options.sqlitePath),
       policyRepo: new SqlitePolicyRepository(options.sqlitePath),
       metricsRepo: new SqliteMetricsRepository(options.sqlitePath)
     });
@@ -240,9 +296,14 @@ async function route(
   coreService: CoreService,
   sessionRepo: SessionRepository,
   transcriptRepo: TranscriptRepository,
+  agentRepo: AgentRepository,
+  executionTargetRepo: ExecutionTargetRepository,
+  budgetRepo: BudgetRepository,
+  auditRepo: AuditRepository,
   policyRepo: PolicyRepository,
   metricsRepo: MetricsRepository,
   internalToolExecutor: ToolExecutor,
+  sessionExecutionTargets: Map<string, ExecutionTargetRecord>,
   now: () => Date,
   options: GatewayHandleOptions
 ): Promise<GatewayHandleResult> {
@@ -323,6 +384,157 @@ async function route(
       };
     }
 
+    case "agents.list": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId");
+      const items = await agentRepo.list({
+        tenantId,
+        ...(workspaceId ? { workspaceId } : {})
+      });
+      return {
+        response: makeSuccessRes(req.id, { items }),
+        events: []
+      };
+    }
+
+    case "agents.upsert": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId") ?? "w_default";
+      const agentId = requireString(req.params, "agentId");
+      if (!agentId) {
+        return invalidParams(req.id, "agents.upsert 需要 agentId");
+      }
+      const runtimeMode = asRuntimeMode(req.params.runtimeMode) ?? "local";
+      const record = await agentRepo.upsert({
+        tenantId,
+        workspaceId,
+        agentId,
+        name: requireString(req.params, "name") ?? agentId,
+        runtimeMode,
+        ...(requireString(req.params, "executionTargetId") ? { executionTargetId: requireString(req.params, "executionTargetId") } : {}),
+        ...(requireString(req.params, "policyScopeKey") ? { policyScopeKey: requireString(req.params, "policyScopeKey") } : {}),
+        enabled: req.params.enabled !== false,
+        config: isObjectRecord(req.params.config) ? req.params.config : {}
+      });
+
+      await auditRepo.append({
+        tenantId,
+        workspaceId,
+        action: "agents.upsert",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "agent_definition",
+        resourceId: `${workspaceId}:${agentId}`,
+        metadata: {
+          runtimeMode: record.runtimeMode,
+          executionTargetId: record.executionTargetId
+        },
+        createdAt: now().toISOString()
+      });
+
+      return {
+        response: makeSuccessRes(req.id, { agent: record }),
+        events: []
+      };
+    }
+
+    case "executionTargets.list": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId");
+      const items = await executionTargetRepo.list({
+        tenantId,
+        ...(workspaceId !== undefined ? { workspaceId } : {})
+      });
+      return {
+        response: makeSuccessRes(req.id, { items }),
+        events: []
+      };
+    }
+
+    case "executionTargets.upsert": {
+      const targetId = requireString(req.params, "targetId");
+      if (!targetId) {
+        return invalidParams(req.id, "executionTargets.upsert 需要 targetId");
+      }
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId");
+      const kind = req.params.kind === "docker-runner" ? "docker-runner" : "local-host";
+      const target = await executionTargetRepo.upsert({
+        targetId,
+        tenantId,
+        ...(workspaceId ? { workspaceId } : {}),
+        kind,
+        ...(requireString(req.params, "endpoint") ? { endpoint: requireString(req.params, "endpoint") } : {}),
+        ...(requireString(req.params, "authToken") ? { authToken: requireString(req.params, "authToken") } : {}),
+        isDefault: req.params.isDefault === true,
+        enabled: req.params.enabled !== false,
+        config: isObjectRecord(req.params.config) ? req.params.config : {}
+      });
+
+      await auditRepo.append({
+        tenantId,
+        workspaceId: workspaceId ?? "w_default",
+        action: "executionTargets.upsert",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "execution_target",
+        resourceId: target.targetId,
+        metadata: {
+          kind: target.kind,
+          isDefault: target.isDefault,
+          enabled: target.enabled
+        },
+        createdAt: now().toISOString()
+      });
+
+      return {
+        response: makeSuccessRes(req.id, { target }),
+        events: []
+      };
+    }
+
+    case "budget.get": {
+      const scopeKey = requireString(req.params, "scopeKey") ?? defaultBudgetScopeKey();
+      const policy = await budgetRepo.get(scopeKey);
+      const usage = await budgetRepo.summary(scopeKey, normalizeMemoryDate(req.params.date) ?? undefined);
+      return {
+        response: makeSuccessRes(req.id, {
+          policy,
+          usage
+        }),
+        events: []
+      };
+    }
+
+    case "budget.update": {
+      const scopeKey = requireString(req.params, "scopeKey") ?? defaultBudgetScopeKey();
+      const patch = toBudgetPatch(req.params);
+      if (!patch) {
+        return invalidParams(req.id, "budget.update 需要至少一个可更新字段");
+      }
+      const policy = await budgetRepo.update(patch, scopeKey);
+      const usage = await budgetRepo.summary(scopeKey);
+      await auditRepo.append({
+        tenantId: requireString(req.params, "tenantId") ?? "t_default",
+        workspaceId: requireString(req.params, "workspaceId") ?? "w_default",
+        action: "budget.update",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "budget_policy",
+        resourceId: scopeKey,
+        metadata: {
+          tokenDailyLimit: policy.tokenDailyLimit,
+          costMonthlyUsdLimit: policy.costMonthlyUsdLimit,
+          hardLimit: policy.hardLimit
+        },
+        createdAt: now().toISOString()
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          policy,
+          usage
+        }),
+        events: []
+      };
+    }
+
     case "runtime.setMode": {
       const sessionId = requireString(req.params, "sessionId");
       const runtimeMode = asRuntimeMode(req.params.runtimeMode);
@@ -375,6 +587,11 @@ async function route(
       const input = requireString(req.params, "input");
       const reqRuntimeMode = asRuntimeMode(req.params.runtimeMode);
       const llm = asLlmOptions(req.params.llm);
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId") ?? "w_default";
+      const agentId = requireString(req.params, "agentId") ?? "a_default";
+      const actor = requireString(req.params, "actor") ?? "user";
+      const explicitTargetId = requireString(req.params, "executionTargetId");
       if (!sessionId || !input) {
         return invalidParams(req.id, "agent.run 需要 sessionId 和 input");
       }
@@ -382,6 +599,57 @@ async function route(
       if (state.runningSessionIds.has(sessionId)) {
         return {
           response: makeErrorRes(req.id, "SESSION_BUSY", `会话 ${sessionId} 正在运行`),
+          events: []
+        };
+      }
+
+      const selectedTarget = await resolveExecutionTarget({
+        tenantId,
+        workspaceId,
+        agentId,
+        explicitTargetId,
+        agentRepo,
+        executionTargetRepo
+      });
+      if (!selectedTarget) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", "未找到可用执行目标"),
+          events: []
+        };
+      }
+      if (!selectedTarget.enabled) {
+        return {
+          response: makeErrorRes(req.id, "POLICY_DENIED", `执行目标不可用: ${selectedTarget.targetId}`),
+          events: []
+        };
+      }
+
+      const budgetScopeKey = resolveBudgetScopeKey(req.params, tenantId, workspaceId, agentId);
+      const budgetPolicy = await budgetRepo.get(budgetScopeKey);
+      const budgetUsage = await budgetRepo.summary(budgetScopeKey);
+      const budgetExceededReason = getBudgetExceededReason(budgetPolicy, budgetUsage);
+      if (budgetExceededReason) {
+        await budgetRepo.addUsage({
+          scopeKey: budgetScopeKey,
+          runsRejected: 1,
+          date: now().toISOString().slice(0, 10)
+        });
+        await auditRepo.append({
+          tenantId,
+          workspaceId,
+          action: "budget.rejected",
+          actor,
+          resourceType: "budget_policy",
+          resourceId: budgetScopeKey,
+          metadata: {
+            reason: budgetExceededReason,
+            usage: budgetUsage,
+            policy: budgetPolicy
+          },
+          createdAt: now().toISOString()
+        });
+        return {
+          response: makeErrorRes(req.id, "POLICY_DENIED", `预算超限: ${budgetExceededReason}`),
           events: []
         };
       }
@@ -439,6 +707,7 @@ async function route(
       }
 
       state.runningSessionIds.add(sessionId);
+      sessionExecutionTargets.set(sessionId, selectedTarget);
       try {
         for await (const coreEvent of coreService.run({
           sessionId,
@@ -464,6 +733,7 @@ async function route(
         }
       } finally {
         state.runningSessionIds.delete(sessionId);
+        sessionExecutionTargets.delete(sessionId);
       }
 
       const queuedMode = state.queuedModeChanges.get(sessionId);
@@ -485,6 +755,9 @@ async function route(
       if (!acceptedRunId) {
         await metricsRepo.recordRun({
           sessionId,
+          tenantId,
+          workspaceId,
+          agentId,
           status: "failed",
           durationMs: Date.now() - runStartedAt,
           toolCalls: toolCallsTotal,
@@ -506,10 +779,41 @@ async function route(
       await metricsRepo.recordRun({
         sessionId,
         runId: acceptedRunId,
+        tenantId,
+        workspaceId,
+        agentId,
         status: runStatus,
         durationMs: Date.now() - runStartedAt,
         toolCalls: toolCallsTotal,
         toolFailures,
+        createdAt: now().toISOString()
+      });
+
+      const usageSnapshot = estimateRunUsage(input, completedOutput);
+      await budgetRepo.addUsage({
+        scopeKey: budgetScopeKey,
+        date: now().toISOString().slice(0, 10),
+        tokensUsed: usageSnapshot.tokensUsed,
+        costUsd: usageSnapshot.costUsd
+      });
+
+      await auditRepo.append({
+        tenantId,
+        workspaceId,
+        action: runStatus === "completed" ? "agent.run.completed" : "agent.run.failed",
+        actor,
+        resourceType: "run",
+        resourceId: acceptedRunId,
+        metadata: {
+          sessionId,
+          agentId,
+          executionTargetId: selectedTarget.targetId,
+          executionTargetKind: selectedTarget.kind,
+          toolCallsTotal,
+          toolFailures,
+          budgetScopeKey,
+          usageSnapshot
+        },
         createdAt: now().toISOString()
       });
 
@@ -558,6 +862,21 @@ async function route(
         return invalidParams(req.id, "policy.update 需要至少一个可更新字段");
       }
       const policy = await policyRepo.update(patch, scopeKey);
+      await auditRepo.append({
+        tenantId: requireString(req.params, "tenantId") ?? "t_default",
+        workspaceId: requireString(req.params, "workspaceId") ?? "w_default",
+        action: "policy.update",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "policy",
+        resourceId: scopeKey,
+        metadata: {
+          toolDefault: policy.toolDefault,
+          highRisk: policy.highRisk,
+          bashMode: policy.bashMode,
+          version: policy.version
+        },
+        createdAt: now().toISOString()
+      });
       return {
         response: makeSuccessRes(req.id, {
           policy
@@ -571,19 +890,24 @@ async function route(
     }
 
     case "audit.query": {
+      const query = toAuditQuery(req.params);
+      const result = await auditRepo.query(query);
       return {
         response: makeSuccessRes(req.id, {
-          items: []
+          items: result.items,
+          ...(result.nextCursor ? { nextCursor: result.nextCursor } : {})
         }),
         events: []
       };
     }
 
     case "metrics.summary": {
-      const metrics = await metricsRepo.summary();
+      const scope = toMetricsScope(req.params);
+      const metrics = await metricsRepo.summary(scope);
       return {
         response: makeSuccessRes(req.id, {
-          metrics
+          metrics,
+          ...(Object.keys(scope).length > 0 ? { scope } : {})
         }),
         events: []
       };
@@ -1435,6 +1759,141 @@ function toPolicyPatch(params: Record<string, unknown>): PolicyPatch | undefined
   return Object.keys(patch).length > 0 ? patch : undefined;
 }
 
+function toBudgetPatch(params: Record<string, unknown>): BudgetPolicyPatch | undefined {
+  const source = isObjectRecord(params.patch) ? params.patch : params;
+  const tokenDailyLimit = toNullableLimit(source.tokenDailyLimit);
+  const costMonthlyUsdLimit = toNullableLimit(source.costMonthlyUsdLimit);
+  const hardLimit = typeof source.hardLimit === "boolean" ? source.hardLimit : undefined;
+
+  const patch: BudgetPolicyPatch = {
+    ...(tokenDailyLimit !== undefined ? { tokenDailyLimit } : {}),
+    ...(costMonthlyUsdLimit !== undefined ? { costMonthlyUsdLimit } : {}),
+    ...(hardLimit !== undefined ? { hardLimit } : {})
+  };
+  return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
+function toNullableLimit(value: unknown): number | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  if (value < 0) {
+    return 0;
+  }
+  return Number(value.toFixed(6));
+}
+
+function toMetricsScope(params: Record<string, unknown>): MetricsScopeFilter {
+  return {
+    ...(requireString(params, "tenantId") ? { tenantId: requireString(params, "tenantId") } : {}),
+    ...(requireString(params, "workspaceId") ? { workspaceId: requireString(params, "workspaceId") } : {}),
+    ...(requireString(params, "agentId") ? { agentId: requireString(params, "agentId") } : {})
+  };
+}
+
+function toAuditQuery(params: Record<string, unknown>): AuditQuery {
+  return {
+    ...(requireString(params, "tenantId") ? { tenantId: requireString(params, "tenantId") } : {}),
+    ...(requireString(params, "workspaceId") ? { workspaceId: requireString(params, "workspaceId") } : {}),
+    ...(requireString(params, "action") ? { action: requireString(params, "action") } : {}),
+    ...(requireString(params, "from") ? { from: requireString(params, "from") } : {}),
+    ...(requireString(params, "to") ? { to: requireString(params, "to") } : {}),
+    ...(asPositiveInt(params.limit) ? { limit: asPositiveInt(params.limit) } : {}),
+    ...(asPositiveInt(params.cursor) ? { cursor: asPositiveInt(params.cursor) } : {})
+  };
+}
+
+async function resolveExecutionTarget(input: {
+  tenantId: string;
+  workspaceId: string;
+  agentId: string;
+  explicitTargetId?: string;
+  agentRepo: AgentRepository;
+  executionTargetRepo: ExecutionTargetRepository;
+}): Promise<ExecutionTargetRecord | undefined> {
+  if (input.explicitTargetId) {
+    const explicit = await input.executionTargetRepo.get(input.explicitTargetId);
+    if (explicit) {
+      return explicit;
+    }
+  }
+
+  const agent = await input.agentRepo.get(input.tenantId, input.workspaceId, input.agentId);
+  if (agent?.executionTargetId) {
+    const fromAgent = await input.executionTargetRepo.get(agent.executionTargetId);
+    if (fromAgent) {
+      return fromAgent;
+    }
+  }
+
+  const fromWorkspaceDefault = await input.executionTargetRepo.findDefault(input.tenantId, input.workspaceId);
+  if (fromWorkspaceDefault) {
+    return fromWorkspaceDefault;
+  }
+
+  return await input.executionTargetRepo.get("target_local_default");
+}
+
+function resolveBudgetScopeKey(
+  params: Record<string, unknown>,
+  tenantId: string,
+  workspaceId: string,
+  agentId: string
+): string {
+  const explicit = requireString(params, "budgetScopeKey");
+  if (explicit) {
+    return explicit;
+  }
+  const level = requireString(params, "budgetLevel");
+  if (level === "agent") {
+    return `agent:${tenantId}:${workspaceId}:${agentId}`;
+  }
+  if (level === "tenant") {
+    return `tenant:${tenantId}`;
+  }
+  return `workspace:${tenantId}:${workspaceId}`;
+}
+
+function getBudgetExceededReason(
+  policy: {
+    tokenDailyLimit: number | null;
+    costMonthlyUsdLimit: number | null;
+    hardLimit: boolean;
+  },
+  usage: {
+    tokensUsedDaily: number;
+    costUsdMonthly: number;
+  }
+): string | undefined {
+  if (!policy.hardLimit) {
+    return undefined;
+  }
+  if (policy.tokenDailyLimit !== null && usage.tokensUsedDaily >= policy.tokenDailyLimit) {
+    return `tokenDailyLimit(${policy.tokenDailyLimit})`;
+  }
+  if (policy.costMonthlyUsdLimit !== null && usage.costUsdMonthly >= policy.costMonthlyUsdLimit) {
+    return `costMonthlyUsdLimit(${policy.costMonthlyUsdLimit})`;
+  }
+  return undefined;
+}
+
+function estimateRunUsage(input: string, output: string): { tokensUsed: number; costUsd: number } {
+  const totalChars = Math.max(0, input.length + output.length);
+  const tokensUsed = Math.max(1, Math.ceil(totalChars / 4));
+  const costUsd = Number((tokensUsed * 0.000002).toFixed(6));
+  return {
+    tokensUsed,
+    costUsd
+  };
+}
+
+function defaultBudgetScopeKey(): string {
+  return "workspace:t_default:w_default";
+}
+
 function resolveToolDecision(policy: PolicyRecord, toolName: string): PolicyDecision {
   const exact = policy.tools[toolName];
   if (exact) {
@@ -1468,6 +1927,277 @@ function createPolicyAwareToolExecutor(input: {
       return await input.base.execute(call, ctx, hooks);
     }
   };
+}
+
+function createExecutionTargetToolExecutor(input: {
+  local: ToolExecutor;
+  dockerRunnerInvoker: DockerRunnerInvoker;
+  getExecutionTarget: (sessionId: string) => ExecutionTargetRecord | undefined;
+}): ToolExecutor {
+  return {
+    async execute(call: ToolCall, ctx: ToolContext, hooks?: ToolExecutionHooks): Promise<ToolResult> {
+      const target = input.getExecutionTarget(ctx.sessionId);
+      if (!target || target.kind === "local-host") {
+        return await input.local.execute(call, ctx, hooks);
+      }
+      return await input.dockerRunnerInvoker({
+        target,
+        call,
+        ctx,
+        hooks
+      });
+    }
+  };
+}
+
+async function invokeDockerRunnerOverHttp(input: DockerRunnerInvokeInput): Promise<ToolResult> {
+  const endpoint = resolveDockerRunnerEndpoint(input.target);
+  if (!endpoint) {
+    return {
+      ok: false,
+      error: {
+        code: "TOOL_EXEC_FAILED",
+        message: `docker-runner 缺少 endpoint: ${input.target.targetId}`
+      }
+    };
+  }
+
+  const timeoutMs = resolveDockerRunnerTimeoutMs(input.target.config);
+  const headers: Record<string, string> = {
+    "content-type": "application/json"
+  };
+  if (input.target.authToken) {
+    headers.authorization = `Bearer ${input.target.authToken}`;
+  }
+
+  try {
+    const response = await sendDockerRunnerRequest({
+      endpoint,
+      headers,
+      body: {
+        call: input.call,
+        ctx: input.ctx,
+        target: {
+          targetId: input.target.targetId,
+          kind: input.target.kind,
+          tenantId: input.target.tenantId,
+          workspaceId: input.target.workspaceId
+        }
+      },
+      timeoutMs,
+      signal: input.hooks?.signal
+    });
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return {
+        ok: false,
+        error: {
+          code: "TOOL_EXEC_FAILED",
+          message: `docker-runner 响应异常(${response.statusCode}): ${clipText(response.text, 240)}`
+        }
+      };
+    }
+
+    const parsed = parseJsonObject(response.text);
+    if (!parsed) {
+      return {
+        ok: false,
+        error: {
+          code: "TOOL_EXEC_FAILED",
+          message: `docker-runner 返回非 JSON: ${clipText(response.text, 120)}`
+        }
+      };
+    }
+
+    emitRemoteUpdates(parsed, input.hooks);
+    const normalized = normalizeDockerRunnerToolResult(parsed);
+    if (normalized) {
+      return normalized;
+    }
+
+    return {
+      ok: false,
+      error: {
+        code: "TOOL_EXEC_FAILED",
+        message: "docker-runner 返回格式不支持"
+      }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "TOOL_EXEC_FAILED",
+        message: `docker-runner 调用失败: ${error instanceof Error ? error.message : String(error)}`
+      }
+    };
+  }
+}
+
+async function sendDockerRunnerRequest(input: {
+  endpoint: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  timeoutMs: number;
+  signal?: {
+    aborted: boolean;
+    addEventListener?(type: "abort", listener: () => void, options?: { once?: boolean }): void;
+    removeEventListener?(type: "abort", listener: () => void): void;
+  };
+}): Promise<{ statusCode: number; text: string }> {
+  const url = new URL(input.endpoint);
+  const payload = JSON.stringify(input.body);
+  return await new Promise((resolve, reject) => {
+    const requestFn = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = requestFn(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port ? Number(url.port) : undefined,
+        path: `${url.pathname || "/"}${url.search || ""}`,
+        method: "POST",
+        headers: {
+          ...input.headers,
+          "content-length": String(Buffer.byteLength(payload))
+        }
+      },
+      (res: any) => {
+        const chunks: any[] = [];
+        res.on("data", (chunk: any) => {
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          resolve({
+            statusCode: typeof res.statusCode === "number" ? res.statusCode : 500,
+            text: Buffer.concat(chunks).toString("utf8")
+          });
+        });
+      }
+    );
+
+    req.setTimeout(input.timeoutMs, () => {
+      req.destroy(new Error(`timeout after ${input.timeoutMs}ms`));
+    });
+
+    const abortHandler = () => {
+      req.destroy(new Error("aborted"));
+    };
+    if (input.signal) {
+      if (input.signal.aborted) {
+        req.destroy(new Error("aborted"));
+      } else {
+        input.signal.addEventListener?.("abort", abortHandler, { once: true });
+      }
+    }
+
+    req.on("error", (error: Error) => {
+      if (input.signal) {
+        input.signal.removeEventListener?.("abort", abortHandler);
+      }
+      reject(error);
+    });
+
+    req.on("close", () => {
+      if (input.signal) {
+        input.signal.removeEventListener?.("abort", abortHandler);
+      }
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
+
+function resolveDockerRunnerEndpoint(target: ExecutionTargetRecord): string | undefined {
+  const direct = typeof target.endpoint === "string" ? target.endpoint.trim() : "";
+  if (direct) {
+    return direct;
+  }
+  if (isObjectRecord(target.config)) {
+    const fromConfig = requireString(target.config, "endpoint");
+    if (fromConfig) {
+      return fromConfig;
+    }
+  }
+  return undefined;
+}
+
+function resolveDockerRunnerTimeoutMs(config: Record<string, unknown>): number {
+  if (isObjectRecord(config) && typeof config.timeoutMs === "number" && Number.isFinite(config.timeoutMs)) {
+    const timeoutMs = Math.floor(config.timeoutMs);
+    if (timeoutMs > 0) {
+      return Math.min(timeoutMs, 180_000);
+    }
+  }
+  return 15_000;
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isObjectRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function emitRemoteUpdates(payload: Record<string, unknown>, hooks?: ToolExecutionHooks): void {
+  if (!hooks?.onUpdate) {
+    return;
+  }
+
+  const updates = Array.isArray(payload.updates) ? payload.updates : [];
+  for (const update of updates) {
+    if (typeof update === "string") {
+      hooks.onUpdate({
+        delta: update,
+        at: new Date().toISOString()
+      });
+      continue;
+    }
+    if (!isObjectRecord(update)) {
+      continue;
+    }
+    const delta = asString(update.delta);
+    if (!delta) {
+      continue;
+    }
+    hooks.onUpdate({
+      delta,
+      at: asString(update.at) ?? new Date().toISOString()
+    });
+  }
+}
+
+function normalizeDockerRunnerToolResult(payload: Record<string, unknown>): ToolResult | undefined {
+  const resultPayload = isObjectRecord(payload.result) ? payload.result : payload;
+  if (typeof resultPayload.ok !== "boolean") {
+    return undefined;
+  }
+
+  if (resultPayload.ok) {
+    const output = asString(resultPayload.output);
+    return {
+      ok: true,
+      ...(output !== undefined ? { output } : {})
+    };
+  }
+
+  const error = isObjectRecord(resultPayload.error) ? resultPayload.error : undefined;
+  return {
+    ok: false,
+    error: {
+      code: asString(error?.code) ?? "TOOL_EXEC_FAILED",
+      message: asString(error?.message) ?? "docker-runner 执行失败"
+    }
+  };
+}
+
+function clipText(input: string, maxLength: number): string {
+  const compact = input.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+  return `${compact.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 async function prepareSessionForRun(input: {

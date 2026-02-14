@@ -88,12 +88,31 @@ export type GatewayMetricsSummary = {
 };
 
 export type GatewayAuditItem = {
-  id?: string;
+  id?: number;
+  tenantId?: string;
+  workspaceId?: string;
   action?: string;
   actor?: string;
-  resource?: string;
+  resourceType?: string;
+  resourceId?: string;
+  metadata?: Record<string, unknown>;
   createdAt?: string;
   [key: string]: unknown;
+};
+
+export type GatewayAuditQueryParams = {
+  tenantId?: string;
+  workspaceId?: string;
+  action?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: number;
+};
+
+export type GatewayAuditQueryResult = {
+  items: GatewayAuditItem[];
+  nextCursor?: number;
 };
 
 export class GatewayRpcError extends Error {
@@ -164,22 +183,23 @@ export class GatewayClient {
     return policy;
   }
 
-  async queryAudit(params: {
-    from?: string;
-    to?: string;
-    limit?: number;
-  } = {}): Promise<GatewayAuditItem[]> {
+  async queryAudit(params: GatewayAuditQueryParams = {}): Promise<GatewayAuditQueryResult> {
     await this.ensureConnected();
     const result = await this.request("audit.query", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.action ? { action: params.action } : {}),
       ...(params.from ? { from: params.from } : {}),
       ...(params.to ? { to: params.to } : {}),
-      ...(typeof params.limit === "number" ? { limit: params.limit } : {})
+      ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
+      ...(typeof params.cursor === "number" ? { cursor: params.cursor } : {})
     });
     const items = result.response.payload.items;
-    if (!Array.isArray(items)) {
-      return [];
-    }
-    return items.filter(isGatewayAuditItem);
+    const nextCursor = asPositiveInt(result.response.payload.nextCursor);
+    return {
+      items: Array.isArray(items) ? items.filter(isGatewayAuditItem) : [],
+      ...(nextCursor ? { nextCursor } : {})
+    };
   }
 
   async getMetricsSummary(): Promise<GatewayMetricsSummary> {
@@ -324,6 +344,14 @@ function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
 
 function isPolicyDecision(value: unknown): value is PolicyDecision {
   return value === "deny" || value === "allow";
+}
+
+function asPositiveInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
 }
 
 function toErrorMessage(error: unknown): string {

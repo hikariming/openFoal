@@ -1,3 +1,8 @@
+> [!WARNING]
+> ARCHIVED (2026-02-14): This document is kept for historical reference only.
+> Active source of truth: `/Users/rqq/openFoal/docs/PRODUCT_TRUTH.md`.
+> Do not use this file for planning or implementation.
+
 # Batch E：UI 端真实字段接入清单（可直接开工）
 
 更新时间：2026-02-13  
@@ -165,8 +170,8 @@
 - `contextUsage`
 - `compactionCount`
 - `memoryFlushState`
-- `approvalRequired`
-- `approvalResolved`
+- `riskGateRequired`
+- `riskGateResolved`
 2. 保持中英文 key 对齐。
 
 验收：

@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  SqliteAgentRepository,
+  SqliteAuditRepository,
+  SqliteBudgetRepository,
+  SqliteExecutionTargetRepository,
   SqliteIdempotencyRepository,
   SqliteMetricsRepository,
   SqlitePolicyRepository,
@@ -216,6 +220,110 @@ test("sqlite policy/metrics repositories persist across instances", async () => 
     assert.equal(summary.toolCallsTotal, 3);
     assert.equal(summary.toolFailures, 1);
     assert.equal(summary.p95LatencyMs >= 120, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sqlite p2 repositories persist agents/targets/budget/audit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openfoal-storage-p2-"));
+  const dbPath = join(dir, "storage.sqlite");
+
+  try {
+    const agentsA = new SqliteAgentRepository(dbPath);
+    const targetsA = new SqliteExecutionTargetRepository(dbPath);
+    const budgetA = new SqliteBudgetRepository(dbPath);
+    const auditA = new SqliteAuditRepository(dbPath);
+
+    const target = await targetsA.upsert({
+      targetId: "target_docker_ops",
+      tenantId: "t_ops",
+      workspaceId: "w_ops",
+      kind: "docker-runner",
+      endpoint: "http://runner.internal",
+      isDefault: true,
+      enabled: true,
+      config: {
+        timeoutMs: 5000
+      }
+    });
+    assert.equal(target.kind, "docker-runner");
+    assert.equal(target.isDefault, true);
+
+    const agent = await agentsA.upsert({
+      tenantId: "t_ops",
+      workspaceId: "w_ops",
+      agentId: "a_support",
+      name: "support",
+      runtimeMode: "cloud",
+      executionTargetId: target.targetId,
+      enabled: true,
+      config: {
+        model: "gpt-4o-mini"
+      }
+    });
+    assert.equal(agent.executionTargetId, "target_docker_ops");
+
+    const policy = await budgetA.update(
+      {
+        tokenDailyLimit: 1000,
+        costMonthlyUsdLimit: 30,
+        hardLimit: true
+      },
+      "workspace:t_ops:w_ops"
+    );
+    assert.equal(policy.tokenDailyLimit, 1000);
+    assert.equal(policy.costMonthlyUsdLimit, 30);
+
+    await budgetA.addUsage({
+      scopeKey: "workspace:t_ops:w_ops",
+      date: "2026-02-14",
+      tokensUsed: 400,
+      costUsd: 2.5
+    });
+    await budgetA.addUsage({
+      scopeKey: "workspace:t_ops:w_ops",
+      date: "2026-02-14",
+      runsRejected: 1
+    });
+
+    await auditA.append({
+      tenantId: "t_ops",
+      workspaceId: "w_ops",
+      action: "budget.rejected",
+      actor: "tester",
+      resourceType: "budget_policy",
+      resourceId: "workspace:t_ops:w_ops",
+      metadata: {
+        reason: "tokenDailyLimit(1000)"
+      }
+    });
+
+    const agentsB = new SqliteAgentRepository(dbPath);
+    const targetsB = new SqliteExecutionTargetRepository(dbPath);
+    const budgetB = new SqliteBudgetRepository(dbPath);
+    const auditB = new SqliteAuditRepository(dbPath);
+
+    const persistedAgent = await agentsB.get("t_ops", "w_ops", "a_support");
+    assert.equal(Boolean(persistedAgent), true);
+    assert.equal(persistedAgent?.executionTargetId, "target_docker_ops");
+
+    const defaults = await targetsB.findDefault("t_ops", "w_ops");
+    assert.equal(defaults?.targetId, "target_docker_ops");
+
+    const summary = await budgetB.summary("workspace:t_ops:w_ops", "2026-02-14");
+    assert.equal(summary.tokensUsedDaily, 400);
+    assert.equal(summary.runsRejectedDaily, 1);
+    assert.equal(summary.costUsdMonthly >= 2.5, true);
+
+    const queried = await auditB.query({
+      tenantId: "t_ops",
+      workspaceId: "w_ops",
+      action: "budget.rejected",
+      limit: 20
+    });
+    assert.equal(Array.isArray(queried.items), true);
+    assert.equal(queried.items.length >= 1, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

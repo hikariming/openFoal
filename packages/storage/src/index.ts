@@ -113,6 +113,9 @@ export interface MetricsRunRecord {
   id: number;
   sessionId: string;
   runId?: string;
+  tenantId?: string;
+  workspaceId?: string;
+  agentId?: string;
   status: "completed" | "failed";
   durationMs: number;
   toolCalls: number;
@@ -128,17 +131,26 @@ export interface MetricsSummary {
   p95LatencyMs: number;
 }
 
+export interface MetricsScopeFilter {
+  tenantId?: string;
+  workspaceId?: string;
+  agentId?: string;
+}
+
 export interface MetricsRepository {
   recordRun(entry: {
     sessionId: string;
     runId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    agentId?: string;
     status: "completed" | "failed";
     durationMs: number;
     toolCalls: number;
     toolFailures: number;
     createdAt?: string;
   }): Promise<void>;
-  summary(): Promise<MetricsSummary>;
+  summary(scope?: MetricsScopeFilter): Promise<MetricsSummary>;
 }
 
 export class InMemorySessionRepository implements SessionRepository {
@@ -293,6 +305,9 @@ export class InMemoryMetricsRepository implements MetricsRepository {
   async recordRun(entry: {
     sessionId: string;
     runId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    agentId?: string;
     status: "completed" | "failed";
     durationMs: number;
     toolCalls: number;
@@ -303,6 +318,9 @@ export class InMemoryMetricsRepository implements MetricsRepository {
       id: this.nextId++,
       sessionId: entry.sessionId,
       runId: entry.runId,
+      tenantId: entry.tenantId,
+      workspaceId: entry.workspaceId,
+      agentId: entry.agentId,
       status: entry.status,
       durationMs: Math.max(0, Math.round(entry.durationMs)),
       toolCalls: Math.max(0, Math.floor(entry.toolCalls)),
@@ -311,8 +329,12 @@ export class InMemoryMetricsRepository implements MetricsRepository {
     });
   }
 
-  async summary(): Promise<MetricsSummary> {
-    return summarizeMetrics(this.rows);
+  async summary(scope: MetricsScopeFilter = {}): Promise<MetricsSummary> {
+    return summarizeMetrics(
+      this.rows.filter((row) => (scope.tenantId ? row.tenantId === scope.tenantId : true))
+        .filter((row) => (scope.workspaceId ? row.workspaceId === scope.workspaceId : true))
+        .filter((row) => (scope.agentId ? row.agentId === scope.agentId : true))
+    );
   }
 }
 
@@ -704,6 +726,9 @@ export class SqliteMetricsRepository implements MetricsRepository {
   async recordRun(entry: {
     sessionId: string;
     runId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    agentId?: string;
     status: "completed" | "failed";
     durationMs: number;
     toolCalls: number;
@@ -717,6 +742,9 @@ export class SqliteMetricsRepository implements MetricsRepository {
         INSERT INTO run_metrics (
           session_id,
           run_id,
+          tenant_id,
+          workspace_id,
+          agent_id,
           status,
           duration_ms,
           tool_calls,
@@ -726,6 +754,9 @@ export class SqliteMetricsRepository implements MetricsRepository {
         VALUES (
           ${sqlString(entry.sessionId)},
           ${sqlMaybeString(entry.runId)},
+          ${sqlMaybeString(entry.tenantId)},
+          ${sqlMaybeString(entry.workspaceId)},
+          ${sqlMaybeString(entry.agentId)},
           ${sqlString(entry.status)},
           ${sqlInt(Math.max(0, Math.round(entry.durationMs)))},
           ${sqlInt(Math.max(0, Math.floor(entry.toolCalls)))},
@@ -736,8 +767,19 @@ export class SqliteMetricsRepository implements MetricsRepository {
     );
   }
 
-  async summary(): Promise<MetricsSummary> {
+  async summary(scope: MetricsScopeFilter = {}): Promise<MetricsSummary> {
     ensureSchema(this.dbPath);
+    const where: string[] = [];
+    if (scope.tenantId) {
+      where.push(`tenant_id = ${sqlString(scope.tenantId)}`);
+    }
+    if (scope.workspaceId) {
+      where.push(`workspace_id = ${sqlString(scope.workspaceId)}`);
+    }
+    if (scope.agentId) {
+      where.push(`agent_id = ${sqlString(scope.agentId)}`);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const rows = queryJson<MetricsRunRecord>(
       this.dbPath,
       `
@@ -745,12 +787,16 @@ export class SqliteMetricsRepository implements MetricsRepository {
           id AS id,
           session_id AS sessionId,
           run_id AS runId,
+          tenant_id AS tenantId,
+          workspace_id AS workspaceId,
+          agent_id AS agentId,
           status AS status,
           duration_ms AS durationMs,
           tool_calls AS toolCalls,
           tool_failures AS toolFailures,
           created_at AS createdAt
         FROM run_metrics
+        ${whereSql}
         ORDER BY id ASC;
       `
     );
@@ -920,6 +966,9 @@ function ensureSchema(dbPath: string): void {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL,
         run_id TEXT,
+        tenant_id TEXT,
+        workspace_id TEXT,
+        agent_id TEXT,
         status TEXT NOT NULL,
         duration_ms INTEGER NOT NULL,
         tool_calls INTEGER NOT NULL,
@@ -930,6 +979,7 @@ function ensureSchema(dbPath: string): void {
   );
 
   ensureSessionColumns(dbPath);
+  ensureRunMetricsColumns(dbPath);
 
   const seed = defaultSession();
   execSql(
@@ -1053,6 +1103,46 @@ function ensureSessionColumns(dbPath: string): void {
       `
         ALTER TABLE sessions
         ADD COLUMN memory_flush_at TEXT;
+      `
+    );
+  }
+}
+
+function ensureRunMetricsColumns(dbPath: string): void {
+  const columns = queryJson<{ name: string }>(
+    dbPath,
+    `
+      PRAGMA table_info(run_metrics);
+    `
+  );
+  const names = new Set(columns.map((item) => item.name));
+
+  if (!names.has("tenant_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE run_metrics
+        ADD COLUMN tenant_id TEXT;
+      `
+    );
+  }
+
+  if (!names.has("workspace_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE run_metrics
+        ADD COLUMN workspace_id TEXT;
+      `
+    );
+  }
+
+  if (!names.has("agent_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE run_metrics
+        ADD COLUMN agent_id TEXT;
       `
     );
   }
@@ -1230,3 +1320,5 @@ function asPolicyDecision(value: unknown): PolicyDecision | undefined {
 function nowIso(): string {
   return new Date().toISOString();
 }
+
+export * from "./p2.js";

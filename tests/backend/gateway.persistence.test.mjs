@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 
 import { createConnectionState, createGatewayRouter } from "../../apps/gateway/dist/index.js";
 import {
+  SqliteAgentRepository,
+  SqliteAuditRepository,
+  SqliteBudgetRepository,
+  SqliteExecutionTargetRepository,
   SqliteIdempotencyRepository,
   SqliteMetricsRepository,
   SqlitePolicyRepository,
@@ -31,6 +35,10 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
       sessionRepo: new SqliteSessionRepository(dbPath),
       idempotencyRepo: new SqliteIdempotencyRepository(dbPath),
       transcriptRepo: new SqliteTranscriptRepository(dbPath),
+      agentRepo: new SqliteAgentRepository(dbPath),
+      executionTargetRepo: new SqliteExecutionTargetRepository(dbPath),
+      budgetRepo: new SqliteBudgetRepository(dbPath),
+      auditRepo: new SqliteAuditRepository(dbPath),
       policyRepo: new SqlitePolicyRepository(dbPath),
       metricsRepo: new SqliteMetricsRepository(dbPath)
     });
@@ -61,6 +69,10 @@ test("gateway persists idempotency and transcript in sqlite", async () => {
       sessionRepo: new SqliteSessionRepository(dbPath),
       idempotencyRepo: new SqliteIdempotencyRepository(dbPath),
       transcriptRepo: new SqliteTranscriptRepository(dbPath),
+      agentRepo: new SqliteAgentRepository(dbPath),
+      executionTargetRepo: new SqliteExecutionTargetRepository(dbPath),
+      budgetRepo: new SqliteBudgetRepository(dbPath),
+      auditRepo: new SqliteAuditRepository(dbPath),
       policyRepo: new SqlitePolicyRepository(dbPath),
       metricsRepo: new SqliteMetricsRepository(dbPath)
     });
