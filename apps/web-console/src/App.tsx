@@ -29,9 +29,12 @@ import {
   getGatewayClient,
   type GatewayAuditItem,
   type GatewayAuditQueryParams,
+  type GatewayModelKeyMeta,
   type GatewayMetricsSummary,
   type GatewayPolicy,
-  type GatewaySession
+  type GatewaySession,
+  type GatewayTenantUser,
+  type UserRole
 } from "./lib/gateway-client";
 
 const EMPTY_METRICS: GatewayMetricsSummary = {
@@ -98,6 +101,37 @@ export function App() {
     to: ""
   });
   const [metrics, setMetrics] = useState<GatewayMetricsSummary>(EMPTY_METRICS);
+  const [users, setUsers] = useState<GatewayTenantUser[]>([]);
+  const [modelSecrets, setModelSecrets] = useState<GatewayModelKeyMeta[]>([]);
+  const [modeUpdatingSessionId, setModeUpdatingSessionId] = useState("");
+  const [createUserForm, setCreateUserForm] = useState({
+    username: "",
+    password: "",
+    displayName: "",
+    email: "",
+    workspaceId: "w_default",
+    role: "member" as UserRole
+  });
+  const [statusForm, setStatusForm] = useState({
+    userId: "",
+    status: "disabled"
+  });
+  const [passwordResetForm, setPasswordResetForm] = useState({
+    userId: "",
+    newPassword: ""
+  });
+  const [membershipForm, setMembershipForm] = useState({
+    userId: "",
+    workspaceId: "w_default",
+    role: "member" as UserRole
+  });
+  const [modelSecretForm, setModelSecretForm] = useState({
+    workspaceId: "",
+    provider: "openai",
+    modelId: "",
+    baseUrl: "",
+    apiKey: ""
+  });
 
   useEffect(() => {
     let mounted = true;
@@ -155,20 +189,29 @@ export function App() {
     setLoading(true);
     setError("");
     try {
-      const [nextSessions, nextPolicy, nextAudits, nextMetrics] = await Promise.all([
+      const [nextSessions, nextPolicy, nextAudits, nextMetrics, nextUsers, nextSecrets] = await Promise.all([
         client.listSessions(),
         client.getPolicy(),
         client.queryAudit({
           ...toAuditQueryParams(auditFilters),
           limit: 20
         }),
-        client.getMetricsSummary()
+        client.getMetricsSummary(),
+        client.listUsers({
+          tenantId: auditFilters.tenantId,
+          workspaceId: auditFilters.workspaceId
+        }),
+        client.getModelKeyMeta({
+          tenantId: auditFilters.tenantId
+        })
       ]);
       setSessions(nextSessions);
       setPolicy(nextPolicy);
       setAudits(nextAudits.items);
       setAuditNextCursor(nextAudits.nextCursor);
       setMetrics(nextMetrics);
+      setUsers(nextUsers);
+      setModelSecrets(nextSecrets);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
@@ -274,8 +317,131 @@ export function App() {
       setPolicy(null);
       setAudits([]);
       setMetrics(EMPTY_METRICS);
+      setUsers([]);
+      setModelSecrets([]);
     }
   }, [client]);
+
+  const handleCreateUser = useCallback(async () => {
+    setError("");
+    try {
+      await client.createUser({
+        tenantId: auditFilters.tenantId || undefined,
+        username: createUserForm.username.trim(),
+        password: createUserForm.password,
+        ...(createUserForm.displayName.trim() ? { displayName: createUserForm.displayName.trim() } : {}),
+        ...(createUserForm.email.trim() ? { email: createUserForm.email.trim() } : {}),
+        memberships: [
+          {
+            workspaceId: createUserForm.workspaceId.trim() || "w_default",
+            role: normalizeUserRole(createUserForm.role)
+          }
+        ]
+      });
+      setCreateUserForm({
+        username: "",
+        password: "",
+        displayName: "",
+        email: "",
+        workspaceId: "w_default",
+        role: "member"
+      });
+      await refreshDashboard();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
+    }
+  }, [auditFilters.tenantId, client, createUserForm, refreshDashboard]);
+
+  const handleUpdateUserStatus = useCallback(async () => {
+    setError("");
+    try {
+      await client.updateUserStatus({
+        tenantId: auditFilters.tenantId || undefined,
+        userId: statusForm.userId.trim(),
+        status: statusForm.status === "active" ? "active" : "disabled"
+      });
+      await refreshDashboard();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
+    }
+  }, [auditFilters.tenantId, client, refreshDashboard, statusForm.status, statusForm.userId]);
+
+  const handleResetPassword = useCallback(async () => {
+    setError("");
+    try {
+      await client.resetUserPassword({
+        tenantId: auditFilters.tenantId || undefined,
+        userId: passwordResetForm.userId.trim(),
+        newPassword: passwordResetForm.newPassword
+      });
+      setPasswordResetForm({
+        userId: "",
+        newPassword: ""
+      });
+      await refreshDashboard();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
+    }
+  }, [auditFilters.tenantId, client, passwordResetForm.newPassword, passwordResetForm.userId, refreshDashboard]);
+
+  const handleUpdateMembership = useCallback(async () => {
+    setError("");
+    try {
+      await client.updateUserMemberships({
+        tenantId: auditFilters.tenantId || undefined,
+        userId: membershipForm.userId.trim(),
+        memberships: [
+          {
+            workspaceId: membershipForm.workspaceId.trim() || "w_default",
+            role: normalizeUserRole(membershipForm.role)
+          }
+        ]
+      });
+      await refreshDashboard();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
+    }
+  }, [auditFilters.tenantId, client, membershipForm.role, membershipForm.userId, membershipForm.workspaceId, refreshDashboard]);
+
+  const handleUpsertModelKey = useCallback(async () => {
+    setError("");
+    try {
+      await client.upsertModelKey({
+        tenantId: auditFilters.tenantId || undefined,
+        ...(modelSecretForm.workspaceId.trim() ? { workspaceId: modelSecretForm.workspaceId.trim() } : {}),
+        provider: modelSecretForm.provider.trim() || "openai",
+        apiKey: modelSecretForm.apiKey,
+        ...(modelSecretForm.modelId.trim() ? { modelId: modelSecretForm.modelId.trim() } : {}),
+        ...(modelSecretForm.baseUrl.trim() ? { baseUrl: modelSecretForm.baseUrl.trim() } : {})
+      });
+      setModelSecretForm((prev) => ({
+        ...prev,
+        apiKey: ""
+      }));
+      await refreshDashboard();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
+    }
+  }, [auditFilters.tenantId, client, modelSecretForm, refreshDashboard]);
+
+  const handleSetRuntimeMode = useCallback(
+    async (sessionId: string, runtimeMode: "local" | "cloud") => {
+      setModeUpdatingSessionId(sessionId);
+      setError("");
+      try {
+        await client.setRuntimeMode({
+          sessionId,
+          runtimeMode
+        });
+        await refreshDashboard();
+      } catch (actionError) {
+        setError(actionError instanceof Error ? actionError.message : String(actionError));
+      } finally {
+        setModeUpdatingSessionId("");
+      }
+    },
+    [client, refreshDashboard]
+  );
 
   if (authChecking) {
     return (
@@ -432,6 +598,25 @@ export function App() {
                               {item.id} · context {Math.round(item.contextUsage * 100)}% · compaction {item.compactionCount} ·
                               flush {item.memoryFlushState} · {formatDate(item.updatedAt)}
                             </Typography.Text>
+                            <br />
+                            <Space spacing={6}>
+                              <Button
+                                size="small"
+                                theme={item.runtimeMode === "local" ? "solid" : "light"}
+                                loading={modeUpdatingSessionId === item.id}
+                                onClick={() => void handleSetRuntimeMode(item.id, "local")}
+                              >
+                                本地沙箱
+                              </Button>
+                              <Button
+                                size="small"
+                                theme={item.runtimeMode === "cloud" ? "solid" : "light"}
+                                loading={modeUpdatingSessionId === item.id}
+                                onClick={() => void handleSetRuntimeMode(item.id, "cloud")}
+                              >
+                                企业云
+                              </Button>
+                            </Space>
                           </div>
                         }
                       />
@@ -567,6 +752,229 @@ export function App() {
               </Card>
             </Col>
           </Row>
+
+          <Row gutter={[12, 12]} style={{ marginTop: 4 }}>
+            <Col span={12}>
+              <Card title="账号管理（users.*）">
+                <Space vertical style={{ width: "100%" }}>
+                  <Typography.Text type="tertiary">创建用户</Typography.Text>
+                  <Space wrap>
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="username"
+                      value={createUserForm.username}
+                      onChange={(value) => setCreateUserForm((prev) => ({ ...prev, username: value }))}
+                    />
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="password"
+                      type="password"
+                      value={createUserForm.password}
+                      onChange={(value) => setCreateUserForm((prev) => ({ ...prev, password: value }))}
+                    />
+                    <Input
+                      style={{ width: 130 }}
+                      size="small"
+                      placeholder="displayName"
+                      value={createUserForm.displayName}
+                      onChange={(value) => setCreateUserForm((prev) => ({ ...prev, displayName: value }))}
+                    />
+                    <Input
+                      style={{ width: 150 }}
+                      size="small"
+                      placeholder="email"
+                      value={createUserForm.email}
+                      onChange={(value) => setCreateUserForm((prev) => ({ ...prev, email: value }))}
+                    />
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="workspaceId"
+                      value={createUserForm.workspaceId}
+                      onChange={(value) => setCreateUserForm((prev) => ({ ...prev, workspaceId: value }))}
+                    />
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="role"
+                      value={createUserForm.role}
+                      onChange={(value) => setCreateUserForm((prev) => ({ ...prev, role: normalizeUserRole(value) }))}
+                    />
+                    <Button size="small" theme="solid" onClick={() => void handleCreateUser()}>
+                      创建
+                    </Button>
+                  </Space>
+
+                  <Divider margin="8px" />
+                  <Typography.Text type="tertiary">状态更新 / 密码重置 / 成员绑定</Typography.Text>
+                  <Space wrap>
+                    <Input
+                      style={{ width: 130 }}
+                      size="small"
+                      placeholder="userId"
+                      value={statusForm.userId}
+                      onChange={(value) => setStatusForm((prev) => ({ ...prev, userId: value }))}
+                    />
+                    <Input
+                      style={{ width: 100 }}
+                      size="small"
+                      placeholder="status"
+                      value={statusForm.status}
+                      onChange={(value) => setStatusForm((prev) => ({ ...prev, status: value.trim() === "active" ? "active" : "disabled" }))}
+                    />
+                    <Button size="small" onClick={() => void handleUpdateUserStatus()}>
+                      更新状态
+                    </Button>
+                  </Space>
+                  <Space wrap>
+                    <Input
+                      style={{ width: 130 }}
+                      size="small"
+                      placeholder="userId"
+                      value={passwordResetForm.userId}
+                      onChange={(value) => setPasswordResetForm((prev) => ({ ...prev, userId: value }))}
+                    />
+                    <Input
+                      style={{ width: 150 }}
+                      size="small"
+                      type="password"
+                      placeholder="new password"
+                      value={passwordResetForm.newPassword}
+                      onChange={(value) => setPasswordResetForm((prev) => ({ ...prev, newPassword: value }))}
+                    />
+                    <Button size="small" onClick={() => void handleResetPassword()}>
+                      重置密码
+                    </Button>
+                  </Space>
+                  <Space wrap>
+                    <Input
+                      style={{ width: 130 }}
+                      size="small"
+                      placeholder="userId"
+                      value={membershipForm.userId}
+                      onChange={(value) => setMembershipForm((prev) => ({ ...prev, userId: value }))}
+                    />
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="workspaceId"
+                      value={membershipForm.workspaceId}
+                      onChange={(value) => setMembershipForm((prev) => ({ ...prev, workspaceId: value }))}
+                    />
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="role"
+                      value={membershipForm.role}
+                      onChange={(value) => setMembershipForm((prev) => ({ ...prev, role: normalizeUserRole(value) }))}
+                    />
+                    <Button size="small" onClick={() => void handleUpdateMembership()}>
+                      更新成员关系
+                    </Button>
+                  </Space>
+
+                  <Divider margin="8px" />
+                  <Typography.Text type="tertiary">租户用户列表</Typography.Text>
+                  {users.length === 0 ? (
+                    <Typography.Text type="tertiary">No users</Typography.Text>
+                  ) : (
+                    <List
+                      dataSource={users}
+                      renderItem={(item: GatewayTenantUser) => (
+                        <List.Item
+                          main={
+                            <div>
+                              <Typography.Text>
+                                {item.user.username} ({item.user.status}) · {item.user.source}
+                              </Typography.Text>
+                              <br />
+                              <Typography.Text type="tertiary" size="small">
+                                {item.user.id} · default {item.tenant.defaultWorkspaceId} · memberships{" "}
+                                {item.memberships.map((membership) => `${membership.workspaceId}:${membership.role}`).join(", ")}
+                              </Typography.Text>
+                            </div>
+                          }
+                        />
+                      )}
+                    />
+                  )}
+                </Space>
+              </Card>
+            </Col>
+
+            <Col span={12}>
+              <Card title="模型密钥（secrets.*）">
+                <Space vertical style={{ width: "100%" }}>
+                  <Space wrap>
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="provider"
+                      value={modelSecretForm.provider}
+                      onChange={(value) => setModelSecretForm((prev) => ({ ...prev, provider: value }))}
+                    />
+                    <Input
+                      style={{ width: 120 }}
+                      size="small"
+                      placeholder="workspaceId(optional)"
+                      value={modelSecretForm.workspaceId}
+                      onChange={(value) => setModelSecretForm((prev) => ({ ...prev, workspaceId: value }))}
+                    />
+                    <Input
+                      style={{ width: 140 }}
+                      size="small"
+                      placeholder="modelId(optional)"
+                      value={modelSecretForm.modelId}
+                      onChange={(value) => setModelSecretForm((prev) => ({ ...prev, modelId: value }))}
+                    />
+                    <Input
+                      style={{ width: 180 }}
+                      size="small"
+                      placeholder="baseUrl(optional)"
+                      value={modelSecretForm.baseUrl}
+                      onChange={(value) => setModelSecretForm((prev) => ({ ...prev, baseUrl: value }))}
+                    />
+                    <Input
+                      style={{ width: 160 }}
+                      size="small"
+                      type="password"
+                      placeholder="apiKey"
+                      value={modelSecretForm.apiKey}
+                      onChange={(value) => setModelSecretForm((prev) => ({ ...prev, apiKey: value }))}
+                    />
+                    <Button size="small" theme="solid" onClick={() => void handleUpsertModelKey()}>
+                      保存密钥
+                    </Button>
+                  </Space>
+                  {modelSecrets.length === 0 ? (
+                    <Typography.Text type="tertiary">No model secrets</Typography.Text>
+                  ) : (
+                    <List
+                      dataSource={modelSecrets}
+                      renderItem={(item: GatewayModelKeyMeta) => (
+                        <List.Item
+                          main={
+                            <div>
+                              <Typography.Text>
+                                {item.provider} · {item.maskedKey} · updated by {item.updatedBy}
+                              </Typography.Text>
+                              <br />
+                              <Typography.Text type="tertiary" size="small">
+                                tenant={item.tenantId} · workspace={item.workspaceId ?? "tenant"} · modelId={item.modelId ?? "-"} ·{" "}
+                                {formatDate(item.updatedAt)}
+                              </Typography.Text>
+                            </div>
+                          }
+                        />
+                      )}
+                    />
+                  )}
+                </Space>
+              </Card>
+            </Col>
+          </Row>
         </Layout.Content>
       </Layout>
     </Layout>
@@ -599,6 +1007,13 @@ function formatDate(input: string | undefined): string {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function normalizeUserRole(value: unknown): UserRole {
+  if (value === "tenant_admin" || value === "workspace_admin") {
+    return value;
+  }
+  return "member";
 }
 
 function normalizeAuditFilters(source: AuditFilters): AuditFilters {

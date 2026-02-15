@@ -140,6 +140,52 @@ export interface AuditRepository {
   query(params?: AuditQuery): Promise<AuditQueryResult>;
 }
 
+export interface ModelSecretRecord {
+  tenantId: string;
+  workspaceId?: string;
+  provider: string;
+  modelId?: string;
+  baseUrl?: string;
+  apiKey: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface ModelSecretMetaRecord {
+  tenantId: string;
+  workspaceId?: string;
+  provider: string;
+  modelId?: string;
+  baseUrl?: string;
+  maskedKey: string;
+  keyLast4: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface ModelSecretRepository {
+  upsert(input: {
+    tenantId: string;
+    workspaceId?: string;
+    provider: string;
+    modelId?: string;
+    baseUrl?: string;
+    apiKey: string;
+    updatedBy?: string;
+    updatedAt?: string;
+  }): Promise<ModelSecretRecord>;
+  getForRun(input: {
+    tenantId: string;
+    workspaceId?: string;
+    provider?: string;
+  }): Promise<ModelSecretRecord | undefined>;
+  listMeta(filter: {
+    tenantId: string;
+    workspaceId?: string;
+    provider?: string;
+  }): Promise<ModelSecretMetaRecord[]>;
+}
+
 export class InMemoryAgentRepository implements AgentRepository {
   private readonly items = new Map<string, AgentDefinitionRecord>();
 
@@ -1014,6 +1060,358 @@ export class SqliteAuditRepository implements AuditRepository {
   }
 }
 
+export class InMemoryModelSecretRepository implements ModelSecretRepository {
+  private readonly items = new Map<string, ModelSecretRecord>();
+
+  async upsert(input: {
+    tenantId: string;
+    workspaceId?: string;
+    provider: string;
+    modelId?: string;
+    baseUrl?: string;
+    apiKey: string;
+    updatedBy?: string;
+    updatedAt?: string;
+  }): Promise<ModelSecretRecord> {
+    const next = normalizeModelSecret({
+      tenantId: input.tenantId,
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      provider: input.provider,
+      ...(input.modelId ? { modelId: input.modelId } : {}),
+      ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
+      apiKey: input.apiKey,
+      updatedBy: sanitizeId(input.updatedBy, "system"),
+      updatedAt: input.updatedAt ?? nowIso()
+    });
+    this.items.set(modelSecretKey(next.tenantId, next.workspaceId, next.provider), next);
+    return cloneModelSecret(next);
+  }
+
+  async getForRun(input: {
+    tenantId: string;
+    workspaceId?: string;
+    provider?: string;
+  }): Promise<ModelSecretRecord | undefined> {
+    const tenantId = sanitizeId(input.tenantId, "t_default");
+    const workspaceId = input.workspaceId ? sanitizeId(input.workspaceId, "w_default") : undefined;
+    const provider = sanitizeProvider(input.provider);
+
+    if (provider && workspaceId) {
+      const exactWorkspace = this.items.get(modelSecretKey(tenantId, workspaceId, provider));
+      if (exactWorkspace) {
+        return cloneModelSecret(exactWorkspace);
+      }
+    }
+    if (provider) {
+      const tenantDefault = this.items.get(modelSecretKey(tenantId, undefined, provider));
+      if (tenantDefault) {
+        return cloneModelSecret(tenantDefault);
+      }
+      return undefined;
+    }
+
+    const all = Array.from(this.items.values())
+      .filter((item) => item.tenantId === tenantId)
+      .sort((a, b) => {
+        const aScore = workspaceId && a.workspaceId === workspaceId ? 0 : a.workspaceId ? 1 : 2;
+        const bScore = workspaceId && b.workspaceId === workspaceId ? 0 : b.workspaceId ? 1 : 2;
+        if (aScore !== bScore) {
+          return aScore - bScore;
+        }
+        return a.provider.localeCompare(b.provider);
+      });
+    return all[0] ? cloneModelSecret(all[0]) : undefined;
+  }
+
+  async listMeta(filter: {
+    tenantId: string;
+    workspaceId?: string;
+    provider?: string;
+  }): Promise<ModelSecretMetaRecord[]> {
+    const tenantId = sanitizeId(filter.tenantId, "t_default");
+    const workspaceId = filter.workspaceId ? sanitizeId(filter.workspaceId, "w_default") : undefined;
+    const provider = sanitizeProvider(filter.provider);
+    return Array.from(this.items.values())
+      .filter((item) => item.tenantId === tenantId)
+      .filter((item) => (workspaceId !== undefined ? (item.workspaceId ?? "") === workspaceId : true))
+      .filter((item) => (provider ? item.provider === provider : true))
+      .sort((a, b) => a.provider.localeCompare(b.provider))
+      .map((item) => toModelSecretMeta(item));
+  }
+}
+
+export class SqliteModelSecretRepository implements ModelSecretRepository {
+  private readonly dbPath: string;
+
+  constructor(dbPath = defaultSqlitePath()) {
+    this.dbPath = normalizeDbPath(dbPath);
+  }
+
+  async upsert(input: {
+    tenantId: string;
+    workspaceId?: string;
+    provider: string;
+    modelId?: string;
+    baseUrl?: string;
+    apiKey: string;
+    updatedBy?: string;
+    updatedAt?: string;
+  }): Promise<ModelSecretRecord> {
+    ensureP2Schema(this.dbPath);
+    const next = normalizeModelSecret({
+      tenantId: input.tenantId,
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      provider: input.provider,
+      ...(input.modelId ? { modelId: input.modelId } : {}),
+      ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
+      apiKey: input.apiKey,
+      updatedBy: sanitizeId(input.updatedBy, "system"),
+      updatedAt: input.updatedAt ?? nowIso()
+    });
+    execSql(
+      this.dbPath,
+      `
+        INSERT INTO model_secrets (
+          tenant_id,
+          workspace_id,
+          provider,
+          model_id,
+          base_url,
+          api_key,
+          updated_by,
+          updated_at
+        )
+        VALUES (
+          ${sqlString(next.tenantId)},
+          ${sqlMaybeString(next.workspaceId)},
+          ${sqlString(next.provider)},
+          ${sqlMaybeString(next.modelId)},
+          ${sqlMaybeString(next.baseUrl)},
+          ${sqlString(next.apiKey)},
+          ${sqlString(next.updatedBy)},
+          ${sqlString(next.updatedAt)}
+        )
+        ON CONFLICT(tenant_id, workspace_id, provider) DO UPDATE SET
+          model_id = excluded.model_id,
+          base_url = excluded.base_url,
+          api_key = excluded.api_key,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at;
+      `
+    );
+    return (
+      await this.getForRun({
+        tenantId: next.tenantId,
+        ...(next.workspaceId ? { workspaceId: next.workspaceId } : {}),
+        provider: next.provider
+      })
+    )!;
+  }
+
+  async getForRun(input: {
+    tenantId: string;
+    workspaceId?: string;
+    provider?: string;
+  }): Promise<ModelSecretRecord | undefined> {
+    ensureP2Schema(this.dbPath);
+    const tenantId = sanitizeId(input.tenantId, "t_default");
+    const workspaceId = input.workspaceId ? sanitizeId(input.workspaceId, "w_default") : undefined;
+    const provider = sanitizeProvider(input.provider);
+
+    if (provider && workspaceId) {
+      const workspaceRows = queryJson<{
+        tenantId: string;
+        workspaceId: string | null;
+        provider: string;
+        modelId: string | null;
+        baseUrl: string | null;
+        apiKey: string;
+        updatedBy: string;
+        updatedAt: string;
+      }>(
+        this.dbPath,
+        `
+          SELECT
+            tenant_id AS tenantId,
+            workspace_id AS workspaceId,
+            provider AS provider,
+            model_id AS modelId,
+            base_url AS baseUrl,
+            api_key AS apiKey,
+            updated_by AS updatedBy,
+            updated_at AS updatedAt
+          FROM model_secrets
+          WHERE tenant_id = ${sqlString(tenantId)}
+            AND workspace_id = ${sqlString(workspaceId)}
+            AND provider = ${sqlString(provider)}
+          LIMIT 1;
+        `
+      );
+      if (workspaceRows[0]) {
+        return normalizeModelSecret({
+          tenantId: workspaceRows[0].tenantId,
+          workspaceId: workspaceRows[0].workspaceId ?? undefined,
+          provider: workspaceRows[0].provider,
+          modelId: workspaceRows[0].modelId ?? undefined,
+          baseUrl: workspaceRows[0].baseUrl ?? undefined,
+          apiKey: workspaceRows[0].apiKey,
+          updatedBy: workspaceRows[0].updatedBy,
+          updatedAt: workspaceRows[0].updatedAt
+        });
+      }
+    }
+
+    if (provider) {
+      const tenantRows = queryJson<{
+        tenantId: string;
+        workspaceId: string | null;
+        provider: string;
+        modelId: string | null;
+        baseUrl: string | null;
+        apiKey: string;
+        updatedBy: string;
+        updatedAt: string;
+      }>(
+        this.dbPath,
+        `
+          SELECT
+            tenant_id AS tenantId,
+            workspace_id AS workspaceId,
+            provider AS provider,
+            model_id AS modelId,
+            base_url AS baseUrl,
+            api_key AS apiKey,
+            updated_by AS updatedBy,
+            updated_at AS updatedAt
+          FROM model_secrets
+          WHERE tenant_id = ${sqlString(tenantId)}
+            AND workspace_id IS NULL
+            AND provider = ${sqlString(provider)}
+          LIMIT 1;
+        `
+      );
+      if (tenantRows[0]) {
+        return normalizeModelSecret({
+          tenantId: tenantRows[0].tenantId,
+          workspaceId: tenantRows[0].workspaceId ?? undefined,
+          provider: tenantRows[0].provider,
+          modelId: tenantRows[0].modelId ?? undefined,
+          baseUrl: tenantRows[0].baseUrl ?? undefined,
+          apiKey: tenantRows[0].apiKey,
+          updatedBy: tenantRows[0].updatedBy,
+          updatedAt: tenantRows[0].updatedAt
+        });
+      }
+      return undefined;
+    }
+
+    const allRows = queryJson<{
+      tenantId: string;
+      workspaceId: string | null;
+      provider: string;
+      modelId: string | null;
+      baseUrl: string | null;
+      apiKey: string;
+      updatedBy: string;
+      updatedAt: string;
+    }>(
+      this.dbPath,
+      `
+        SELECT
+          tenant_id AS tenantId,
+          workspace_id AS workspaceId,
+          provider AS provider,
+          model_id AS modelId,
+          base_url AS baseUrl,
+          api_key AS apiKey,
+          updated_by AS updatedBy,
+          updated_at AS updatedAt
+        FROM model_secrets
+        WHERE tenant_id = ${sqlString(tenantId)}
+        ORDER BY provider ASC;
+      `
+    );
+    const ranked = allRows
+      .map((row) =>
+        normalizeModelSecret({
+          tenantId: row.tenantId,
+          workspaceId: row.workspaceId ?? undefined,
+          provider: row.provider,
+          modelId: row.modelId ?? undefined,
+          baseUrl: row.baseUrl ?? undefined,
+          apiKey: row.apiKey,
+          updatedBy: row.updatedBy,
+          updatedAt: row.updatedAt
+        })
+      )
+      .sort((a, b) => {
+        const aScore = workspaceId && a.workspaceId === workspaceId ? 0 : a.workspaceId ? 1 : 2;
+        const bScore = workspaceId && b.workspaceId === workspaceId ? 0 : b.workspaceId ? 1 : 2;
+        if (aScore !== bScore) {
+          return aScore - bScore;
+        }
+        return a.provider.localeCompare(b.provider);
+      });
+    return ranked[0];
+  }
+
+  async listMeta(filter: {
+    tenantId: string;
+    workspaceId?: string;
+    provider?: string;
+  }): Promise<ModelSecretMetaRecord[]> {
+    ensureP2Schema(this.dbPath);
+    const where: string[] = [`tenant_id = ${sqlString(sanitizeId(filter.tenantId, "t_default"))}`];
+    if (filter.workspaceId !== undefined) {
+      where.push(`COALESCE(workspace_id, '') = ${sqlString(sanitizeId(filter.workspaceId, "w_default"))}`);
+    }
+    if (filter.provider) {
+      where.push(`provider = ${sqlString(sanitizeProvider(filter.provider))}`);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = queryJson<{
+      tenantId: string;
+      workspaceId: string | null;
+      provider: string;
+      modelId: string | null;
+      baseUrl: string | null;
+      apiKey: string;
+      updatedBy: string;
+      updatedAt: string;
+    }>(
+      this.dbPath,
+      `
+        SELECT
+          tenant_id AS tenantId,
+          workspace_id AS workspaceId,
+          provider AS provider,
+          model_id AS modelId,
+          base_url AS baseUrl,
+          api_key AS apiKey,
+          updated_by AS updatedBy,
+          updated_at AS updatedAt
+        FROM model_secrets
+        ${whereSql}
+        ORDER BY provider ASC;
+      `
+    );
+    return rows.map((row) =>
+      toModelSecretMeta(
+        normalizeModelSecret({
+          tenantId: row.tenantId,
+          workspaceId: row.workspaceId ?? undefined,
+          provider: row.provider,
+          modelId: row.modelId ?? undefined,
+          baseUrl: row.baseUrl ?? undefined,
+          apiKey: row.apiKey,
+          updatedBy: row.updatedBy,
+          updatedAt: row.updatedAt
+        })
+      )
+    );
+  }
+}
+
 const initializedDbPaths = new Set<string>();
 
 function ensureP2Schema(dbPath: string): void {
@@ -1093,6 +1491,21 @@ function ensureP2Schema(dbPath: string): void {
 
       CREATE INDEX IF NOT EXISTS idx_audit_logs_lookup
       ON audit_logs(tenant_id, workspace_id, action, created_at DESC, id DESC);
+
+      CREATE TABLE IF NOT EXISTS model_secrets (
+        tenant_id TEXT NOT NULL,
+        workspace_id TEXT,
+        provider TEXT NOT NULL,
+        model_id TEXT,
+        base_url TEXT,
+        api_key TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, workspace_id, provider)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_model_secrets_lookup
+      ON model_secrets(tenant_id, workspace_id, provider, updated_at DESC);
     `
   );
 
@@ -1222,6 +1635,61 @@ function cloneTarget(item: ExecutionTargetRecord): ExecutionTargetRecord {
   };
 }
 
+function cloneModelSecret(item: ModelSecretRecord): ModelSecretRecord {
+  return {
+    ...item,
+    ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}),
+    ...(item.modelId ? { modelId: item.modelId } : {}),
+    ...(item.baseUrl ? { baseUrl: item.baseUrl } : {})
+  };
+}
+
+function normalizeModelSecret(input: ModelSecretRecord): ModelSecretRecord {
+  return {
+    tenantId: sanitizeId(input.tenantId, "t_default"),
+    ...(input.workspaceId ? { workspaceId: sanitizeId(input.workspaceId, "w_default") } : {}),
+    provider: sanitizeProvider(input.provider),
+    ...(input.modelId ? { modelId: sanitizeId(input.modelId, input.modelId) } : {}),
+    ...(input.baseUrl ? { baseUrl: input.baseUrl.trim() } : {}),
+    apiKey: String(input.apiKey ?? "").trim(),
+    updatedBy: sanitizeId(input.updatedBy, "system"),
+    updatedAt: input.updatedAt
+  };
+}
+
+function toModelSecretMeta(input: ModelSecretRecord): ModelSecretMetaRecord {
+  return {
+    tenantId: input.tenantId,
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    provider: input.provider,
+    ...(input.modelId ? { modelId: input.modelId } : {}),
+    ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
+    maskedKey: maskSecret(input.apiKey),
+    keyLast4: input.apiKey.slice(-4),
+    updatedBy: input.updatedBy,
+    updatedAt: input.updatedAt
+  };
+}
+
+function modelSecretKey(tenantId: string, workspaceId: string | undefined, provider: string): string {
+  return `${sanitizeId(tenantId, "t_default")}::${workspaceId ? sanitizeId(workspaceId, "w_default") : "*"}::${sanitizeProvider(provider)}`;
+}
+
+function sanitizeProvider(value: unknown): string {
+  return sanitizeId(value, "openai").toLowerCase();
+}
+
+function maskSecret(value: string): string {
+  const raw = String(value ?? "");
+  if (raw.length <= 4) {
+    return "****";
+  }
+  if (raw.length <= 8) {
+    return `${raw.slice(0, 1)}***${raw.slice(-2)}`;
+  }
+  return `${raw.slice(0, 2)}***${raw.slice(-4)}`;
+}
+
 function cloneBudgetPolicy(item: BudgetPolicyRecord): BudgetPolicyRecord {
   return { ...item };
 }
@@ -1248,12 +1716,12 @@ function normalizeNullableLimit(value: number | null): number | null {
   return round6(value);
 }
 
-function sanitizeId(value: string, fallback: string): string {
+function sanitizeId(value: unknown, fallback: string): string {
   const compact = String(value ?? "").trim();
   return compact.length > 0 ? compact : fallback;
 }
 
-function sanitizeName(value: string, fallback: string): string {
+function sanitizeName(value: unknown, fallback: string): string {
   const compact = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!compact) {
     return fallback;

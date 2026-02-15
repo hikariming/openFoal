@@ -4,10 +4,18 @@ export type PolicyDecision = "deny" | "allow";
 
 type GatewayMethod =
   | "connect"
+  | "runtime.setMode"
   | "sessions.list"
   | "policy.get"
   | "audit.query"
-  | "metrics.summary";
+  | "metrics.summary"
+  | "users.list"
+  | "users.create"
+  | "users.updateStatus"
+  | "users.resetPassword"
+  | "users.updateMemberships"
+  | "secrets.upsertModelKey"
+  | "secrets.getModelKeyMeta";
 
 interface RpcRequestFrame {
   type: "req";
@@ -53,7 +61,14 @@ interface RpcSuccessEnvelope {
   events: RpcEvent[];
 }
 
-const SIDE_EFFECT_METHODS = new Set<GatewayMethod>();
+const SIDE_EFFECT_METHODS = new Set<GatewayMethod>([
+  "runtime.setMode",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword",
+  "users.updateMemberships",
+  "secrets.upsertModelKey"
+]);
 
 export type GatewaySession = {
   id: string;
@@ -85,6 +100,48 @@ export type GatewayMetricsSummary = {
   toolCallsTotal: number;
   toolFailures: number;
   p95LatencyMs: number;
+};
+
+export type UserRole = "tenant_admin" | "workspace_admin" | "member";
+export type UserStatus = "active" | "disabled";
+export type ExecutionMode = "local_sandbox" | "enterprise_cloud";
+
+export type GatewayUserMembership = {
+  workspaceId: string;
+  role: UserRole;
+  updatedAt?: string;
+};
+
+export type GatewayTenantUser = {
+  user: {
+    id: string;
+    username: string;
+    displayName?: string;
+    email?: string;
+    status: UserStatus;
+    source: "local" | "external";
+    lastLoginAt?: string;
+  };
+  tenant: {
+    tenantId: string;
+    userId: string;
+    defaultWorkspaceId: string;
+    status: UserStatus;
+    updatedAt?: string;
+  };
+  memberships: GatewayUserMembership[];
+};
+
+export type GatewayModelKeyMeta = {
+  tenantId: string;
+  workspaceId?: string;
+  provider: string;
+  modelId?: string;
+  baseUrl?: string;
+  maskedKey: string;
+  keyLast4: string;
+  updatedBy: string;
+  updatedAt: string;
 };
 
 export type GatewayAuditItem = {
@@ -230,6 +287,152 @@ export class GatewayClient {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid metrics.summary payload");
     }
     return metrics;
+  }
+
+  async listUsers(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewayTenantUser[]> {
+    await this.ensureConnected();
+    const result = await this.request("users.list", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
+    });
+    const items = result.response.payload.items;
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.filter(isGatewayTenantUser);
+  }
+
+  async createUser(input: {
+    tenantId?: string;
+    username: string;
+    password: string;
+    displayName?: string;
+    email?: string;
+    status?: UserStatus;
+    memberships: GatewayUserMembership[];
+  }): Promise<GatewayTenantUser | null> {
+    await this.ensureConnected();
+    const result = await this.request("users.create", {
+      idempotencyKey: createIdempotencyKey("users_create"),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      username: input.username,
+      password: input.password,
+      ...(input.displayName ? { displayName: input.displayName } : {}),
+      ...(input.email ? { email: input.email } : {}),
+      ...(input.status ? { status: input.status } : {}),
+      memberships: input.memberships.map((item) => ({
+        workspaceId: item.workspaceId,
+        role: item.role
+      }))
+    });
+    const user = result.response.payload.user;
+    return isGatewayTenantUser(user) ? user : null;
+  }
+
+  async updateUserStatus(input: {
+    tenantId?: string;
+    userId: string;
+    status: UserStatus;
+  }): Promise<void> {
+    await this.ensureConnected();
+    await this.request("users.updateStatus", {
+      idempotencyKey: createIdempotencyKey("users_update_status"),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      userId: input.userId,
+      status: input.status
+    });
+  }
+
+  async resetUserPassword(input: {
+    tenantId?: string;
+    userId: string;
+    newPassword: string;
+  }): Promise<void> {
+    await this.ensureConnected();
+    await this.request("users.resetPassword", {
+      idempotencyKey: createIdempotencyKey("users_reset_password"),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      userId: input.userId,
+      newPassword: input.newPassword
+    });
+  }
+
+  async updateUserMemberships(input: {
+    tenantId?: string;
+    userId: string;
+    memberships: GatewayUserMembership[];
+  }): Promise<GatewayUserMembership[]> {
+    await this.ensureConnected();
+    const result = await this.request("users.updateMemberships", {
+      idempotencyKey: createIdempotencyKey("users_update_memberships"),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      userId: input.userId,
+      memberships: input.memberships.map((item) => ({
+        workspaceId: item.workspaceId,
+        role: item.role
+      }))
+    });
+    const memberships = result.response.payload.memberships;
+    if (!Array.isArray(memberships)) {
+      return [];
+    }
+    return memberships.filter(isGatewayUserMembership);
+  }
+
+  async upsertModelKey(input: {
+    tenantId?: string;
+    workspaceId?: string;
+    provider: string;
+    apiKey: string;
+    modelId?: string;
+    baseUrl?: string;
+  }): Promise<GatewayModelKeyMeta | null> {
+    await this.ensureConnected();
+    const result = await this.request("secrets.upsertModelKey", {
+      idempotencyKey: createIdempotencyKey("secrets_upsert_model_key"),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      provider: input.provider,
+      apiKey: input.apiKey,
+      ...(input.modelId ? { modelId: input.modelId } : {}),
+      ...(input.baseUrl ? { baseUrl: input.baseUrl } : {})
+    });
+    const secret = result.response.payload.secret;
+    return isGatewayModelKeyMeta(secret) ? secret : null;
+  }
+
+  async getModelKeyMeta(params: {
+    tenantId?: string;
+    workspaceId?: string;
+    provider?: string;
+  } = {}): Promise<GatewayModelKeyMeta[]> {
+    await this.ensureConnected();
+    const result = await this.request("secrets.getModelKeyMeta", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.provider ? { provider: params.provider } : {})
+    });
+    const items = result.response.payload.items;
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.filter(isGatewayModelKeyMeta);
+  }
+
+  async setRuntimeMode(input: {
+    sessionId: string;
+    runtimeMode: RuntimeMode;
+  }): Promise<{ executionMode?: ExecutionMode; status?: string }> {
+    await this.ensureConnected();
+    const result = await this.request("runtime.setMode", {
+      idempotencyKey: createIdempotencyKey("runtime_set_mode"),
+      sessionId: input.sessionId,
+      runtimeMode: input.runtimeMode
+    });
+    return {
+      ...(asExecutionMode(result.response.payload.executionMode) ? { executionMode: asExecutionMode(result.response.payload.executionMode) } : {}),
+      ...(typeof result.response.payload.status === "string" ? { status: result.response.payload.status } : {})
+    };
   }
 
   async login(input: { username: string; password: string; tenant?: string }): Promise<Record<string, unknown>> {
@@ -402,6 +605,10 @@ function createConnectionId(): string {
   return `console_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
 }
 
+function createIdempotencyKey(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
 function isRpcEnvelope(value: Partial<RpcEnvelope>): value is RpcEnvelope {
   return Boolean(value.response && typeof value.response === "object" && Array.isArray(value.events));
 }
@@ -463,8 +670,78 @@ function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function isGatewayUserMembership(value: unknown): value is GatewayUserMembership {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return typeof item.workspaceId === "string" && isUserRole(item.role);
+}
+
+function isGatewayTenantUser(value: unknown): value is GatewayTenantUser {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  const user = item.user;
+  const tenant = item.tenant;
+  const memberships = item.memberships;
+  if (!user || typeof user !== "object" || Array.isArray(user)) {
+    return false;
+  }
+  if (!tenant || typeof tenant !== "object" || Array.isArray(tenant)) {
+    return false;
+  }
+  if (!Array.isArray(memberships)) {
+    return false;
+  }
+  const userItem = user as Record<string, unknown>;
+  const tenantItem = tenant as Record<string, unknown>;
+  return (
+    typeof userItem.id === "string" &&
+    typeof userItem.username === "string" &&
+    isUserStatus(userItem.status) &&
+    (userItem.source === "local" || userItem.source === "external") &&
+    typeof tenantItem.tenantId === "string" &&
+    typeof tenantItem.userId === "string" &&
+    typeof tenantItem.defaultWorkspaceId === "string" &&
+    isUserStatus(tenantItem.status) &&
+    memberships.every(isGatewayUserMembership)
+  );
+}
+
+function isGatewayModelKeyMeta(value: unknown): value is GatewayModelKeyMeta {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.tenantId === "string" &&
+    typeof item.provider === "string" &&
+    typeof item.maskedKey === "string" &&
+    typeof item.keyLast4 === "string" &&
+    typeof item.updatedBy === "string" &&
+    typeof item.updatedAt === "string"
+  );
+}
+
 function isPolicyDecision(value: unknown): value is PolicyDecision {
   return value === "deny" || value === "allow";
+}
+
+function isUserRole(value: unknown): value is UserRole {
+  return value === "tenant_admin" || value === "workspace_admin" || value === "member";
+}
+
+function isUserStatus(value: unknown): value is UserStatus {
+  return value === "active" || value === "disabled";
+}
+
+function asExecutionMode(value: unknown): ExecutionMode | undefined {
+  if (value === "local_sandbox" || value === "enterprise_cloud") {
+    return value;
+  }
+  return undefined;
 }
 
 function asPositiveInt(value: unknown): number | undefined {

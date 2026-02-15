@@ -149,79 +149,82 @@ test("AUTH-CT-004 valid external JWT works and member is forbidden on policy.upd
   if (!jwksServer) {
     return;
   }
-
-  const runtime = createGatewayAuthRuntime({
-    config: {
-      mode: "external",
-      enterpriseRequireAuth: true,
-      localJwtSecret: "s",
-      localJwtExpiresSec: 3600,
-      localIssuer: "openfoal-local",
-      localAudience: "openfoal",
-      defaultTenantCode: "default",
-      defaultWorkspaceId: "w_default",
-      defaultAdminUsername: "admin",
-      defaultAdminPassword: "admin123!",
-      jwksUrl: `${jwksServer.baseUrl}/.well-known/jwks.json`,
-      jwtIssuer: "aipt5",
-      jwtAudience: "openfoal-enterprise",
-      externalRoleMap: {
-        ADMIN: "tenant_admin",
-        USER: "member"
-      }
-    },
-    store: new InMemoryAuthStore()
-  });
-
-  const router = createGatewayRouter({
-    authRuntime: runtime
-  });
-  const state = createConnectionState();
-  const token = signRs256(
-    {
-      sub: "aipt5-user-001",
-      tenantId: "t_ext",
-      workspaceIds: ["w_default"],
-      roles: ["USER"],
-      username: "portal-user",
-      iss: "aipt5",
-      aud: "openfoal-enterprise",
-      iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + 3600
-    },
-    {
-      kid: "k1",
-      privateKeyPem: keyPair.privateKey.export({
-        type: "pkcs8",
-        format: "pem"
-      })
-    }
-  );
-
-  const connected = await router.handle(
-    req("r_connect", "connect", {
-      auth: {
-        token
-      }
-    }),
-    state
-  );
-  assert.equal(connected.response.ok, true);
-
-  const denied = await router.handle(
-    req("r_policy_update", "policy.update", {
-      idempotencyKey: "idem_auth_member_forbidden_1",
-      patch: {
-        highRisk: "deny"
+  try {
+    const runtime = createGatewayAuthRuntime({
+      config: {
+        mode: "external",
+        enterpriseRequireAuth: true,
+        localJwtSecret: "s",
+        localJwtExpiresSec: 3600,
+        localIssuer: "openfoal-local",
+        localAudience: "openfoal",
+        defaultTenantCode: "default",
+        defaultWorkspaceId: "w_default",
+        defaultAdminUsername: "admin",
+        defaultAdminPassword: "admin123!",
+        jwksUrl: `${jwksServer.baseUrl}/.well-known/jwks.json`,
+        jwtIssuer: "aipt5",
+        jwtAudience: "openfoal-enterprise",
+        externalRoleMap: {
+          ADMIN: "tenant_admin",
+          USER: "member"
+        }
       },
-      tenantId: "t_ext",
-      workspaceId: "w_default"
-    }),
-    state
-  );
-  assert.equal(denied.response.ok, false);
-  if (!denied.response.ok) {
-    assert.equal(denied.response.error.code, "FORBIDDEN");
+      store: new InMemoryAuthStore()
+    });
+
+    const router = createGatewayRouter({
+      authRuntime: runtime
+    });
+    const state = createConnectionState();
+    const token = signRs256(
+      {
+        sub: "aipt5-user-001",
+        tenantId: "t_ext",
+        workspaceIds: ["w_default"],
+        roles: ["USER"],
+        username: "portal-user",
+        iss: "aipt5",
+        aud: "openfoal-enterprise",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600
+      },
+      {
+        kid: "k1",
+        privateKeyPem: keyPair.privateKey.export({
+          type: "pkcs8",
+          format: "pem"
+        })
+      }
+    );
+
+    const connected = await router.handle(
+      req("r_connect", "connect", {
+        auth: {
+          token
+        }
+      }),
+      state
+    );
+    assert.equal(connected.response.ok, true);
+
+    const denied = await router.handle(
+      req("r_policy_update", "policy.update", {
+        idempotencyKey: "idem_auth_member_forbidden_1",
+        patch: {
+          highRisk: "deny"
+        },
+        tenantId: "t_ext",
+        workspaceId: "w_default"
+      }),
+      state
+    );
+    assert.equal(denied.response.ok, false);
+    if (!denied.response.ok) {
+      assert.equal(denied.response.error.code, "FORBIDDEN");
+    }
+  } finally {
+    await jwksServer.close();
   }
 });
 
@@ -242,103 +245,106 @@ test("AUTH-UT-001 JWKS key rotation accepts new kid after cache refresh", async 
   if (!jwksServer) {
     return;
   }
+  try {
+    let nowMs = Date.now();
+    const runtime = createGatewayAuthRuntime({
+      config: {
+        mode: "external",
+        enterpriseRequireAuth: true,
+        localJwtSecret: "s",
+        localJwtExpiresSec: 3600,
+        localIssuer: "openfoal-local",
+        localAudience: "openfoal",
+        defaultTenantCode: "default",
+        defaultWorkspaceId: "w_default",
+        defaultAdminUsername: "admin",
+        defaultAdminPassword: "admin123!",
+        jwksUrl: `${jwksServer.baseUrl}/.well-known/jwks.json`,
+        jwtIssuer: "aipt5",
+        jwtAudience: "openfoal-enterprise",
+        externalRoleMap: {
+          ADMIN: "tenant_admin",
+          USER: "member"
+        }
+      },
+      store: new InMemoryAuthStore(),
+      now: () => new Date(nowMs)
+    });
+    const router = createGatewayRouter({
+      authRuntime: runtime
+    });
 
-  let nowMs = Date.now();
-  const runtime = createGatewayAuthRuntime({
-    config: {
-      mode: "external",
-      enterpriseRequireAuth: true,
-      localJwtSecret: "s",
-      localJwtExpiresSec: 3600,
-      localIssuer: "openfoal-local",
-      localAudience: "openfoal",
-      defaultTenantCode: "default",
-      defaultWorkspaceId: "w_default",
-      defaultAdminUsername: "admin",
-      defaultAdminPassword: "admin123!",
-      jwksUrl: `${jwksServer.baseUrl}/.well-known/jwks.json`,
-      jwtIssuer: "aipt5",
-      jwtAudience: "openfoal-enterprise",
-      externalRoleMap: {
-        ADMIN: "tenant_admin",
-        USER: "member"
+    const token1 = signRs256(
+      {
+        sub: "ext-rotate-1",
+        tenantId: "t_rotate",
+        workspaceIds: ["w_default"],
+        roles: ["USER"],
+        iss: "aipt5",
+        aud: "openfoal-enterprise",
+        iat: Math.floor(nowMs / 1000),
+        exp: Math.floor(nowMs / 1000) + 3600
+      },
+      {
+        kid: "k1",
+        privateKeyPem: keyPair1.privateKey.export({
+          type: "pkcs8",
+          format: "pem"
+        })
       }
-    },
-    store: new InMemoryAuthStore(),
-    now: () => new Date(nowMs)
-  });
-  const router = createGatewayRouter({
-    authRuntime: runtime
-  });
+    );
+    const state1 = createConnectionState();
+    const connected1 = await router.handle(
+      req("r_connect_rotate_1", "connect", {
+        auth: {
+          token: token1
+        }
+      }),
+      state1
+    );
+    assert.equal(connected1.response.ok, true);
 
-  const token1 = signRs256(
-    {
-      sub: "ext-rotate-1",
-      tenantId: "t_rotate",
-      workspaceIds: ["w_default"],
-      roles: ["USER"],
-      iss: "aipt5",
-      aud: "openfoal-enterprise",
-      iat: Math.floor(nowMs / 1000),
-      exp: Math.floor(nowMs / 1000) + 3600
-    },
-    {
-      kid: "k1",
-      privateKeyPem: keyPair1.privateKey.export({
-        type: "pkcs8",
-        format: "pem"
-      })
-    }
-  );
-  const state1 = createConnectionState();
-  const connected1 = await router.handle(
-    req("r_connect_rotate_1", "connect", {
-      auth: {
-        token: token1
+    jwksPayload.keys = [
+      {
+        ...keyPair2.publicKey.export({ format: "jwk" }),
+        kid: "k2",
+        use: "sig",
+        alg: "RS256"
       }
-    }),
-    state1
-  );
-  assert.equal(connected1.response.ok, true);
-
-  jwksPayload.keys = [
-    {
-      ...keyPair2.publicKey.export({ format: "jwk" }),
-      kid: "k2",
-      use: "sig",
-      alg: "RS256"
-    }
-  ];
-  nowMs += 6 * 60 * 1000;
-  const token2 = signRs256(
-    {
-      sub: "ext-rotate-2",
-      tenantId: "t_rotate",
-      workspaceIds: ["w_default"],
-      roles: ["USER"],
-      iss: "aipt5",
-      aud: "openfoal-enterprise",
-      iat: Math.floor(nowMs / 1000),
-      exp: Math.floor(nowMs / 1000) + 3600
-    },
-    {
-      kid: "k2",
-      privateKeyPem: keyPair2.privateKey.export({
-        type: "pkcs8",
-        format: "pem"
-      })
-    }
-  );
-  const state2 = createConnectionState();
-  const connected2 = await router.handle(
-    req("r_connect_rotate_2", "connect", {
-      auth: {
-        token: token2
+    ];
+    nowMs += 6 * 60 * 1000;
+    const token2 = signRs256(
+      {
+        sub: "ext-rotate-2",
+        tenantId: "t_rotate",
+        workspaceIds: ["w_default"],
+        roles: ["USER"],
+        iss: "aipt5",
+        aud: "openfoal-enterprise",
+        iat: Math.floor(nowMs / 1000),
+        exp: Math.floor(nowMs / 1000) + 3600
+      },
+      {
+        kid: "k2",
+        privateKeyPem: keyPair2.privateKey.export({
+          type: "pkcs8",
+          format: "pem"
+        })
       }
-    }),
-    state2
-  );
-  assert.equal(connected2.response.ok, true);
+    );
+    const state2 = createConnectionState();
+    const connected2 = await router.handle(
+      req("r_connect_rotate_2", "connect", {
+        auth: {
+          token: token2
+        }
+      }),
+      state2
+    );
+    assert.equal(connected2.response.ok, true);
+  } finally {
+    await jwksServer.close();
+  }
 });
 
 test("AUTH-UT-002 claim mapping maps tenantId/workspaces/roles into principal", async (t) => {
@@ -353,68 +359,72 @@ test("AUTH-UT-002 claim mapping maps tenantId/workspaces/roles into principal", 
   if (!jwksServer) {
     return;
   }
-  const nowMs = Date.now();
-  const runtime = createGatewayAuthRuntime({
-    config: {
-      mode: "external",
-      enterpriseRequireAuth: true,
-      localJwtSecret: "s",
-      localJwtExpiresSec: 3600,
-      localIssuer: "openfoal-local",
-      localAudience: "openfoal",
-      defaultTenantCode: "default",
-      defaultWorkspaceId: "w_default",
-      defaultAdminUsername: "admin",
-      defaultAdminPassword: "admin123!",
-      jwksUrl: `${jwksServer.baseUrl}/.well-known/jwks.json`,
-      jwtIssuer: "aipt5",
-      jwtAudience: "openfoal-enterprise",
-      externalRoleMap: {
-        ADMIN: "tenant_admin",
-        USER: "member"
+  try {
+    const nowMs = Date.now();
+    const runtime = createGatewayAuthRuntime({
+      config: {
+        mode: "external",
+        enterpriseRequireAuth: true,
+        localJwtSecret: "s",
+        localJwtExpiresSec: 3600,
+        localIssuer: "openfoal-local",
+        localAudience: "openfoal",
+        defaultTenantCode: "default",
+        defaultWorkspaceId: "w_default",
+        defaultAdminUsername: "admin",
+        defaultAdminPassword: "admin123!",
+        jwksUrl: `${jwksServer.baseUrl}/.well-known/jwks.json`,
+        jwtIssuer: "aipt5",
+        jwtAudience: "openfoal-enterprise",
+        externalRoleMap: {
+          ADMIN: "tenant_admin",
+          USER: "member"
+        }
+      },
+      store: new InMemoryAuthStore()
+    });
+    const router = createGatewayRouter({
+      authRuntime: runtime
+    });
+    const state = createConnectionState();
+    const token = signRs256(
+      {
+        sub: "aipt5-user-claim-001",
+        tenantId: "t_claim",
+        workspaceIds: ["w_claim", "w_claim_2"],
+        roles: ["ADMIN"],
+        preferred_username: "claim-user",
+        iss: "aipt5",
+        aud: "openfoal-enterprise",
+        iat: Math.floor(nowMs / 1000),
+        exp: Math.floor(nowMs / 1000) + 3600
+      },
+      {
+        kid: "k_claim",
+        privateKeyPem: keyPair.privateKey.export({
+          type: "pkcs8",
+          format: "pem"
+        })
       }
-    },
-    store: new InMemoryAuthStore()
-  });
-  const router = createGatewayRouter({
-    authRuntime: runtime
-  });
-  const state = createConnectionState();
-  const token = signRs256(
-    {
-      sub: "aipt5-user-claim-001",
-      tenantId: "t_claim",
-      workspaceIds: ["w_claim", "w_claim_2"],
-      roles: ["ADMIN"],
-      preferred_username: "claim-user",
-      iss: "aipt5",
-      aud: "openfoal-enterprise",
-      iat: Math.floor(nowMs / 1000),
-      exp: Math.floor(nowMs / 1000) + 3600
-    },
-    {
-      kid: "k_claim",
-      privateKeyPem: keyPair.privateKey.export({
-        type: "pkcs8",
-        format: "pem"
-      })
-    }
-  );
+    );
 
-  const connected = await router.handle(
-    req("r_connect_claim_1", "connect", {
-      auth: {
-        token
-      }
-    }),
-    state
-  );
-  assert.equal(connected.response.ok, true);
-  assert.equal(state.principal?.tenantId, "t_claim");
-  assert.equal(state.principal?.authSource, "external");
-  assert.ok(state.principal?.workspaceIds.includes("w_claim"));
-  assert.ok(state.principal?.workspaceIds.includes("w_claim_2"));
-  assert.ok(state.principal?.roles.includes("tenant_admin"));
+    const connected = await router.handle(
+      req("r_connect_claim_1", "connect", {
+        auth: {
+          token
+        }
+      }),
+      state
+    );
+    assert.equal(connected.response.ok, true);
+    assert.equal(state.principal?.tenantId, "t_claim");
+    assert.equal(state.principal?.authSource, "external");
+    assert.ok(state.principal?.workspaceIds.includes("w_claim"));
+    assert.ok(state.principal?.workspaceIds.includes("w_claim_2"));
+    assert.ok(state.principal?.roles.includes("tenant_admin"));
+  } finally {
+    await jwksServer.close();
+  }
 });
 
 test("AUTH-UT-003 scope resolver blocks tenant/workspace mismatch", async () => {
@@ -546,6 +556,16 @@ test("AUTH-UT-004 authorizer role matrix enforces member/workspace_admin/tenant_
     memberState
   );
   assert.equal(memberRead.response.ok, true);
+  const memberUsersList = await router.handle(
+    req("r_member_users_list", "users.list", {
+      tenantId: "t_matrix"
+    }),
+    memberState
+  );
+  assert.equal(memberUsersList.response.ok, false);
+  if (!memberUsersList.response.ok) {
+    assert.equal(memberUsersList.response.error.code, "FORBIDDEN");
+  }
 
   const workspaceAdminState = await connectLocalRole(router, {
     userId: "u_workspace_admin_matrix",
@@ -583,6 +603,65 @@ test("AUTH-UT-004 authorizer role matrix enforces member/workspace_admin/tenant_
   if (!workspaceAdminCrossWorkspace.response.ok) {
     assert.equal(workspaceAdminCrossWorkspace.response.error.code, "WORKSPACE_SCOPE_MISMATCH");
   }
+  const workspaceAdminUsersList = await router.handle(
+    req("r_workspace_admin_users_list", "users.list", {
+      tenantId: "t_matrix"
+    }),
+    workspaceAdminState
+  );
+  assert.equal(workspaceAdminUsersList.response.ok, true);
+  const workspaceAdminUsersCreateDenied = await router.handle(
+    req("r_workspace_admin_users_create_denied", "users.create", {
+      idempotencyKey: "idem_workspace_admin_users_create_1",
+      tenantId: "t_matrix",
+      username: "wa_create_denied",
+      password: "x",
+      memberships: [
+        {
+          workspaceId: "w_alpha",
+          role: "member"
+        }
+      ]
+    }),
+    workspaceAdminState
+  );
+  assert.equal(workspaceAdminUsersCreateDenied.response.ok, false);
+  if (!workspaceAdminUsersCreateDenied.response.ok) {
+    assert.equal(workspaceAdminUsersCreateDenied.response.error.code, "FORBIDDEN");
+  }
+  const workspaceAdminMembershipOk = await router.handle(
+    req("r_workspace_admin_membership_ok", "users.updateMemberships", {
+      idempotencyKey: "idem_workspace_admin_membership_ok_1",
+      tenantId: "t_matrix",
+      userId: "u_workspace_admin_matrix",
+      memberships: [
+        {
+          workspaceId: "w_alpha",
+          role: "workspace_admin"
+        }
+      ]
+    }),
+    workspaceAdminState
+  );
+  assert.equal(workspaceAdminMembershipOk.response.ok, true);
+  const workspaceAdminMembershipDenied = await router.handle(
+    req("r_workspace_admin_membership_denied", "users.updateMemberships", {
+      idempotencyKey: "idem_workspace_admin_membership_denied_1",
+      tenantId: "t_matrix",
+      userId: "u_workspace_admin_matrix",
+      memberships: [
+        {
+          workspaceId: "w_beta",
+          role: "workspace_admin"
+        }
+      ]
+    }),
+    workspaceAdminState
+  );
+  assert.equal(workspaceAdminMembershipDenied.response.ok, false);
+  if (!workspaceAdminMembershipDenied.response.ok) {
+    assert.equal(workspaceAdminMembershipDenied.response.error.code, "WORKSPACE_SCOPE_MISMATCH");
+  }
 
   const tenantAdminState = await connectLocalRole(router, {
     userId: "u_tenant_admin_matrix",
@@ -604,6 +683,73 @@ test("AUTH-UT-004 authorizer role matrix enforces member/workspace_admin/tenant_
     tenantAdminState
   );
   assert.equal(tenantAdminWriteCrossWorkspace.response.ok, true);
+  const tenantAdminSecretWrite = await router.handle(
+    req("r_tenant_admin_secret_write", "secrets.upsertModelKey", {
+      idempotencyKey: "idem_tenant_admin_secret_write_1",
+      tenantId: "t_matrix",
+      workspaceId: "w_any",
+      provider: "openai",
+      apiKey: "sk-tenant-admin-1234"
+    }),
+    tenantAdminState
+  );
+  assert.equal(tenantAdminSecretWrite.response.ok, true);
+});
+
+test("AUTH-IT-001 disabled local user cannot login or call me", async () => {
+  const store = new InMemoryAuthStore();
+  const runtime = createGatewayAuthRuntime({
+    config: {
+      mode: "local",
+      enterpriseRequireAuth: true,
+      localJwtSecret: "disabled_secret",
+      localJwtExpiresSec: 3600,
+      localIssuer: "openfoal-local",
+      localAudience: "openfoal",
+      defaultTenantCode: "default",
+      defaultWorkspaceId: "w_default",
+      defaultAdminUsername: "admin",
+      defaultAdminPassword: "admin123!",
+      externalRoleMap: {
+        ADMIN: "tenant_admin",
+        USER: "member"
+      }
+    },
+    store
+  });
+
+  const login = await runtime.login({
+    tenant: "default",
+    username: "admin",
+    password: "admin123!"
+  });
+  const token = String(login.access_token ?? "");
+  assert.equal(token.length > 0, true);
+
+  const tenant = await store.findTenantByCode("default");
+  assert.ok(tenant);
+  const admin = await store.findLocalUser(tenant.id, "admin");
+  assert.ok(admin);
+  await store.updateUserStatus({
+    tenantId: tenant.id,
+    userId: admin.id,
+    status: "disabled"
+  });
+
+  await assert.rejects(
+    () =>
+      runtime.login({
+        tenant: "default",
+        username: "admin",
+        password: "admin123!"
+      }),
+    (error) => error?.code === "UNAUTHORIZED"
+  );
+
+  await assert.rejects(
+    () => runtime.me(`Bearer ${token}`),
+    (error) => String(error?.message ?? "").includes("账号已禁用")
+  );
 });
 
 function signHs256(payload, secret) {
@@ -714,9 +860,6 @@ async function startJwksServer(payload, t) {
       }
       server.close(() => resolve());
     });
-  t.after(async () => {
-    await close();
-  });
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     close

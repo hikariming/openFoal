@@ -8,6 +8,7 @@ import {
   InMemoryAuditRepository,
   InMemoryBudgetRepository,
   InMemoryExecutionTargetRepository,
+  InMemoryModelSecretRepository,
   InMemoryMetricsRepository,
   InMemoryPolicyRepository,
   InMemorySessionRepository,
@@ -18,6 +19,7 @@ import {
   SqliteBudgetRepository,
   SqliteExecutionTargetRepository,
   SqliteIdempotencyRepository,
+  SqliteModelSecretRepository,
   SqliteMetricsRepository,
   SqlitePolicyRepository,
   SqliteSessionRepository,
@@ -31,8 +33,12 @@ import {
   type ExecutionTargetRecord,
   type ExecutionTargetRepository,
   type IdempotencyRepository,
+  type MembershipRole,
   type MetricsRepository,
   type MetricsScopeFilter,
+  type ModelSecretMetaRecord,
+  type ModelSecretRecord,
+  type ModelSecretRepository,
   type AuthStore,
   type PolicyDecision,
   type PolicyPatch,
@@ -41,6 +47,7 @@ import {
   type RuntimeMode,
   type SessionRecord,
   type SessionRepository,
+  type TenantUserRecord,
   type TranscriptRepository
 } from "../../../packages/storage/dist/index.js";
 import {
@@ -64,6 +71,7 @@ import {
 import {
   AuthHttpError,
   createGatewayAuthRuntime,
+  hashPasswordForStorage,
   resolveAuthRuntimeConfig,
   type GatewayAuthRuntime,
   type Principal
@@ -128,6 +136,16 @@ type DockerRunnerInvokeInput = {
 
 type DockerRunnerInvoker = (input: DockerRunnerInvokeInput) => Promise<ToolResult>;
 
+type GatewayLlmOptions = {
+  modelRef?: string;
+  provider?: string;
+  modelId?: string;
+  apiKey?: string;
+  baseUrl?: string;
+};
+
+type CloudFailurePolicy = "deny" | "fallback_local";
+
 interface GatewayDeps {
   coreService?: CoreService;
   toolExecutor?: ToolExecutor;
@@ -140,6 +158,7 @@ interface GatewayDeps {
   executionTargetRepo?: ExecutionTargetRepository;
   budgetRepo?: BudgetRepository;
   auditRepo?: AuditRepository;
+  modelSecretRepo?: ModelSecretRepository;
   policyRepo?: PolicyRepository;
   metricsRepo?: MetricsRepository;
   authStore?: AuthStore;
@@ -165,6 +184,7 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const executionTargetRepo = deps.executionTargetRepo ?? new InMemoryExecutionTargetRepository();
   const budgetRepo = deps.budgetRepo ?? new InMemoryBudgetRepository();
   const auditRepo = deps.auditRepo ?? new InMemoryAuditRepository();
+  const modelSecretRepo = deps.modelSecretRepo ?? new InMemoryModelSecretRepository();
   const policyRepo = deps.policyRepo ?? new InMemoryPolicyRepository();
   const metricsRepo = deps.metricsRepo ?? new InMemoryMetricsRepository();
   const authStore = deps.authStore ?? new InMemoryAuthStore();
@@ -176,6 +196,7 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   });
   const baseToolExecutor = deps.toolExecutor ?? createLocalToolExecutor();
   const internalToolExecutor = deps.internalToolExecutor ?? baseToolExecutor;
+  const enableCloudProbe = deps.dockerRunnerInvoker === undefined;
   const dockerRunnerInvoker = deps.dockerRunnerInvoker ?? invokeDockerRunnerOverHttp;
   const sessionExecutionTargets = new Map<string, ExecutionTargetRecord>();
   const targetAwareToolExecutor = createExecutionTargetToolExecutor({
@@ -265,13 +286,16 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         executionTargetRepo,
         budgetRepo,
         auditRepo,
+        modelSecretRepo,
         policyRepo,
         metricsRepo,
-        internalToolExecutor,
-        sessionExecutionTargets,
-        now,
-        options
-      );
+        authStore,
+          internalToolExecutor,
+          sessionExecutionTargets,
+          enableCloudProbe,
+          now,
+          options
+        );
 
       if (idempotencyKey && result.response.ok) {
         await idempotencyRepo.set(idempotencyKey, {
@@ -312,6 +336,7 @@ export async function startGatewayServer(options: GatewayServerOptions = {}): Pr
       executionTargetRepo: new SqliteExecutionTargetRepository(options.sqlitePath),
       budgetRepo: new SqliteBudgetRepository(options.sqlitePath),
       auditRepo: new SqliteAuditRepository(options.sqlitePath),
+      modelSecretRepo: new SqliteModelSecretRepository(options.sqlitePath),
       policyRepo: new SqlitePolicyRepository(options.sqlitePath),
       metricsRepo: new SqliteMetricsRepository(options.sqlitePath),
       authStore: new SqliteAuthStore(options.sqlitePath)
@@ -366,10 +391,13 @@ async function route(
   executionTargetRepo: ExecutionTargetRepository,
   budgetRepo: BudgetRepository,
   auditRepo: AuditRepository,
+  modelSecretRepo: ModelSecretRepository,
   policyRepo: PolicyRepository,
   metricsRepo: MetricsRepository,
+  authStore: AuthStore,
   internalToolExecutor: ToolExecutor,
   sessionExecutionTargets: Map<string, ExecutionTargetRecord>,
+  enableCloudProbe: boolean,
   now: () => Date,
   options: GatewayHandleOptions
 ): Promise<GatewayHandleResult> {
@@ -515,6 +543,275 @@ async function route(
       };
     }
 
+    case "users.list": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId");
+      const items = await authStore.listTenantUsers(tenantId);
+      const filtered = workspaceId
+        ? items.filter((item) => item.memberships.some((membership) => membership.workspaceId === workspaceId))
+        : items;
+      return {
+        response: makeSuccessRes(req.id, {
+          items: filtered.map((item) => toTenantUserPayload(item))
+        }),
+        events: []
+      };
+    }
+
+    case "users.create": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const username = requireString(req.params, "username");
+      const password = requireString(req.params, "password");
+      if (!username || !password) {
+        return invalidParams(req.id, "users.create 需要 username 和 password");
+      }
+      const existing = await authStore.findLocalUser(tenantId, username);
+      if (existing) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", "用户已存在"),
+          events: []
+        };
+      }
+      const membershipsInput = readMembershipPatch(
+        req.params,
+        requireString(req.params, "workspaceId") ?? "w_default",
+        normalizeMembershipRole(req.params.role)
+      );
+      const primary = membershipsInput[0];
+      const passwordHash = hashPasswordForStorage(password);
+      const user = await authStore.upsertLocalUser({
+        tenantId,
+        username,
+        passwordHash,
+        ...(requireString(req.params, "displayName") ? { displayName: requireString(req.params, "displayName") } : {}),
+        ...(requireString(req.params, "email") ? { email: requireString(req.params, "email") } : {}),
+        defaultWorkspaceId: primary.workspaceId,
+        role: primary.role
+      });
+      await authStore.replaceWorkspaceMemberships({
+        tenantId,
+        userId: user.id,
+        memberships: membershipsInput
+      });
+      const status = normalizeUserStatus(req.params.status);
+      if (status === "disabled") {
+        await authStore.updateUserStatus({
+          tenantId,
+          userId: user.id,
+          status
+        });
+      }
+      const users = await authStore.listTenantUsers(tenantId);
+      const created = users.find((item) => item.user.id === user.id);
+      await auditRepo.append({
+        tenantId,
+        workspaceId: primary.workspaceId,
+        action: "users.created",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: {
+          username: user.username,
+          status: status ?? "active",
+          memberships: membershipsInput.map((item) => ({
+            workspaceId: item.workspaceId,
+            role: item.role
+          }))
+        },
+        createdAt: now().toISOString()
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          user: created ? toTenantUserPayload(created) : null
+        }),
+        events: []
+      };
+    }
+
+    case "users.updateStatus": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const userId = requireString(req.params, "userId");
+      const status = normalizeUserStatus(req.params.status);
+      if (!userId || !status) {
+        return invalidParams(req.id, "users.updateStatus 需要 userId 和 status(active|disabled)");
+      }
+      const updated = await authStore.updateUserStatus({
+        tenantId,
+        userId,
+        status
+      });
+      if (!updated) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", "用户不存在"),
+          events: []
+        };
+      }
+      const memberships = await authStore.listWorkspaceMemberships(tenantId, userId);
+      await auditRepo.append({
+        tenantId,
+        workspaceId: memberships[0]?.workspaceId ?? "w_default",
+        action: "users.status_changed",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: {
+          status
+        },
+        createdAt: now().toISOString()
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          user: toUserPayload(updated),
+          status
+        }),
+        events: []
+      };
+    }
+
+    case "users.resetPassword": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const userId = requireString(req.params, "userId");
+      const nextPassword = requireString(req.params, "newPassword");
+      if (!userId || !nextPassword) {
+        return invalidParams(req.id, "users.resetPassword 需要 userId 和 newPassword");
+      }
+      const updated = await authStore.setLocalUserPassword({
+        tenantId,
+        userId,
+        passwordHash: hashPasswordForStorage(nextPassword)
+      });
+      if (!updated) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", "用户不存在或不是本地账号"),
+          events: []
+        };
+      }
+      const memberships = await authStore.listWorkspaceMemberships(tenantId, userId);
+      await auditRepo.append({
+        tenantId,
+        workspaceId: memberships[0]?.workspaceId ?? "w_default",
+        action: "users.password_reset",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: {
+          source: updated.source
+        },
+        createdAt: now().toISOString()
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          ok: true
+        }),
+        events: []
+      };
+    }
+
+    case "users.updateMemberships": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const userId = requireString(req.params, "userId");
+      if (!userId) {
+        return invalidParams(req.id, "users.updateMemberships 需要 userId");
+      }
+      if (!Array.isArray(req.params.memberships)) {
+        return invalidParams(req.id, "users.updateMemberships 需要 memberships 数组");
+      }
+      const membershipsInput = readMembershipPatch(req.params, "w_default", "member");
+      const memberships = await authStore.replaceWorkspaceMemberships({
+        tenantId,
+        userId,
+        memberships: membershipsInput
+      });
+      if (memberships.length === 0) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", "membership 更新失败"),
+          events: []
+        };
+      }
+      await auditRepo.append({
+        tenantId,
+        workspaceId: memberships[0]?.workspaceId ?? "w_default",
+        action: "users.memberships_updated",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: {
+          memberships: memberships.map((item) => ({
+            workspaceId: item.workspaceId,
+            role: item.role
+          }))
+        },
+        createdAt: now().toISOString()
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          memberships: memberships.map((item) => ({
+            tenantId: item.tenantId,
+            workspaceId: item.workspaceId,
+            userId: item.userId,
+            role: item.role,
+            updatedAt: item.updatedAt
+          }))
+        }),
+        events: []
+      };
+    }
+
+    case "secrets.upsertModelKey": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const provider = requireString(req.params, "provider");
+      const apiKey = requireString(req.params, "apiKey");
+      if (!provider || !apiKey) {
+        return invalidParams(req.id, "secrets.upsertModelKey 需要 provider 和 apiKey");
+      }
+      const workspaceId = requireString(req.params, "workspaceId");
+      const updated = await modelSecretRepo.upsert({
+        tenantId,
+        ...(workspaceId ? { workspaceId } : {}),
+        provider,
+        ...(requireString(req.params, "modelId") ? { modelId: requireString(req.params, "modelId") } : {}),
+        ...(requireString(req.params, "baseUrl") ? { baseUrl: requireString(req.params, "baseUrl") } : {}),
+        apiKey,
+        updatedBy: requireString(req.params, "actor") ?? "system",
+        updatedAt: now().toISOString()
+      });
+      await auditRepo.append({
+        tenantId,
+        workspaceId: workspaceId ?? "w_default",
+        action: "secrets.model_key_upserted",
+        actor: requireString(req.params, "actor") ?? "system",
+        resourceType: "model_secret",
+        resourceId: `${workspaceId ?? "tenant"}:${provider}`,
+        metadata: {
+          provider: updated.provider,
+          workspaceId: updated.workspaceId,
+          modelId: updated.modelId
+        },
+        createdAt: now().toISOString()
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          secret: toModelSecretMetaPayload(updated)
+        }),
+        events: []
+      };
+    }
+
+    case "secrets.getModelKeyMeta": {
+      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const items = await modelSecretRepo.listMeta({
+        tenantId,
+        ...(requireString(req.params, "workspaceId") ? { workspaceId: requireString(req.params, "workspaceId") } : {}),
+        ...(requireString(req.params, "provider") ? { provider: requireString(req.params, "provider") } : {})
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          items: items.map((item) => toModelSecretMetaPayload(item))
+        }),
+        events: []
+      };
+    }
+
     case "executionTargets.list": {
       const tenantId = requireString(req.params, "tenantId") ?? "t_default";
       const workspaceId = requireString(req.params, "workspaceId");
@@ -619,13 +916,32 @@ async function route(
       if (!sessionId || !runtimeMode) {
         return invalidParams(req.id, "runtime.setMode 需要 sessionId 和 runtimeMode(local|cloud)");
       }
+      const auditTenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+      const auditWorkspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
+      const auditActor = requireString(req.params, "actor") ?? state.principal?.displayName ?? state.principal?.subject ?? "system";
+      const executionMode = runtimeMode === "local" ? "local_sandbox" : "enterprise_cloud";
 
       if (state.runningSessionIds.has(sessionId)) {
         state.queuedModeChanges.set(sessionId, runtimeMode);
+        await auditRepo.append({
+          tenantId: auditTenantId,
+          workspaceId: auditWorkspaceId,
+          action: "execution.mode_changed",
+          actor: auditActor,
+          resourceType: "session",
+          resourceId: sessionId,
+          metadata: {
+            runtimeMode,
+            executionMode,
+            status: "queued-change"
+          },
+          createdAt: now().toISOString()
+        });
         return {
           response: makeSuccessRes(req.id, {
             sessionId,
             runtimeMode,
+            executionMode,
             status: "queued-change",
             effectiveOn: "next_turn"
           }),
@@ -641,6 +957,21 @@ async function route(
         };
       }
 
+      await auditRepo.append({
+        tenantId: auditTenantId,
+        workspaceId: auditWorkspaceId,
+        action: "execution.mode_changed",
+        actor: auditActor,
+        resourceType: "session",
+        resourceId: sessionId,
+        metadata: {
+          runtimeMode,
+          executionMode,
+          status: "applied"
+        },
+        createdAt: now().toISOString()
+      });
+
       const events = [
         createEvent(state, "runtime.mode_changed", {
           sessionId,
@@ -654,6 +985,7 @@ async function route(
         response: makeSuccessRes(req.id, {
           sessionId,
           runtimeMode,
+          executionMode,
           status: "applied"
         }),
         events
@@ -664,7 +996,7 @@ async function route(
       const sessionId = requireString(req.params, "sessionId");
       const input = requireString(req.params, "input");
       const reqRuntimeMode = asRuntimeMode(req.params.runtimeMode);
-      const llm = asLlmOptions(req.params.llm);
+      const requestedLlm = asLlmOptions(req.params.llm);
       const tenantId = requireString(req.params, "tenantId") ?? "t_default";
       const workspaceId = requireString(req.params, "workspaceId") ?? "w_default";
       const agentId = requireString(req.params, "agentId") ?? "a_default";
@@ -681,7 +1013,7 @@ async function route(
         };
       }
 
-      const selectedTarget = await resolveExecutionTarget({
+      let selectedTarget = await resolveExecutionTarget({
         tenantId,
         workspaceId,
         agentId,
@@ -700,6 +1032,65 @@ async function route(
           response: makeErrorRes(req.id, "POLICY_DENIED", `执行目标不可用: ${selectedTarget.targetId}`),
           events: []
         };
+      }
+      let fallbackApplied = false;
+      let fallbackReason = "";
+      let fallbackFromTargetId: string | undefined;
+      let cloudFailurePolicy: CloudFailurePolicy = "deny";
+      if (selectedTarget.kind === "docker-runner" && enableCloudProbe) {
+        cloudFailurePolicy = resolveCloudFailurePolicy(req.params, selectedTarget.config);
+        const availability = await probeExecutionTargetAvailability(selectedTarget);
+        if (!availability.ok) {
+          fallbackReason = availability.reason ?? "cloud target unreachable";
+          if (cloudFailurePolicy === "fallback_local") {
+            fallbackApplied = true;
+            fallbackFromTargetId = selectedTarget.targetId;
+            selectedTarget = createLocalFallbackExecutionTarget({
+              tenantId,
+              workspaceId,
+              sourceTargetId: selectedTarget.targetId,
+              now
+            });
+            await auditRepo.append({
+              tenantId,
+              workspaceId,
+              action: "execution.mode_changed",
+              actor,
+              resourceType: "session",
+              resourceId: sessionId,
+              metadata: {
+                runtimeMode: "local",
+                executionMode: "local_sandbox",
+                status: "fallback-local",
+                reason: fallbackReason,
+                fromTargetId: fallbackFromTargetId,
+                toTargetId: selectedTarget.targetId
+              },
+              createdAt: now().toISOString()
+            });
+          } else {
+            await auditRepo.append({
+              tenantId,
+              workspaceId,
+              action: "execution.mode_changed",
+              actor,
+              resourceType: "session",
+              resourceId: sessionId,
+              metadata: {
+                runtimeMode: "cloud",
+                executionMode: "enterprise_cloud",
+                status: "cloud-unreachable-denied",
+                reason: fallbackReason,
+                targetId: selectedTarget.targetId
+              },
+              createdAt: now().toISOString()
+            });
+            return {
+              response: makeErrorRes(req.id, "MODEL_UNAVAILABLE", `企业云执行目标不可达: ${fallbackReason}`),
+              events: []
+            };
+          }
+        }
       }
 
       const budgetScopeKey = resolveBudgetScopeKey(req.params, tenantId, workspaceId, agentId);
@@ -745,6 +1136,14 @@ async function route(
         }
       }
 
+      const llm = await resolveRunLlmOptions({
+        requested: requestedLlm,
+        principal: state.principal,
+        tenantId,
+        workspaceId,
+        modelSecretRepo
+      });
+
       session = await prepareSessionForRun({
         sessionRepo,
         toolExecutor: internalToolExecutor,
@@ -761,6 +1160,7 @@ async function route(
       let toolFailures = 0;
       let completedOutput = "";
       let acceptedRunId = "";
+      const runtimeModeForRun: RuntimeMode = selectedTarget.kind === "docker-runner" ? "cloud" : "local";
       const emit = (event: EventFrame): void => {
         allEvents.push(event);
         options.onEvent?.(event);
@@ -768,6 +1168,19 @@ async function route(
           responseEvents.push(event);
         }
       };
+      if (fallbackApplied) {
+        emit(
+          createEvent(state, "runtime.mode_changed", {
+            sessionId,
+            runtimeMode: "local",
+            executionMode: "local_sandbox",
+            status: "fallback-local",
+            reason: fallbackReason,
+            fromTargetId: fallbackFromTargetId,
+            toTargetId: selectedTarget.targetId
+          })
+        );
+      }
 
       await transcriptRepo.append({
         sessionId,
@@ -790,7 +1203,7 @@ async function route(
         for await (const coreEvent of coreService.run({
           sessionId,
           input,
-          runtimeMode: session.runtimeMode,
+          runtimeMode: runtimeModeForRun,
           ...(llm ? { llm } : {})
         })) {
           const mapped = mapCoreEvent(coreEvent);
@@ -882,16 +1295,21 @@ async function route(
         actor,
         resourceType: "run",
         resourceId: acceptedRunId,
-        metadata: {
-          sessionId,
-          agentId,
-          executionTargetId: selectedTarget.targetId,
-          executionTargetKind: selectedTarget.kind,
-          toolCallsTotal,
-          toolFailures,
-          budgetScopeKey,
-          usageSnapshot
-        },
+          metadata: {
+            sessionId,
+            agentId,
+            runtimeMode: runtimeModeForRun,
+            executionTargetId: selectedTarget.targetId,
+            executionTargetKind: selectedTarget.kind,
+            fallbackApplied,
+            ...(fallbackFromTargetId ? { fallbackFromTargetId } : {}),
+            ...(fallbackReason ? { fallbackReason } : {}),
+            ...(selectedTarget.kind === "docker-runner" ? { cloudFailurePolicy } : {}),
+            toolCallsTotal,
+            toolFailures,
+            budgetScopeKey,
+            usageSnapshot
+          },
         createdAt: now().toISOString()
       });
 
@@ -1849,17 +2267,7 @@ function asPositiveInt(value: unknown): number | undefined {
   return floored;
 }
 
-function asLlmOptions(
-  value: unknown
-):
-  | {
-      modelRef?: string;
-      provider?: string;
-      modelId?: string;
-      apiKey?: string;
-      baseUrl?: string;
-    }
-  | undefined {
+function asLlmOptions(value: unknown): GatewayLlmOptions | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
@@ -1970,6 +2378,145 @@ function toAuditQuery(params: Record<string, unknown>): AuditQuery {
     ...(asPositiveInt(params.limit) ? { limit: asPositiveInt(params.limit) } : {}),
     ...(asPositiveInt(params.cursor) ? { cursor: asPositiveInt(params.cursor) } : {})
   };
+}
+
+function normalizeUserStatus(value: unknown): "active" | "disabled" | undefined {
+  if (value === "active" || value === "disabled") {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeMembershipRole(value: unknown): MembershipRole {
+  if (value === "tenant_admin" || value === "workspace_admin") {
+    return value;
+  }
+  return "member";
+}
+
+function readMembershipPatch(
+  params: Record<string, unknown>,
+  fallbackWorkspaceId: string,
+  fallbackRole: MembershipRole
+): Array<{ workspaceId: string; role: MembershipRole }> {
+  const source = params.memberships;
+  if (!Array.isArray(source)) {
+    return [
+      {
+        workspaceId: fallbackWorkspaceId,
+        role: fallbackRole
+      }
+    ];
+  }
+  const out: Array<{ workspaceId: string; role: MembershipRole }> = [];
+  const seen = new Set<string>();
+  for (const item of source) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const workspaceId = requireString(row, "workspaceId");
+    if (!workspaceId || seen.has(workspaceId)) {
+      continue;
+    }
+    seen.add(workspaceId);
+    out.push({
+      workspaceId,
+      role: normalizeMembershipRole(row.role)
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      workspaceId: fallbackWorkspaceId,
+      role: fallbackRole
+    });
+  }
+  return out;
+}
+
+function toUserPayload(user: {
+  id: string;
+  username: string;
+  displayName?: string;
+  email?: string;
+  status: "active" | "disabled";
+  source: "local" | "external";
+  lastLoginAt?: string;
+}): Record<string, unknown> {
+  return {
+    id: user.id,
+    username: user.username,
+    ...(user.displayName ? { displayName: user.displayName } : {}),
+    ...(user.email ? { email: user.email } : {}),
+    status: user.status,
+    source: user.source,
+    ...(user.lastLoginAt ? { lastLoginAt: user.lastLoginAt } : {})
+  };
+}
+
+function toTenantUserPayload(item: TenantUserRecord): Record<string, unknown> {
+  return {
+    user: toUserPayload(item.user),
+    tenant: {
+      tenantId: item.tenant.tenantId,
+      userId: item.tenant.userId,
+      defaultWorkspaceId: item.tenant.defaultWorkspaceId,
+      status: item.tenant.status,
+      updatedAt: item.tenant.updatedAt
+    },
+    memberships: item.memberships.map((membership) => ({
+      workspaceId: membership.workspaceId,
+      role: membership.role,
+      updatedAt: membership.updatedAt
+    }))
+  };
+}
+
+function toModelSecretMetaPayload(input: ModelSecretRecord | ModelSecretMetaRecord): Record<string, unknown> {
+  const apiKey = "apiKey" in input ? String(input.apiKey ?? "") : undefined;
+  return {
+    tenantId: input.tenantId,
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    provider: input.provider,
+    ...(input.modelId ? { modelId: input.modelId } : {}),
+    ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
+    maskedKey: "maskedKey" in input ? input.maskedKey : maskSecret(apiKey ?? ""),
+    keyLast4: "keyLast4" in input ? input.keyLast4 : (apiKey ?? "").slice(-4),
+    updatedBy: input.updatedBy,
+    updatedAt: input.updatedAt
+  };
+}
+
+async function resolveRunLlmOptions(input: {
+  requested?: GatewayLlmOptions;
+  principal?: Principal;
+  tenantId: string;
+  workspaceId: string;
+  modelSecretRepo: ModelSecretRepository;
+}): Promise<GatewayLlmOptions | undefined> {
+  const requested: GatewayLlmOptions = input.requested ? { ...input.requested } : {};
+  if (input.principal) {
+    delete requested.apiKey;
+  }
+
+  const providerHint = requested.provider;
+  const secret = await input.modelSecretRepo.getForRun({
+    tenantId: input.tenantId,
+    workspaceId: input.workspaceId,
+    ...(providerHint ? { provider: providerHint } : {})
+  });
+  if (!secret) {
+    return Object.keys(requested).length > 0 ? requested : undefined;
+  }
+
+  const merged: GatewayLlmOptions = {
+    ...(Object.keys(requested).length > 0 ? requested : {}),
+    provider: requested.provider ?? secret.provider,
+    modelId: requested.modelId ?? secret.modelId,
+    baseUrl: requested.baseUrl ?? secret.baseUrl,
+    apiKey: secret.apiKey
+  };
+  return merged;
 }
 
 async function resolveExecutionTarget(input: {
@@ -2273,6 +2820,100 @@ async function sendDockerRunnerRequest(input: {
   });
 }
 
+function resolveCloudFailurePolicy(
+  params: Record<string, unknown>,
+  targetConfig: Record<string, unknown>
+): CloudFailurePolicy {
+  return (
+    normalizeCloudFailurePolicy(requireString(params, "cloudFailurePolicy")) ??
+    normalizeCloudFailurePolicy(isObjectRecord(targetConfig) ? requireString(targetConfig, "cloudFailurePolicy") : undefined) ??
+    "deny"
+  );
+}
+
+function normalizeCloudFailurePolicy(value: unknown): CloudFailurePolicy | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "deny") {
+    return "deny";
+  }
+  if (normalized === "fallback_local" || normalized === "fallback-local" || normalized === "fallbacklocal") {
+    return "fallback_local";
+  }
+  return undefined;
+}
+
+async function probeExecutionTargetAvailability(target: ExecutionTargetRecord): Promise<{ ok: boolean; reason?: string }> {
+  if (target.kind !== "docker-runner") {
+    return { ok: true };
+  }
+  const endpoint = resolveDockerRunnerEndpoint(target);
+  if (!endpoint) {
+    return { ok: false, reason: `docker-runner 缺少 endpoint: ${target.targetId}` };
+  }
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return { ok: false, reason: `endpoint 非法: ${endpoint}` };
+  }
+  const requestFn = url.protocol === "https:" ? httpsRequest : httpRequest;
+  const timeoutMs = Math.max(1_000, Math.min(5_000, resolveDockerRunnerTimeoutMs(target.config)));
+  const headers: Record<string, string> = {};
+  if (target.authToken) {
+    headers.authorization = `Bearer ${target.authToken}`;
+  }
+  return await new Promise((resolve) => {
+    const req = requestFn(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port ? Number(url.port) : undefined,
+        path: `${url.pathname || "/"}${url.search || ""}`,
+        method: "HEAD",
+        headers
+      },
+      (res: any) => {
+        res.resume?.();
+        resolve({ ok: true });
+      }
+    );
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`timeout after ${timeoutMs}ms`));
+    });
+    req.on("error", (error: Error) => {
+      resolve({
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    });
+    req.end();
+  });
+}
+
+function createLocalFallbackExecutionTarget(input: {
+  tenantId: string;
+  workspaceId: string;
+  sourceTargetId: string;
+  now: () => Date;
+}): ExecutionTargetRecord {
+  return {
+    targetId: `target_local_fallback_${input.sourceTargetId}`,
+    tenantId: input.tenantId,
+    workspaceId: input.workspaceId,
+    kind: "local-host",
+    isDefault: false,
+    enabled: true,
+    config: {
+      fallbackFromTargetId: input.sourceTargetId
+    },
+    version: 1,
+    updatedAt: input.now().toISOString()
+  };
+}
+
 function resolveDockerRunnerEndpoint(target: ExecutionTargetRecord): string | undefined {
   const direct = typeof target.endpoint === "string" ? target.endpoint.trim() : "";
   if (direct) {
@@ -2364,6 +3005,17 @@ function clipText(input: string, maxLength: number): string {
     return compact;
   }
   return `${compact.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function maskSecret(value: string): string {
+  const raw = String(value ?? "");
+  if (raw.length <= 4) {
+    return "****";
+  }
+  if (raw.length <= 8) {
+    return `${raw.slice(0, 1)}***${raw.slice(-2)}`;
+  }
+  return `${raw.slice(0, 2)}***${raw.slice(-4)}`;
 }
 
 async function prepareSessionForRun(input: {

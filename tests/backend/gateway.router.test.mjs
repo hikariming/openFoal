@@ -298,6 +298,87 @@ test("runtime.setMode queues when running and applies when idle", async () => {
   assert.equal(applied.events.some((event) => event.event === "runtime.mode_changed"), true);
 });
 
+test("agent.run cloud unreachable follows deny/fallback_local policy", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const targetUpsert = await router.handle(
+    req("r_target_unreachable", "executionTargets.upsert", {
+      idempotencyKey: "idem_target_unreachable_1",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      targetId: "target_cloud_unreachable",
+      kind: "docker-runner",
+      endpoint: "http://127.0.0.1:1/runner",
+      isDefault: false,
+      enabled: true
+    }),
+    state
+  );
+  assert.equal(targetUpsert.response.ok, true);
+
+  const denied = await router.handle(
+    req("r_cloud_deny", "agent.run", {
+      idempotencyKey: "idem_cloud_deny_1",
+      sessionId: "s_cloud_deny",
+      input: "try cloud with deny policy",
+      runtimeMode: "cloud",
+      executionTargetId: "target_cloud_unreachable",
+      cloudFailurePolicy: "deny"
+    }),
+    state
+  );
+  assert.equal(denied.response.ok, false);
+  if (!denied.response.ok) {
+    assert.equal(denied.response.error.code, "MODEL_UNAVAILABLE");
+  }
+
+  const fallback = await router.handle(
+    req("r_cloud_fallback", "agent.run", {
+      idempotencyKey: "idem_cloud_fallback_1",
+      sessionId: "s_cloud_fallback",
+      input: "try cloud with fallback policy",
+      runtimeMode: "cloud",
+      executionTargetId: "target_cloud_unreachable",
+      cloudFailurePolicy: "fallback_local"
+    }),
+    state
+  );
+  assert.equal(fallback.response.ok, true);
+  assert.equal(
+    fallback.events.some(
+      (event) =>
+        event.event === "runtime.mode_changed" &&
+        event.payload?.status === "fallback-local" &&
+        event.payload?.executionMode === "local_sandbox"
+    ),
+    true
+  );
+
+  const audits = await router.handle(
+    req("r_audit_cloud_policy", "audit.query", {
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      action: "execution.mode_changed",
+      limit: 20
+    }),
+    state
+  );
+  assert.equal(audits.response.ok, true);
+  if (audits.response.ok) {
+    const items = Array.isArray(audits.response.payload.items) ? audits.response.payload.items : [];
+    assert.equal(
+      items.some((item) => item?.metadata?.status === "cloud-unreachable-denied"),
+      true
+    );
+    assert.equal(
+      items.some((item) => item?.metadata?.status === "fallback-local"),
+      true
+    );
+  }
+});
+
 test("policy.get/policy.update returns structured policy", async () => {
   const router = createGatewayRouter();
   const state = createConnectionState();
@@ -544,6 +625,180 @@ test("docker-runner target executes tool via remote endpoint", async () => {
 
   const toolResult = run.events.find((event) => event.event === "agent.tool_result");
   assert.match(String(toolResult?.payload?.output ?? ""), /from-remote-runner/);
+});
+
+test("users and secrets management APIs are available", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const created = await router.handle(
+    req("r_users_create", "users.create", {
+      idempotencyKey: "idem_users_create_1",
+      tenantId: "t_default",
+      username: "alice",
+      password: "alice123!",
+      displayName: "Alice",
+      memberships: [
+        {
+          workspaceId: "w_default",
+          role: "member"
+        }
+      ]
+    }),
+    state
+  );
+  assert.equal(created.response.ok, true);
+
+  const listed = await router.handle(
+    req("r_users_list", "users.list", {
+      tenantId: "t_default"
+    }),
+    state
+  );
+  assert.equal(listed.response.ok, true);
+  let userId = "";
+  if (listed.response.ok) {
+    const items = listed.response.payload.items;
+    assert.equal(Array.isArray(items), true);
+    const alice = items.find((item) => item.user?.username === "alice");
+    assert.equal(Boolean(alice), true);
+    userId = String(alice?.user?.id ?? "");
+  }
+  assert.equal(userId.length > 0, true);
+
+  const status = await router.handle(
+    req("r_users_status", "users.updateStatus", {
+      idempotencyKey: "idem_users_status_1",
+      tenantId: "t_default",
+      userId,
+      status: "disabled"
+    }),
+    state
+  );
+  assert.equal(status.response.ok, true);
+
+  const reset = await router.handle(
+    req("r_users_reset", "users.resetPassword", {
+      idempotencyKey: "idem_users_reset_1",
+      tenantId: "t_default",
+      userId,
+      newPassword: "alice456!"
+    }),
+    state
+  );
+  assert.equal(reset.response.ok, true);
+
+  const memberships = await router.handle(
+    req("r_users_membership", "users.updateMemberships", {
+      idempotencyKey: "idem_users_membership_1",
+      tenantId: "t_default",
+      userId,
+      memberships: [
+        {
+          workspaceId: "w_default",
+          role: "workspace_admin"
+        }
+      ]
+    }),
+    state
+  );
+  assert.equal(memberships.response.ok, true);
+
+  const secret = await router.handle(
+    req("r_secret_upsert", "secrets.upsertModelKey", {
+      idempotencyKey: "idem_secret_upsert_1",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      provider: "openai",
+      apiKey: "sk-test-openfoal-secret-1234",
+      modelId: "gpt-4o-mini"
+    }),
+    state
+  );
+  assert.equal(secret.response.ok, true);
+  if (secret.response.ok) {
+    assert.equal(typeof secret.response.payload.secret?.maskedKey, "string");
+    assert.equal(secret.response.payload.secret?.keyLast4, "1234");
+  }
+
+  const secretMeta = await router.handle(
+    req("r_secret_meta", "secrets.getModelKeyMeta", {
+      tenantId: "t_default"
+    }),
+    state
+  );
+  assert.equal(secretMeta.response.ok, true);
+  if (secretMeta.response.ok) {
+    const items = secretMeta.response.payload.items;
+    assert.equal(Array.isArray(items), true);
+    assert.equal(items.some((item) => item.provider === "openai"), true);
+  }
+});
+
+test("agent.run resolves llm apiKey from secrets repository", async () => {
+  let capturedInput = null;
+  const router = createGatewayRouter({
+    coreService: {
+      async *run(input) {
+        capturedInput = input;
+        yield {
+          type: "accepted",
+          runId: "run_secret_1",
+          sessionId: input.sessionId,
+          runtimeMode: input.runtimeMode
+        };
+        yield {
+          type: "completed",
+          runId: "run_secret_1",
+          output: "ok"
+        };
+      },
+      async *continue() {},
+      async abort() {}
+    }
+  });
+  const state = createConnectionState();
+  state.principal = {
+    subject: "u_admin",
+    tenantId: "t_default",
+    workspaceIds: ["w_default"],
+    roles: ["tenant_admin"],
+    authSource: "local",
+    claims: {}
+  };
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const secret = await router.handle(
+    req("r_secret_upsert_run", "secrets.upsertModelKey", {
+      idempotencyKey: "idem_secret_upsert_run_1",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      provider: "openai",
+      apiKey: "sk-enterprise-from-secret-7788",
+      modelId: "gpt-4o-mini"
+    }),
+    state
+  );
+  assert.equal(secret.response.ok, true);
+
+  const run = await router.handle(
+    req("r_run_secret", "agent.run", {
+      idempotencyKey: "idem_run_secret_1",
+      sessionId: "s_default",
+      input: "hello",
+      runtimeMode: "local",
+      llm: {
+        provider: "openai",
+        modelId: "gpt-4o-mini",
+        apiKey: "sk-user-input-should-not-win"
+      }
+    }),
+    state
+  );
+  assert.equal(run.response.ok, true);
+  assert.equal(capturedInput?.llm?.provider, "openai");
+  assert.equal(capturedInput?.llm?.apiKey, "sk-enterprise-from-secret-7788");
 });
 
 test("high-risk tools run directly", async () => {

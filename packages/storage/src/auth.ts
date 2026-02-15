@@ -51,6 +51,12 @@ export interface WorkspaceMembershipRecord {
   updatedAt: string;
 }
 
+export interface TenantUserRecord {
+  user: UserRecord;
+  tenant: UserTenantRecord;
+  memberships: WorkspaceMembershipRecord[];
+}
+
 export interface AuthIdentityRecord {
   provider: string;
   subject: string;
@@ -114,6 +120,25 @@ export interface AuthStore {
     role: MembershipRole;
   }): Promise<WorkspaceMembershipRecord>;
   listWorkspaceMemberships(tenantId: string, userId: string): Promise<WorkspaceMembershipRecord[]>;
+  replaceWorkspaceMemberships(input: {
+    tenantId: string;
+    userId: string;
+    memberships: Array<{
+      workspaceId: string;
+      role: MembershipRole;
+    }>;
+  }): Promise<WorkspaceMembershipRecord[]>;
+  listTenantUsers(tenantId: string): Promise<TenantUserRecord[]>;
+  updateUserStatus(input: {
+    tenantId: string;
+    userId: string;
+    status: "active" | "disabled";
+  }): Promise<UserRecord | undefined>;
+  setLocalUserPassword(input: {
+    tenantId: string;
+    userId: string;
+    passwordHash: string;
+  }): Promise<UserRecord | undefined>;
 
   createRefreshToken(input: {
     tokenId: string;
@@ -385,6 +410,113 @@ export class InMemoryAuthStore implements AuthStore {
       .filter((item) => item.tenantId === tenantId && item.userId === userId)
       .sort((a, b) => a.workspaceId.localeCompare(b.workspaceId))
       .map(cloneMembership);
+  }
+
+  async replaceWorkspaceMemberships(input: {
+    tenantId: string;
+    userId: string;
+    memberships: Array<{
+      workspaceId: string;
+      role: MembershipRole;
+    }>;
+  }): Promise<WorkspaceMembershipRecord[]> {
+    const tenantId = sanitizeId(input.tenantId, "t_default");
+    const userId = sanitizeId(input.userId, "");
+    const nextMemberships = normalizeMembershipInputs(input.memberships);
+    for (const key of Array.from(this.memberships.keys())) {
+      if (key.startsWith(`${tenantId}:`) && key.endsWith(`:${userId}`)) {
+        this.memberships.delete(key);
+      }
+    }
+    for (const item of nextMemberships) {
+      await this.upsertWorkspaceMembership({
+        tenantId,
+        userId,
+        workspaceId: item.workspaceId,
+        role: item.role
+      });
+    }
+    await this.linkUserTenant({
+      tenantId,
+      userId,
+      defaultWorkspaceId: nextMemberships[0].workspaceId,
+      status: "active"
+    });
+    return await this.listWorkspaceMemberships(tenantId, userId);
+  }
+
+  async listTenantUsers(tenantId: string): Promise<TenantUserRecord[]> {
+    const keyTenantId = sanitizeId(tenantId, "t_default");
+    const rows: TenantUserRecord[] = [];
+    for (const tenant of this.userTenants.values()) {
+      if (tenant.tenantId !== keyTenantId) {
+        continue;
+      }
+      const user = this.usersById.get(tenant.userId);
+      if (!user) {
+        continue;
+      }
+      rows.push({
+        user: cloneUser(user),
+        tenant: cloneUserTenant(tenant),
+        memberships: await this.listWorkspaceMemberships(keyTenantId, tenant.userId)
+      });
+    }
+    rows.sort((a, b) => a.user.username.localeCompare(b.user.username));
+    return rows;
+  }
+
+  async updateUserStatus(input: {
+    tenantId: string;
+    userId: string;
+    status: "active" | "disabled";
+  }): Promise<UserRecord | undefined> {
+    const tenantId = sanitizeId(input.tenantId, "t_default");
+    const userId = sanitizeId(input.userId, "");
+    const tenantKey = userTenantKey(tenantId, userId);
+    const tenant = this.userTenants.get(tenantKey);
+    if (!tenant) {
+      return undefined;
+    }
+    const user = this.usersById.get(userId);
+    if (!user) {
+      return undefined;
+    }
+    const now = nowIso();
+    this.userTenants.set(tenantKey, {
+      ...tenant,
+      status: input.status,
+      updatedAt: now
+    });
+    const nextUser: UserRecord = {
+      ...user,
+      status: input.status,
+      updatedAt: now
+    };
+    this.usersById.set(userId, nextUser);
+    return cloneUser(nextUser);
+  }
+
+  async setLocalUserPassword(input: {
+    tenantId: string;
+    userId: string;
+    passwordHash: string;
+  }): Promise<UserRecord | undefined> {
+    const tenant = await this.getUserTenant(input.tenantId, input.userId);
+    if (!tenant) {
+      return undefined;
+    }
+    const user = this.usersById.get(sanitizeId(input.userId, ""));
+    if (!user || user.source !== "local") {
+      return undefined;
+    }
+    const next: UserRecord = {
+      ...user,
+      passwordHash: input.passwordHash,
+      updatedAt: nowIso()
+    };
+    this.usersById.set(next.id, next);
+    return cloneUser(next);
   }
 
   async createRefreshToken(input: {
@@ -921,6 +1053,186 @@ export class SqliteAuthStore implements AuthStore {
     return rows.map(normalizeMembership);
   }
 
+  async replaceWorkspaceMemberships(input: {
+    tenantId: string;
+    userId: string;
+    memberships: Array<{
+      workspaceId: string;
+      role: MembershipRole;
+    }>;
+  }): Promise<WorkspaceMembershipRecord[]> {
+    ensureAuthSchema(this.dbPath);
+    const tenantId = sanitizeId(input.tenantId, "t_default");
+    const userId = sanitizeId(input.userId, "");
+    const nextMemberships = normalizeMembershipInputs(input.memberships);
+    execSql(
+      this.dbPath,
+      `
+        DELETE FROM workspace_memberships
+        WHERE tenant_id = ${sqlString(tenantId)}
+          AND user_id = ${sqlString(userId)};
+      `
+    );
+    for (const item of nextMemberships) {
+      await this.upsertWorkspaceMembership({
+        tenantId,
+        userId,
+        workspaceId: item.workspaceId,
+        role: item.role
+      });
+    }
+    await this.linkUserTenant({
+      tenantId,
+      userId,
+      defaultWorkspaceId: nextMemberships[0].workspaceId,
+      status: "active"
+    });
+    return await this.listWorkspaceMemberships(tenantId, userId);
+  }
+
+  async listTenantUsers(tenantId: string): Promise<TenantUserRecord[]> {
+    ensureAuthSchema(this.dbPath);
+    const keyTenantId = sanitizeId(tenantId, "t_default");
+    const rows = queryJson<{
+      tenantId: string;
+      userId: string;
+      defaultWorkspaceId: string;
+      tenantStatus: string;
+      tenantCreatedAt: string;
+      tenantUpdatedAt: string;
+      id: string;
+      username: string;
+      displayName: string | null;
+      email: string | null;
+      userStatus: string;
+      source: string;
+      externalSubject: string | null;
+      passwordHash: string | null;
+      userCreatedAt: string;
+      userUpdatedAt: string;
+      lastLoginAt: string | null;
+    }>(
+      this.dbPath,
+      `
+        SELECT
+          ut.tenant_id AS tenantId,
+          ut.user_id AS userId,
+          ut.default_workspace_id AS defaultWorkspaceId,
+          ut.status AS tenantStatus,
+          ut.created_at AS tenantCreatedAt,
+          ut.updated_at AS tenantUpdatedAt,
+          u.id AS id,
+          u.username AS username,
+          u.display_name AS displayName,
+          u.email AS email,
+          u.status AS userStatus,
+          u.source AS source,
+          u.external_subject AS externalSubject,
+          u.password_hash AS passwordHash,
+          u.created_at AS userCreatedAt,
+          u.updated_at AS userUpdatedAt,
+          u.last_login_at AS lastLoginAt
+        FROM user_tenants ut
+        INNER JOIN users u
+          ON u.id = ut.user_id
+        WHERE ut.tenant_id = ${sqlString(keyTenantId)}
+        ORDER BY u.username ASC;
+      `
+    );
+
+    const out: TenantUserRecord[] = [];
+    for (const row of rows) {
+      out.push({
+        user: normalizeUser({
+          id: row.id,
+          username: row.username,
+          displayName: row.displayName,
+          email: row.email,
+          status: row.userStatus,
+          source: row.source,
+          externalSubject: row.externalSubject,
+          passwordHash: row.passwordHash,
+          createdAt: row.userCreatedAt,
+          updatedAt: row.userUpdatedAt,
+          lastLoginAt: row.lastLoginAt
+        }),
+        tenant: normalizeUserTenant({
+          tenantId: row.tenantId,
+          userId: row.userId,
+          defaultWorkspaceId: row.defaultWorkspaceId,
+          status: row.tenantStatus,
+          createdAt: row.tenantCreatedAt,
+          updatedAt: row.tenantUpdatedAt
+        }),
+        memberships: await this.listWorkspaceMemberships(row.tenantId, row.userId)
+      });
+    }
+    return out;
+  }
+
+  async updateUserStatus(input: {
+    tenantId: string;
+    userId: string;
+    status: "active" | "disabled";
+  }): Promise<UserRecord | undefined> {
+    ensureAuthSchema(this.dbPath);
+    const tenantId = sanitizeId(input.tenantId, "t_default");
+    const userId = sanitizeId(input.userId, "");
+    const exists = await this.getUserTenant(tenantId, userId);
+    if (!exists) {
+      return undefined;
+    }
+    const now = nowIso();
+    execSql(
+      this.dbPath,
+      `
+        UPDATE user_tenants
+        SET
+          status = ${sqlString(input.status)},
+          updated_at = ${sqlString(now)}
+        WHERE tenant_id = ${sqlString(tenantId)}
+          AND user_id = ${sqlString(userId)};
+
+        UPDATE users
+        SET
+          status = ${sqlString(input.status)},
+          updated_at = ${sqlString(now)}
+        WHERE id = ${sqlString(userId)};
+      `
+    );
+    return await this.findUserById(userId);
+  }
+
+  async setLocalUserPassword(input: {
+    tenantId: string;
+    userId: string;
+    passwordHash: string;
+  }): Promise<UserRecord | undefined> {
+    ensureAuthSchema(this.dbPath);
+    const tenantId = sanitizeId(input.tenantId, "t_default");
+    const userId = sanitizeId(input.userId, "");
+    const exists = await this.getUserTenant(tenantId, userId);
+    if (!exists) {
+      return undefined;
+    }
+    execSql(
+      this.dbPath,
+      `
+        UPDATE users
+        SET
+          password_hash = ${sqlString(input.passwordHash)},
+          updated_at = ${sqlString(nowIso())}
+        WHERE id = ${sqlString(userId)}
+          AND source = 'local';
+      `
+    );
+    const updated = await this.findUserById(userId);
+    if (!updated || updated.source !== "local") {
+      return undefined;
+    }
+    return updated;
+  }
+
   async createRefreshToken(input: {
     tokenId: string;
     userId: string;
@@ -1248,6 +1560,40 @@ function normalizeRole(value: unknown): MembershipRole {
     return value;
   }
   return "member";
+}
+
+function normalizeMembershipInputs(
+  inputs: Array<{
+    workspaceId: string;
+    role: MembershipRole;
+  }>
+): Array<{
+  workspaceId: string;
+  role: MembershipRole;
+}> {
+  const out: Array<{
+    workspaceId: string;
+    role: MembershipRole;
+  }> = [];
+  const seen = new Set<string>();
+  for (const item of Array.isArray(inputs) ? inputs : []) {
+    const workspaceId = sanitizeId(item.workspaceId, "");
+    if (!workspaceId || seen.has(workspaceId)) {
+      continue;
+    }
+    seen.add(workspaceId);
+    out.push({
+      workspaceId,
+      role: normalizeRole(item.role)
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      workspaceId: "w_default",
+      role: "member"
+    });
+  }
+  return out;
 }
 
 function sanitizeId(value: unknown, fallback: string): string {

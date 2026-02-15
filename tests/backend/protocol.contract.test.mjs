@@ -101,6 +101,23 @@ test("budget.update requires idempotencyKey", () => {
   }
 });
 
+test("users.create requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_users_create_1",
+    method: "users.create",
+    params: {
+      username: "alice",
+      password: "pw"
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
 test("unknown method returns METHOD_NOT_FOUND", () => {
   const result = validateReqFrame({
     type: "req",

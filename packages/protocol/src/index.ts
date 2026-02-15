@@ -9,6 +9,13 @@ export const METHODS = [
   "sessions.history",
   "agents.list",
   "agents.upsert",
+  "users.list",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword",
+  "users.updateMemberships",
+  "secrets.upsertModelKey",
+  "secrets.getModelKeyMeta",
   "executionTargets.list",
   "executionTargets.upsert",
   "budget.get",
@@ -59,6 +66,11 @@ export const SIDE_EFFECT_METHODS = new Set<MethodName>([
   "runtime.setMode",
   "sessions.create",
   "agents.upsert",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword",
+  "users.updateMemberships",
+  "secrets.upsertModelKey",
   "executionTargets.upsert",
   "budget.update",
   "policy.update",
@@ -70,6 +82,18 @@ export type MethodName = (typeof METHODS)[number];
 export type EventName = (typeof EVENTS)[number];
 export type ErrorCode = (typeof ERROR_CODES)[number];
 export type RuntimeMode = "local" | "cloud";
+export type ExecutionMode = "local_sandbox" | "enterprise_cloud";
+export type UserRole = "tenant_admin" | "workspace_admin" | "member";
+export type UserStatus = "active" | "disabled";
+export const AUDIT_ACTIONS = [
+  "users.created",
+  "users.status_changed",
+  "users.password_reset",
+  "users.memberships_updated",
+  "secrets.model_key_upserted",
+  "execution.mode_changed"
+] as const;
+export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
 
 export interface Session {

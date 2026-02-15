@@ -123,7 +123,7 @@ type JwkSetCache = {
   keysByKid: Map<string, Record<string, unknown>>;
 };
 
-const SCOPE_METHODS = new Set<MethodName>([
+const WORKSPACE_SCOPE_METHODS = new Set<MethodName>([
   "agents.list",
   "agents.upsert",
   "executionTargets.list",
@@ -137,11 +137,52 @@ const SCOPE_METHODS = new Set<MethodName>([
   "agent.run"
 ]);
 
+const TENANT_SCOPE_METHODS = new Set<MethodName>([
+  "users.list",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword",
+  "users.updateMemberships",
+  "secrets.upsertModelKey",
+  "secrets.getModelKeyMeta"
+]);
+
 const ENTERPRISE_WRITE_METHODS = new Set<MethodName>([
   "agents.upsert",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword",
+  "users.updateMemberships",
+  "secrets.upsertModelKey",
   "executionTargets.upsert",
   "budget.update",
   "policy.update"
+]);
+
+const WORKSPACE_ADMIN_ALLOWED_WRITES = new Set<MethodName>([
+  "agents.upsert",
+  "users.updateMemberships",
+  "executionTargets.upsert",
+  "budget.update",
+  "policy.update"
+]);
+
+const WORKSPACE_ADMIN_RESTRICTED_METHODS = new Set<MethodName>([
+  "secrets.upsertModelKey",
+  "secrets.getModelKeyMeta",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword"
+]);
+
+const MEMBER_RESTRICTED_METHODS = new Set<MethodName>([
+  "users.list",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword",
+  "users.updateMemberships",
+  "secrets.upsertModelKey",
+  "secrets.getModelKeyMeta"
 ]);
 
 export function resolveAuthRuntimeConfig(): AuthRuntimeConfig {
@@ -297,7 +338,7 @@ export function createGatewayAuthRuntime(input: {
     }
 
     const effective = { ...params };
-    if (SCOPE_METHODS.has(method)) {
+    if (WORKSPACE_SCOPE_METHODS.has(method)) {
       const tenantIdParam = readString(effective, "tenantId");
       if (tenantIdParam && tenantIdParam !== principal.tenantId) {
         return {
@@ -319,6 +360,39 @@ export function createGatewayAuthRuntime(input: {
 
       effective.tenantId = principal.tenantId;
       effective.workspaceId = targetWorkspaceId;
+    }
+
+    if (TENANT_SCOPE_METHODS.has(method)) {
+      const tenantIdParam = readString(effective, "tenantId");
+      if (tenantIdParam && tenantIdParam !== principal.tenantId) {
+        return {
+          ok: false,
+          code: "TENANT_SCOPE_MISMATCH",
+          message: "tenantId 与登录租户不一致"
+        };
+      }
+      effective.tenantId = principal.tenantId;
+      const requestedWorkspaceId = readString(effective, "workspaceId");
+      if (requestedWorkspaceId && !canAccessWorkspace(principal, requestedWorkspaceId)) {
+        return {
+          ok: false,
+          code: "WORKSPACE_SCOPE_MISMATCH",
+          message: "workspaceId 超出当前账号可访问范围"
+        };
+      }
+      if (method === "users.list" && hasRole(principal, "workspace_admin") && !hasRole(principal, "tenant_admin")) {
+        effective.workspaceId = requestedWorkspaceId ?? principal.workspaceIds[0] ?? "w_default";
+      }
+      if (method === "users.updateMemberships" && hasRole(principal, "workspace_admin") && !hasRole(principal, "tenant_admin")) {
+        const memberships = readMembershipWorkspaces(effective.memberships);
+        if (memberships.some((workspaceId) => !canAccessWorkspace(principal, workspaceId))) {
+          return {
+            ok: false,
+            code: "WORKSPACE_SCOPE_MISMATCH",
+            message: "workspace_admin 只能维护已授权 workspace 成员关系"
+          };
+        }
+      }
     }
 
     if (!canInvokeMethod(principal, method)) {
@@ -401,6 +475,10 @@ export function createGatewayAuthRuntime(input: {
       if (!user || !user.passwordHash || !verifyPassword(password, user.passwordHash)) {
         throw new AuthHttpError(401, "UNAUTHORIZED", "账号或密码错误");
       }
+      const tenantBinding = await store.getUserTenant(tenant.id, user.id);
+      if (user.status !== "active" || tenantBinding?.status === "disabled") {
+        throw new AuthHttpError(401, "UNAUTHORIZED", "账号已禁用");
+      }
 
       const memberships = await store.listWorkspaceMemberships(tenant.id, user.id);
       if (memberships.length === 0) {
@@ -459,6 +537,10 @@ export function createGatewayAuthRuntime(input: {
       const user = await store.findUserById(found.userId);
       if (!user) {
         throw new AuthHttpError(401, "UNAUTHORIZED", "账号不存在");
+      }
+      const tenantBinding = await store.getUserTenant(found.tenantId, user.id);
+      if (user.status !== "active" || tenantBinding?.status === "disabled") {
+        throw new AuthHttpError(401, "UNAUTHORIZED", "账号已禁用");
       }
       const memberships = await store.listWorkspaceMemberships(found.tenantId, user.id);
       const accessToken = await issueLocalAccessToken({
@@ -547,6 +629,10 @@ async function verifyLocalToken(
   }
 
   const user = await store.findUserById(subject);
+  const tenantBinding = await store.getUserTenant(tenantId, subject);
+  if (user && (user.status !== "active" || tenantBinding?.status === "disabled")) {
+    throw new Error("账号已禁用");
+  }
   const memberships = await store.listWorkspaceMemberships(tenantId, subject);
   const roleCandidates = [
     ...readRolesFromClaims(decoded.payload.roles),
@@ -691,10 +777,22 @@ function canInvokeMethod(principal: Principal, method: MethodName): boolean {
   if (hasRole(principal, "tenant_admin")) {
     return true;
   }
+  if (hasRole(principal, "workspace_admin")) {
+    if (WORKSPACE_ADMIN_RESTRICTED_METHODS.has(method)) {
+      return false;
+    }
+    if (!ENTERPRISE_WRITE_METHODS.has(method)) {
+      return true;
+    }
+    return WORKSPACE_ADMIN_ALLOWED_WRITES.has(method);
+  }
+  if (MEMBER_RESTRICTED_METHODS.has(method)) {
+    return false;
+  }
   if (!ENTERPRISE_WRITE_METHODS.has(method)) {
     return true;
   }
-  return hasRole(principal, "workspace_admin");
+  return false;
 }
 
 function canAccessWorkspace(principal: Principal, workspaceId: string): boolean {
@@ -859,6 +957,24 @@ function readWorkspaceIdsFromClaims(value: unknown): string[] {
   );
 }
 
+function readMembershipWorkspaces(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+    const workspaceId = asNonEmptyString((item as Record<string, unknown>).workspaceId);
+    if (!workspaceId) {
+      continue;
+    }
+    out.push(workspaceId);
+  }
+  return dedupStrings(out);
+}
+
 function pickClaimSnapshot(payload: Record<string, unknown>): Record<string, unknown> {
   return {
     ...(asNonEmptyString(payload.sub) ? { sub: payload.sub } : {}),
@@ -877,6 +993,10 @@ function hashPassword(password: string): string {
   const salt = randomBytes(16);
   const derived = pbkdf2Sync(password, salt, iterations, 32, "sha256");
   return `pbkdf2$${String(iterations)}$${salt.toString("base64")}$${derived.toString("base64")}`;
+}
+
+export function hashPasswordForStorage(password: string): string {
+  return hashPassword(password);
 }
 
 function verifyPassword(password: string, encoded: string): boolean {
