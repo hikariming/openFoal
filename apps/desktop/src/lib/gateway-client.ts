@@ -187,7 +187,6 @@ export interface RunAgentParams {
     modelId?: string;
     apiKey?: string;
     baseUrl?: string;
-    streamMode?: "real" | "mock";
   };
 }
 
@@ -434,6 +433,17 @@ export class GatewayHttpClient {
     params: RunAgentParams,
     handlers: RunAgentStreamHandlers = {}
   ): Promise<{ runId?: string; events: RpcEvent[]; transport: "ws" | "http" }> {
+    if (!shouldUseWebSocket()) {
+      const fallback = await this.runAgent(params);
+      for (const event of fallback.events) {
+        handlers.onEvent?.(event);
+      }
+      return {
+        ...fallback,
+        transport: "http"
+      };
+    }
+
     try {
       const wsResult = await this.runAgentViaWs(params, handlers);
       return {
@@ -660,11 +670,62 @@ class GatewayWsPreflightError extends Error {
 }
 
 function readDefaultBaseUrl(): string {
+  const runtimeConfigBaseUrl = readRuntimeConfigBaseUrl();
+  if (runtimeConfigBaseUrl) {
+    return runtimeConfigBaseUrl;
+  }
   const raw = import.meta.env.VITE_GATEWAY_BASE_URL;
   if (typeof raw === "string" && raw.trim().length > 0) {
     return raw.trim();
   }
   return "http://127.0.0.1:8787";
+}
+
+function shouldUseWebSocket(): boolean {
+  const runtimeConfigValue = readRuntimeConfigUseWebSocket();
+  if (typeof runtimeConfigValue === "boolean") {
+    return runtimeConfigValue;
+  }
+
+  const envValue = import.meta.env.VITE_GATEWAY_USE_WEBSOCKET;
+  if (typeof envValue === "string") {
+    const normalized = envValue.trim().toLowerCase();
+    if (normalized === "false" || normalized === "0" || normalized === "off" || normalized === "no") {
+      return false;
+    }
+    if (normalized === "true" || normalized === "1" || normalized === "on" || normalized === "yes") {
+      return true;
+    }
+  }
+
+  return true;
+}
+
+function readRuntimeConfigBaseUrl(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const config = (window as { __OPENFOAL_CONFIG__?: unknown }).__OPENFOAL_CONFIG__;
+  if (!config || typeof config !== "object") {
+    return null;
+  }
+  const value = (config as { gatewayBaseUrl?: unknown }).gatewayBaseUrl;
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+  return null;
+}
+
+function readRuntimeConfigUseWebSocket(): boolean | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const config = (window as { __OPENFOAL_CONFIG__?: unknown }).__OPENFOAL_CONFIG__;
+  if (!config || typeof config !== "object") {
+    return null;
+  }
+  const value = (config as { gatewayUseWebSocket?: unknown }).gatewayUseWebSocket;
+  return typeof value === "boolean" ? value : null;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {

@@ -25,6 +25,7 @@ OpenFoal 在此基础上新增：
 - Gateway 控制平面（Auth / Routing / Session / Policy）
 - 多渠道接入（Slack/Telegram/Discord/WhatsApp/Web/Desktop）
 - 多租户与企业治理（RBAC、审计、预算与策略）
+- Personal 前端共享内核（`packages/personal-app`）+ 双壳（Web/Desktop）
 
 ## 3. 架构总览
 
@@ -188,6 +189,11 @@ npm run up:personal
 ```
 
 访问：`http://127.0.0.1:5180`
+
+说明：
+
+1. 个人版已移除 `mock` 回复模式，网关只走真实模型推理链路。
+2. 未配置可用 API Key 时，`agent.run` 会返回 `MODEL_UNAVAILABLE`（不会再进入 mock 回答）。
 
 一键启动（企业版）：
 

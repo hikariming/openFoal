@@ -61,11 +61,17 @@ body {
   width: 100%;
   min-width: 0;
   overflow: hidden;
+  display: block;
+  float: none;
+  clear: both;
 }
 
 .side-nav .semi-navigation {
   width: 100%;
   min-width: 0;
+  display: block !important;
+  float: none !important;
+  clear: both;
 }
 
 .side-nav .semi-navigation-list-wrapper,
@@ -116,6 +122,9 @@ body {
   margin-top: 12px;
   font-size: 12px;
   letter-spacing: 0.06em;
+  display: block;
+  width: 100%;
+  clear: both;
 }
 
 .desktop-entry {
@@ -143,6 +152,8 @@ body {
   max-height: 180px;
   overflow: auto;
   padding-right: 2px;
+  width: calc(100% - 12px);
+  clear: both;
 }
 
 .session-item {
@@ -568,6 +579,17 @@ body {
   box-shadow: none;
 }
 
+.workspace-panel-chat {
+  height: calc(100dvh - 24px);
+  min-height: calc(100dvh - 24px);
+}
+
+.workspace-panel-chat .semi-card-body {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
 .workspace-header {
   display: flex;
   justify-content: space-between;
@@ -620,6 +642,14 @@ body {
   gap: 20px;
 }
 
+.workspace-panel-chat .workspace-body {
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 16px;
+  overflow: hidden;
+}
+
 .runtime-status-pane {
   display: grid;
   gap: 8px;
@@ -646,6 +676,11 @@ body {
   display: grid;
   align-content: start;
   gap: 12px;
+}
+
+.workspace-panel-chat .chat-feed {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .message-list {
@@ -1246,6 +1281,11 @@ body {
 
   .workspace-panel {
     min-height: auto;
+  }
+
+  .workspace-panel-chat {
+    height: calc(100dvh - 20px);
+    min-height: calc(100dvh - 20px);
   }
 
   .brand-name {

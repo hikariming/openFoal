@@ -21,7 +21,6 @@ services:
       OPENFOAL_JWT_AUDIENCE: "${OPENFOAL_JWT_AUDIENCE:-}"
       OPENFOAL_JWKS_URL: "${OPENFOAL_JWKS_URL:-}"
       OPENFOAL_CORE_ENGINE: "pi"
-      OPENFOAL_PI_STREAM_MODE: "real"
     volumes:
       - gateway_data:/data
     ports:
@@ -49,8 +48,6 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-    environment:
-      OPENFOAL_GATEWAY_BASE_URL: "http://localhost:8787"
     ports:
       - "5180:80"
     restart: unless-stopped

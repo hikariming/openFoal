@@ -15,7 +15,7 @@ import {
 } from "@douyinfe/semi-icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getGatewayClient, type GatewayTranscriptItem, type RpcEvent } from "../lib/gateway-client";
+import { GatewayRpcError, getGatewayClient, type GatewayTranscriptItem, type RpcEvent } from "../lib/gateway-client";
 import { getActiveLlmProfile, getSessionRuntimeMode, useAppStore } from "../store/app-store";
 
 type ChatRole = "user" | "assistant" | "system" | "tool";
@@ -327,10 +327,12 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
     if (event.event === "agent.failed") {
       const code = asString(event.payload.code) ?? "INTERNAL_ERROR";
       const message = asString(event.payload.message) ?? "Unknown error";
+      const mapped = mapGatewayFailure(code, message);
+      setRuntimeError(mapped.inline);
       pushMessage({
         id: createMessageId(),
         role: "system",
-        text: `[${code}] ${message}`
+        text: mapped.detail
       });
       return;
     }
@@ -397,12 +399,12 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setRuntimeError(message);
+      const mapped = mapRuntimeRequestError(error);
+      setRuntimeError(mapped.inline);
       pushMessage({
         id: createMessageId(),
         role: "system",
-        text: message
+        text: mapped.detail
       });
     } finally {
       runRenderRef.current = null;
@@ -411,7 +413,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   };
 
   return (
-    <Card className="workspace-panel" bodyStyle={{ padding: 0 }}>
+    <Card className="workspace-panel workspace-panel-chat" bodyStyle={{ padding: 0 }}>
       <div className="workspace-header chat-top-header">
         <Space>
           <Typography.Title heading={3} className="workspace-title">
@@ -659,10 +661,11 @@ function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): ChatMessag
     if (item.event === "agent.failed") {
       const code = asString(item.payload.code) ?? "INTERNAL_ERROR";
       const message = asString(item.payload.message) ?? "Unknown error";
+      const mapped = mapGatewayFailure(code, message);
       pushMessage({
         id: createMessageId(),
         role: "system",
-        text: `[${code}] ${message}`
+        text: mapped.detail
       });
       continue;
     }
@@ -779,4 +782,42 @@ function summarizeForPreview(detail: string): string {
 
 function createMessageId(): string {
   return `m_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function mapRuntimeRequestError(error: unknown): { inline: string; detail: string } {
+  if (error instanceof GatewayRpcError) {
+    return mapGatewayFailure(error.code, error.message);
+  }
+  if (error instanceof Error) {
+    return mapGatewayFailure("INTERNAL_ERROR", error.message);
+  }
+  return mapGatewayFailure("INTERNAL_ERROR", String(error));
+}
+
+function mapGatewayFailure(code: string, message: string): { inline: string; detail: string } {
+  const detailText = `${code} ${message}`.toLowerCase();
+  const isModelUnavailable =
+    code === "MODEL_UNAVAILABLE" ||
+    detailText.includes("no api key for provider") ||
+    detailText.includes("no model configured");
+
+  if (isModelUnavailable) {
+    return {
+      inline: "未配置模型/API Key",
+      detail: [
+        "当前未配置可用模型，无法生成回答。",
+        "",
+        "请按以下步骤配置：",
+        "1. 点击左下角头像，打开 Settings。",
+        "2. 进入 Runtime Model。",
+        "3. 选择 Provider / Model，并填写 API Key。",
+        "4. 点击保存后重新发送消息。"
+      ].join("\n")
+    };
+  }
+
+  return {
+    inline: `[${code}] ${message}`,
+    detail: `[${code}] ${message}`
+  };
 }

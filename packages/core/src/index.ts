@@ -7,12 +7,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { Agent, type AgentEvent, type AgentTool, type StreamFn } from "@mariozechner/pi-agent-core";
 import {
   Type,
-  createAssistantMessageEventStream,
   getEnvApiKey,
   getModel,
   registerBuiltInApiProviders,
-  type AssistantMessage,
-  type Context,
   type Message,
   type Model
 } from "@mariozechner/pi-ai";
@@ -39,7 +36,6 @@ export interface CoreRunInput {
     modelId?: string;
     apiKey?: string;
     baseUrl?: string;
-    streamMode?: "real" | "mock";
   };
 }
 
@@ -130,7 +126,6 @@ export interface PiCoreOptions {
   workspaceRoot?: string;
   ensureBootstrapFiles?: boolean;
   bootstrapMaxChars?: number;
-  streamMode?: "real" | "mock";
   streamFn?: StreamFn;
   configPath?: string;
   policyPath?: string;
@@ -146,7 +141,6 @@ export interface PiRuntimeSettings {
   provider?: string;
   modelId?: string;
   model?: Model<any>;
-  streamMode: "real" | "mock";
   apiKeys: Record<string, string>;
 }
 
@@ -251,8 +245,29 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
           ...piOptions,
           ...(input.llm ?? {})
         });
+        if (!runtimeSettings.model && (!runtimeSettings.provider || !runtimeSettings.modelId)) {
+          yield {
+            type: "failed",
+            runId,
+            code: "MODEL_UNAVAILABLE",
+            message: "No model configured. Set provider/modelId and API key."
+          };
+          return;
+        }
+        if (runtimeSettings.provider) {
+          const providerApiKey = resolveApiKey(runtimeSettings.provider, runtimeSettings, piOptions);
+          if (!providerApiKey) {
+            yield {
+              type: "failed",
+              runId,
+              code: "MODEL_UNAVAILABLE",
+              message: `No API key for provider: ${runtimeSettings.provider}`
+            };
+            return;
+          }
+        }
         const systemPrompt = buildSystemPromptWithWorkspace(piOptions);
-        const streamFn = resolvePiStreamFn(piOptions, runtimeSettings.streamMode);
+        const streamFn = resolvePiStreamFn(piOptions);
         const tools = createPiTools(toolExecutor, {
           runId,
           sessionId: input.sessionId,
@@ -461,81 +476,6 @@ export function createLegacyRuntimeCoreService(options: RuntimeCoreOptions = {})
   };
 }
 
-export function createMockCoreService(): CoreService {
-  const abortedRunIds = new Set<string>();
-  let runCounter = 0;
-
-  return {
-    async *run(input: CoreRunInput): AsyncIterable<CoreEvent> {
-      const runId = `run_${++runCounter}`;
-
-      yield {
-        type: "accepted",
-        runId,
-        sessionId: input.sessionId,
-        runtimeMode: input.runtimeMode
-      };
-
-      if (abortedRunIds.has(runId)) {
-        yield {
-          type: "failed",
-          runId,
-          code: "ABORTED",
-          message: "Run was aborted before generation"
-        };
-        return;
-      }
-
-      yield {
-        type: "delta",
-        runId,
-        text: `Echo(${input.runtimeMode}): `
-      };
-
-      if (abortedRunIds.has(runId)) {
-        yield {
-          type: "failed",
-          runId,
-          code: "ABORTED",
-          message: "Run was aborted during generation"
-        };
-        return;
-      }
-
-      const output = input.input.trim() || "(empty input)";
-      yield {
-        type: "delta",
-        runId,
-        text: output
-      };
-
-      yield {
-        type: "completed",
-        runId,
-        output
-      };
-    },
-
-    async *continue(input: CoreContinueInput): AsyncIterable<CoreEvent> {
-      yield {
-        type: "delta",
-        runId: input.runId,
-        text: `Continue: ${input.input}`
-      };
-
-      yield {
-        type: "completed",
-        runId: input.runId,
-        output: input.input
-      };
-    },
-
-    async abort(runId: string): Promise<void> {
-      abortedRunIds.add(runId);
-    }
-  };
-}
-
 export function createBuiltinToolExecutor(): ToolExecutor {
   return createLocalToolExecutor();
 }
@@ -696,7 +636,6 @@ export function resolvePiRuntimeSettings(options: PiRuntimeSettingsOptions = {})
     provider,
     modelId,
     model: resolvePiModel(provider, modelId, providerConfig),
-    streamMode: resolvePiStreamMode(options.streamMode, env),
     apiKeys: collectApiKeys(config, env, options.apiKey, provider, firstNonEmpty(modelConfig?.apiKey))
   };
 }
@@ -780,214 +719,11 @@ function resolvePiModel(
   return createConfiguredModel(provider, modelId, providerConfig, builtinModel);
 }
 
-function resolvePiStreamMode(mode: PiCoreOptions["streamMode"], env: EnvMap): "real" | "mock" {
-  const value = firstNonEmpty(mode, env.OPENFOAL_PI_STREAM_MODE);
-  return value === "real" ? "real" : "mock";
-}
-
-function resolvePiStreamFn(options: PiCoreOptions, streamMode: "real" | "mock"): StreamFn | undefined {
+function resolvePiStreamFn(options: PiCoreOptions): StreamFn | undefined {
   if (options.streamFn) {
     return options.streamFn;
   }
-
-  if (streamMode === "mock") {
-    return createPiMockStreamFn();
-  }
   return undefined;
-}
-
-function createPiMockStreamFn(): StreamFn {
-  return (model, context) => {
-    const stream = createAssistantMessageEventStream();
-
-    void (async () => {
-      const finalMessage = buildMockAssistantMessage(model, context);
-      let partial = createAssistantMessageSkeleton(model);
-
-      stream.push({
-        type: "start",
-        partial: cloneAssistant(partial)
-      });
-
-      for (const block of finalMessage.content) {
-        const contentIndex = partial.content.length;
-        if (block.type === "text") {
-          partial = {
-            ...partial,
-            content: [...partial.content, { type: "text", text: "" }]
-          };
-          stream.push({
-            type: "text_start",
-            contentIndex,
-            partial: cloneAssistant(partial)
-          });
-
-          partial = {
-            ...partial,
-            content: partial.content.map((item, index) =>
-              index === contentIndex ? { type: "text", text: block.text } : item
-            )
-          };
-          stream.push({
-            type: "text_delta",
-            contentIndex,
-            delta: block.text,
-            partial: cloneAssistant(partial)
-          });
-          stream.push({
-            type: "text_end",
-            contentIndex,
-            content: block.text,
-            partial: cloneAssistant(partial)
-          });
-          continue;
-        }
-
-        if (block.type === "toolCall") {
-          partial = {
-            ...partial,
-            content: [
-              ...partial.content,
-              {
-                type: "toolCall",
-                id: block.id,
-                name: block.name,
-                arguments: {}
-              }
-            ]
-          };
-          stream.push({
-            type: "toolcall_start",
-            contentIndex,
-            partial: cloneAssistant(partial)
-          });
-
-          partial = {
-            ...partial,
-            content: partial.content.map((item, index) =>
-              index === contentIndex
-                ? {
-                    type: "toolCall",
-                    id: block.id,
-                    name: block.name,
-                    arguments: block.arguments
-                  }
-                : item
-            )
-          };
-          stream.push({
-            type: "toolcall_delta",
-            contentIndex,
-            delta: JSON.stringify(block.arguments),
-            partial: cloneAssistant(partial)
-          });
-          stream.push({
-            type: "toolcall_end",
-            contentIndex,
-            toolCall: block,
-            partial: cloneAssistant(partial)
-          });
-        }
-      }
-
-      stream.push({
-        type: "done",
-        reason: finalMessage.stopReason === "toolUse" ? "toolUse" : "stop",
-        message: finalMessage
-      });
-    })().catch((error) => {
-      const failure = createAssistantMessageSkeleton(model);
-      failure.stopReason = "error";
-      failure.errorMessage = toErrorMessage(error);
-      stream.push({
-        type: "error",
-        reason: "error",
-        error: failure
-      });
-    });
-
-    return stream;
-  };
-}
-
-function buildMockAssistantMessage(model: Model<any>, context: Context): AssistantMessage {
-  const lastMessage = context.messages[context.messages.length - 1];
-  if (!lastMessage) {
-    return makeAssistantMessage(model, [{ type: "text", text: "(empty context)" }], "stop");
-  }
-
-  if (lastMessage.role === "toolResult") {
-    const trailing = collectTrailingToolResults(context.messages);
-    const lines = trailing.map((item) => `${toPublicToolName(item.toolName)}: ${extractToolResultContent(item)}`);
-    return makeAssistantMessage(
-      model,
-      [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "(tool results)" }],
-      "stop"
-    );
-  }
-
-  const userText = extractMessageText(lastMessage);
-  const parsed = parseInput(userText);
-  if (!parsed.ok) {
-    return makeAssistantMessage(model, [{ type: "text", text: parsed.error }], "stop");
-  }
-
-  const content: AssistantMessage["content"] = [];
-  if (parsed.data.text.length > 0) {
-    content.push({
-      type: "text",
-      text: parsed.data.text
-    });
-  }
-
-  if (parsed.data.directives.length > 0) {
-    for (let i = 0; i < parsed.data.directives.length; i += 1) {
-      const directive = parsed.data.directives[i];
-      content.push({
-        type: "toolCall",
-        id: `tc_${Date.now()}_${i + 1}`,
-        name: toPiToolName(directive.name),
-        arguments: directive.args
-      });
-    }
-    return makeAssistantMessage(model, content, "toolUse");
-  }
-
-  return makeAssistantMessage(model, [{ type: "text", text: parsed.data.text || "(empty input)" }], "stop");
-}
-
-function createAssistantMessageSkeleton(model: Model<any>): AssistantMessage {
-  return makeAssistantMessage(model, [], "stop");
-}
-
-function makeAssistantMessage(
-  model: Model<any>,
-  content: AssistantMessage["content"],
-  stopReason: AssistantMessage["stopReason"]
-): AssistantMessage {
-  return {
-    role: "assistant",
-    content,
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0
-      }
-    },
-    stopReason,
-    timestamp: Date.now()
-  };
 }
 
 function createPiTools(
@@ -1434,48 +1170,6 @@ function extractToolExecutionDelta(partialResult: unknown): string {
   } catch {
     return "";
   }
-}
-
-function collectTrailingToolResults(messages: Message[]): Array<Extract<Message, { role: "toolResult" }>> {
-  const results: Array<Extract<Message, { role: "toolResult" }>> = [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (message.role !== "toolResult") {
-      break;
-    }
-    results.push(message);
-  }
-  return results.reverse();
-}
-
-function extractToolResultContent(message: Extract<Message, { role: "toolResult" }>): string {
-  return message.content
-    .map((item) => (item.type === "text" ? item.text : ""))
-    .filter((item) => item.length > 0)
-    .join("\n");
-}
-
-function extractMessageText(message: Message): string {
-  if (message.role === "user") {
-    if (typeof message.content === "string") {
-      return message.content;
-    }
-    return message.content
-      .filter((item) => item.type === "text")
-      .map((item) => item.text)
-      .join("\n");
-  }
-  if (message.role === "assistant") {
-    return message.content
-      .filter((item) => item.type === "text")
-      .map((item) => item.text)
-      .join("\n");
-  }
-  return extractToolResultContent(message);
-}
-
-function cloneAssistant(message: AssistantMessage): AssistantMessage {
-  return JSON.parse(JSON.stringify(message)) as AssistantMessage;
 }
 
 function createRunState(runId: string, runStates: Map<string, RunState>, detachedAborts: Set<string>): RunState {

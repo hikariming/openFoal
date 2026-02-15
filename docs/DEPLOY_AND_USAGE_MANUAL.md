@@ -31,6 +31,11 @@ npm run up:personal
 1. 个人 Web：`http://127.0.0.1:5180`
 2. 网关健康：`http://127.0.0.1:8787/health`
 
+说明：
+
+1. 个人版已移除 `mock` 回复模式，不再提供本地回显型回答。
+2. 未配置可用模型 API Key 时，运行会返回 `MODEL_UNAVAILABLE`。
+
 常用命令：
 
 ```bash

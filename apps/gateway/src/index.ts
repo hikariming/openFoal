@@ -1858,7 +1858,6 @@ function asLlmOptions(
       modelId?: string;
       apiKey?: string;
       baseUrl?: string;
-      streamMode?: "real" | "mock";
     }
   | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -1870,9 +1869,8 @@ function asLlmOptions(
   const modelId = requireString(data, "modelId");
   const apiKey = requireString(data, "apiKey");
   const baseUrl = requireString(data, "baseUrl");
-  const streamMode = data.streamMode === "real" || data.streamMode === "mock" ? data.streamMode : undefined;
 
-  if (!modelRef && !provider && !modelId && !apiKey && !baseUrl && !streamMode) {
+  if (!modelRef && !provider && !modelId && !apiKey && !baseUrl) {
     return undefined;
   }
 
@@ -1881,8 +1879,7 @@ function asLlmOptions(
     ...(provider ? { provider } : {}),
     ...(modelId ? { modelId } : {}),
     ...(apiKey ? { apiKey } : {}),
-    ...(baseUrl ? { baseUrl } : {}),
-    ...(streamMode ? { streamMode } : {})
+    ...(baseUrl ? { baseUrl } : {})
   };
 }
 

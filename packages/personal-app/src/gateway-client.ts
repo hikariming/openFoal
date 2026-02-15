@@ -80,6 +80,13 @@ export interface RunAgentParams {
   sessionId: string;
   input: string;
   runtimeMode: RuntimeMode;
+  llm?: {
+    modelRef?: string;
+    provider?: string;
+    modelId?: string;
+    apiKey?: string;
+    baseUrl?: string;
+  };
 }
 
 export interface RunAgentStreamHandlers {
@@ -96,16 +103,29 @@ export class GatewayRpcError extends Error {
   }
 }
 
+export interface PersonalGatewayClientOptions {
+  baseUrl?: string;
+  clientName?: string;
+  clientVersion?: string;
+  workspaceId?: string;
+}
+
 export class GatewayClient {
   private readonly baseUrl: string;
   private readonly connectionId: string;
+  private readonly clientName: string;
+  private readonly clientVersion: string;
+  private readonly workspaceId: string;
   private connected = false;
   private connectPromise: Promise<void> | null = null;
   private requestCounter = 0;
 
-  constructor(baseUrl = readDefaultBaseUrl()) {
-    this.baseUrl = normalizeBaseUrl(baseUrl);
+  constructor(options: PersonalGatewayClientOptions = {}) {
+    this.baseUrl = normalizeBaseUrl(options.baseUrl ?? readDefaultBaseUrl());
     this.connectionId = createConnectionId();
+    this.clientName = options.clientName ?? "personal-shell";
+    this.clientVersion = options.clientVersion ?? "0.1.0";
+    this.workspaceId = options.workspaceId ?? "w_default";
   }
 
   async ensureConnected(): Promise<void> {
@@ -119,10 +139,10 @@ export class GatewayClient {
     this.connectPromise = (async () => {
       await this.request("connect", {
         client: {
-          name: "personal-web",
-          version: "0.1.0"
+          name: this.clientName,
+          version: this.clientVersion
         },
-        workspaceId: "w_default"
+        workspaceId: this.workspaceId
       });
       this.connected = true;
     })();
@@ -192,7 +212,8 @@ export class GatewayClient {
       const fallback = await this.request("agent.run", {
         sessionId: params.sessionId,
         input: params.input,
-        runtimeMode: params.runtimeMode
+        runtimeMode: params.runtimeMode,
+        ...(params.llm ? { llm: params.llm } : {})
       });
       for (const event of fallback.events) {
         handlers.onEvent?.(event);
@@ -217,7 +238,6 @@ export class GatewayClient {
     const collectedEvents: RpcEvent[] = [];
     const pending = new Map<string, { resolve: (value: RpcResponse) => void; reject: (error: Error) => void }>();
     let closed = false;
-    let runRequestSent = false;
 
     const cleanup = (): void => {
       if (closed) {
@@ -279,48 +299,45 @@ export class GatewayClient {
             }
           : paramsValue
       };
+
       return new Promise<RpcResponse>((resolve, reject) => {
         pending.set(id, { resolve, reject });
         ws.send(JSON.stringify(frame));
       });
     };
 
-    try {
-      const connectRes = await requestOverWs("connect", {
-        client: {
-          name: "personal-web",
-          version: "0.1.0"
-        },
-        workspaceId: "w_default"
-      });
-      if (!connectRes.ok) {
-        throw new GatewayWsPreflightError(connectRes.error.message);
-      }
+    const connectRes = await requestOverWs("connect", {
+      client: {
+        name: this.clientName,
+        version: this.clientVersion
+      },
+      workspaceId: this.workspaceId
+    });
 
-      runRequestSent = true;
-      const runRes = await requestOverWs("agent.run", {
-        sessionId: params.sessionId,
-        input: params.input,
-        runtimeMode: params.runtimeMode
-      });
-      if (!runRes.ok) {
-        throw new GatewayRpcError(runRes.error.code, runRes.error.message);
-      }
+    if (!connectRes.ok) {
       cleanup();
-      return {
-        runId: asString(runRes.payload.runId),
-        events: collectedEvents
-      };
-    } catch (error) {
-      cleanup();
-      if (error instanceof GatewayRpcError) {
-        throw error;
-      }
-      if (runRequestSent) {
-        throw new GatewayRpcError("NETWORK_ERROR", toErrorMessage(error));
-      }
-      throw new GatewayWsPreflightError(toErrorMessage(error));
+      throw new GatewayWsPreflightError(`${connectRes.error.code}: ${connectRes.error.message}`);
     }
+
+    const runRes = await requestOverWs("agent.run", {
+      sessionId: params.sessionId,
+      input: params.input,
+      runtimeMode: params.runtimeMode,
+      ...(params.llm ? { llm: params.llm } : {})
+    });
+
+    if (!runRes.ok) {
+      cleanup();
+      throw new GatewayRpcError(runRes.error.code, runRes.error.message);
+    }
+
+    await waitForTerminalEvent(collectedEvents, ws, pending, handlers);
+
+    cleanup();
+    return {
+      runId: asString(runRes.payload.runId),
+      events: collectedEvents
+    };
   }
 
   private async request(method: GatewayMethod, params: Record<string, unknown>): Promise<RpcSuccessEnvelope> {
@@ -340,21 +357,20 @@ export class GatewayClient {
     const endpoint = new URL("/rpc", this.baseUrl);
     endpoint.searchParams.set("connectionId", this.connectionId);
 
-    let response: Response;
-    try {
-      response = await fetch(endpoint.toString(), {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify(req)
-      });
-    } catch (error) {
+    const response = await fetch(endpoint.toString(), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(req)
+    }).catch((error: unknown) => {
       throw new GatewayRpcError("NETWORK_ERROR", toErrorMessage(error));
-    }
+    });
+
     if (!response.ok) {
       throw new GatewayRpcError("HTTP_ERROR", `HTTP ${response.status}`);
     }
+
     const payload = (await response.json()) as Partial<RpcEnvelope>;
     if (!isRpcEnvelope(payload)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid gateway response");
@@ -369,32 +385,17 @@ export class GatewayClient {
   }
 }
 
-let singletonClient: GatewayClient | null = null;
-
-export function getGatewayClient(): GatewayClient {
-  if (singletonClient) {
-    return singletonClient;
-  }
-  singletonClient = new GatewayClient();
-  return singletonClient;
-}
-
-class GatewayWsPreflightError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "GatewayWsPreflightError";
-  }
-}
-
 function readDefaultBaseUrl(): string {
   const runtime = readRuntimeGatewayBaseUrl();
   if (runtime) {
     return runtime;
   }
 
-  const raw = import.meta.env.VITE_GATEWAY_BASE_URL;
-  if (typeof raw === "string" && raw.trim().length > 0) {
-    return raw.trim();
+  if (typeof import.meta !== "undefined" && import.meta.env) {
+    const raw = (import.meta.env as Record<string, unknown>).VITE_GATEWAY_BASE_URL;
+    if (typeof raw === "string" && raw.trim().length > 0) {
+      return raw.trim();
+    }
   }
 
   if (typeof window !== "undefined" && typeof window.location?.origin === "string") {
@@ -417,33 +418,137 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
 }
 
+function createConnectionId(): string {
+  return `personal_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function createIdempotencyKey(method: GatewayMethod): string {
+  return `idem_${method}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function isRpcEnvelope(value: Partial<RpcEnvelope>): value is RpcEnvelope {
+  return Boolean(value.response && typeof value.response === "object" && Array.isArray(value.events));
+}
+
+function isGatewaySession(value: unknown): value is GatewaySession {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.id === "string" &&
+    typeof item.sessionKey === "string" &&
+    typeof item.title === "string" &&
+    typeof item.preview === "string" &&
+    (item.runtimeMode === "local" || item.runtimeMode === "cloud") &&
+    typeof item.contextUsage === "number" &&
+    typeof item.compactionCount === "number" &&
+    typeof item.updatedAt === "string"
+  );
+}
+
+function isGatewayTranscriptItem(value: unknown): value is GatewayTranscriptItem {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.id === "number" &&
+    typeof item.sessionId === "string" &&
+    typeof item.event === "string" &&
+    Boolean(item.payload && typeof item.payload === "object") &&
+    typeof item.createdAt === "string"
+  );
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
 function toWebSocketUrl(baseUrl: string): string {
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = "/ws";
   url.search = "";
-  url.hash = "";
   return url.toString();
+}
+
+function parseWsJson(data: unknown): RpcEvent | RpcResponse | null {
+  if (typeof data !== "string") {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (isRpcEvent(parsed)) {
+    return parsed;
+  }
+  if (isRpcResponse(parsed)) {
+    return parsed;
+  }
+  return null;
+}
+
+function isRpcEvent(value: unknown): value is RpcEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const frame = value as Record<string, unknown>;
+  return (
+    frame.type === "event" &&
+    typeof frame.event === "string" &&
+    typeof frame.seq === "number" &&
+    typeof frame.stateVersion === "number" &&
+    Boolean(frame.payload && typeof frame.payload === "object")
+  );
+}
+
+function isRpcResponse(value: unknown): value is RpcResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const frame = value as Record<string, unknown>;
+  if (frame.type !== "res" || typeof frame.id !== "string") {
+    return false;
+  }
+  if (frame.ok === true) {
+    return Boolean(frame.payload && typeof frame.payload === "object");
+  }
+  if (frame.ok === false) {
+    return Boolean(frame.error && typeof frame.error === "object");
+  }
+  return false;
+}
+
+class GatewayWsPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GatewayWsPreflightError";
+  }
 }
 
 function openWebSocket(url: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(url);
-    } catch (error) {
-      reject(new GatewayWsPreflightError(toErrorMessage(error)));
-      return;
-    }
+    const ws = new WebSocket(url);
     const timeout = setTimeout(() => {
       if (settled) {
         return;
       }
       settled = true;
       ws.close();
-      reject(new GatewayWsPreflightError("WebSocket open timeout"));
-    }, 3000);
+      reject(new GatewayWsPreflightError("WebSocket timeout"));
+    }, 4000);
 
     ws.onopen = () => {
       if (settled) {
@@ -460,101 +565,59 @@ function openWebSocket(url: string): Promise<WebSocket> {
       }
       settled = true;
       clearTimeout(timeout);
-      reject(new GatewayWsPreflightError("WebSocket open failed"));
+      reject(new GatewayWsPreflightError("WebSocket connection failed"));
     };
   });
 }
 
-function parseWsJson(value: unknown): unknown {
-  if (typeof value !== "string") {
-    return null;
-  }
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
+function waitForTerminalEvent(
+  events: RpcEvent[],
+  ws: WebSocket,
+  pending: Map<string, { resolve: (value: RpcResponse) => void; reject: (error: Error) => void }>,
+  handlers: RunAgentStreamHandlers
+): Promise<void> {
+  return new Promise((resolve) => {
+    const check = (): void => {
+      const hasTerminal = events.some((event) => event.event === "agent.completed" || event.event === "agent.failed");
+      if (hasTerminal) {
+        cleanup();
+        resolve();
+      }
+    };
 
-function createConnectionId(): string {
-  return `personal_web_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
-}
+    const onMessage = (msg: MessageEvent): void => {
+      const parsed = parseWsJson(msg.data);
+      if (!parsed) {
+        return;
+      }
+      if (isRpcEvent(parsed)) {
+        events.push(parsed);
+        handlers.onEvent?.(parsed);
+        check();
+        return;
+      }
+      if (isRpcResponse(parsed)) {
+        const waiter = pending.get(parsed.id);
+        if (!waiter) {
+          return;
+        }
+        pending.delete(parsed.id);
+        waiter.resolve(parsed);
+      }
+    };
 
-function createIdempotencyKey(method: GatewayMethod): string {
-  return `${method}:${Date.now()}:${Math.random().toString(16).slice(2, 10)}`;
-}
+    const onClose = (): void => {
+      cleanup();
+      resolve();
+    };
 
-function isRpcEnvelope(value: Partial<RpcEnvelope>): value is RpcEnvelope {
-  return Boolean(value.response && typeof value.response === "object" && Array.isArray(value.events));
-}
+    const cleanup = (): void => {
+      ws.removeEventListener("message", onMessage);
+      ws.removeEventListener("close", onClose);
+    };
 
-function isRpcResponse(value: unknown): value is RpcResponse {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const frame = value as Partial<RpcResponse>;
-  return frame.type === "res" && typeof frame.id === "string" && typeof frame.ok === "boolean";
-}
-
-function isRpcEvent(value: unknown): value is RpcEvent {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const frame = value as Partial<RpcEvent>;
-  return (
-    frame.type === "event" &&
-    typeof frame.event === "string" &&
-    typeof frame.seq === "number" &&
-    typeof frame.stateVersion === "number" &&
-    Boolean(frame.payload && typeof frame.payload === "object")
-  );
-}
-
-function isGatewaySession(value: unknown): value is GatewaySession {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const item = value as Record<string, unknown>;
-  return (
-    typeof item.id === "string" &&
-    typeof item.sessionKey === "string" &&
-    typeof item.title === "string" &&
-    typeof item.preview === "string" &&
-    (item.runtimeMode === "local" || item.runtimeMode === "cloud") &&
-    typeof item.syncState === "string" &&
-    typeof item.contextUsage === "number" &&
-    typeof item.compactionCount === "number" &&
-    (item.memoryFlushState === "idle" ||
-      item.memoryFlushState === "pending" ||
-      item.memoryFlushState === "flushed" ||
-      item.memoryFlushState === "skipped") &&
-    (item.memoryFlushAt === undefined || typeof item.memoryFlushAt === "string") &&
-    typeof item.updatedAt === "string"
-  );
-}
-
-function isGatewayTranscriptItem(value: unknown): value is GatewayTranscriptItem {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const item = value as Record<string, unknown>;
-  return (
-    typeof item.id === "number" &&
-    typeof item.sessionId === "string" &&
-    (item.runId === undefined || typeof item.runId === "string") &&
-    typeof item.event === "string" &&
-    Boolean(item.payload && typeof item.payload === "object" && !Array.isArray(item.payload)) &&
-    typeof item.createdAt === "string"
-  );
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
+    ws.addEventListener("message", onMessage);
+    ws.addEventListener("close", onClose);
+    check();
+  });
 }

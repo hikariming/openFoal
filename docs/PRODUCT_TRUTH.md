@@ -48,7 +48,9 @@ OpenFoal 统一为 3 个产品块：
    - 会话、转录、幂等、策略、指标
    - `agent_definitions`、`execution_targets`、`budget_policies`、`budget_usage_daily`、`audit_logs`
 5. P1 基线：
-   - 已新增 `apps/personal-web` 最小聊天入口骨架
+   - 已新增 `apps/personal-web` 最小聊天入口
+   - 已抽取共享前端核心 `packages/personal-app`（一套前端，两层壳）
+   - `apps/personal-web`（standalone 壳）与 `apps/desktop`（embedded 壳）复用同一聊天核心
    - 已新增 `test:p1:smoke` 自动化基线
 6. P2 基线（后端 + 控制台最小闭环）：
    - `docker-runner` 目标选择后可走远程 HTTP 执行

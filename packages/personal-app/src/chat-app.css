@@ -1,44 +1,37 @@
-:root {
-  font-family: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", sans-serif;
-  color: #0f172a;
-  background: #f2f6fb;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-}
-
-.shell {
+.pchat-shell {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 280px 1fr;
   background: linear-gradient(155deg, #e8f6ff 0%, #f7fafc 40%, #eef3f9 100%);
 }
 
-.sidebar {
+.pchat-shell-embedded {
+  min-height: auto;
+  grid-template-columns: 1fr;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.pchat-sidebar {
   padding: 16px;
   border-right: 1px solid #d9e1ec;
   background: #ffffffd9;
   backdrop-filter: blur(4px);
 }
 
-.brand {
+.pchat-brand {
   font-size: 18px;
   font-weight: 700;
   margin-bottom: 12px;
 }
 
-.session-list {
+.pchat-session-list {
   margin-top: 12px;
   display: grid;
   gap: 8px;
 }
 
-.session-item {
+.pchat-session-item {
   border: 1px solid #d9e1ec;
   border-radius: 12px;
   background: #fff;
@@ -49,28 +42,32 @@ body {
   gap: 4px;
 }
 
-.session-item.active {
+.pchat-session-item.active {
   border-color: #2b7cff;
   background: #eff6ff;
 }
 
-.session-title {
+.pchat-session-title {
   font-size: 14px;
   font-weight: 600;
 }
 
-.session-preview {
+.pchat-session-preview {
   color: #64748b;
   font-size: 12px;
 }
 
-.main {
+.pchat-main {
   display: grid;
   grid-template-rows: auto auto 1fr auto;
   min-height: 100vh;
 }
 
-.header {
+.pchat-shell-embedded .pchat-main {
+  min-height: 640px;
+}
+
+.pchat-header {
   padding: 16px 20px;
   border-bottom: 1px solid #d9e1ec;
   background: #fff;
@@ -80,47 +77,47 @@ body {
   gap: 8px;
 }
 
-.header h1 {
+.pchat-header h1 {
   margin: 0;
   font-size: 20px;
 }
 
-.header p {
+.pchat-header p {
   margin: 4px 0 0;
   color: #64748b;
   font-size: 12px;
 }
 
-.messages {
+.pchat-messages {
   padding: 16px 20px;
   overflow: auto;
   display: grid;
   gap: 10px;
 }
 
-.msg {
+.pchat-msg {
   border-radius: 12px;
   border: 1px solid #d9e1ec;
   padding: 10px 12px;
   background: #fff;
 }
 
-.msg.user {
+.pchat-msg.user {
   border-color: #b7d5ff;
   background: #eef5ff;
 }
 
-.msg.assistant {
+.pchat-msg.assistant {
   border-color: #bfe8de;
   background: #ecfaf4;
 }
 
-.msg.system {
+.pchat-msg.system {
   border-color: #f6c7c7;
   background: #fff1f1;
 }
 
-.msg-role {
+.pchat-msg-role {
   font-size: 11px;
   color: #64748b;
   margin-bottom: 6px;
@@ -128,7 +125,7 @@ body {
   letter-spacing: 0.08em;
 }
 
-.msg pre {
+.pchat-msg pre {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -136,12 +133,12 @@ body {
   font-size: 13px;
 }
 
-.empty {
+.pchat-empty {
   color: #64748b;
   font-size: 13px;
 }
 
-.composer {
+.pchat-composer {
   padding: 12px 20px 18px;
   border-top: 1px solid #d9e1ec;
   background: #fff;
@@ -149,7 +146,7 @@ body {
   gap: 10px;
 }
 
-.composer textarea {
+.pchat-composer textarea {
   width: 100%;
   min-height: 90px;
   border: 1px solid #d9e1ec;
@@ -159,8 +156,8 @@ body {
   font-size: 14px;
 }
 
-.primary-btn,
-.ghost-btn {
+.pchat-primary-btn,
+.pchat-ghost-btn {
   border-radius: 10px;
   border: 1px solid #2b7cff;
   padding: 9px 12px;
@@ -168,23 +165,23 @@ body {
   font-weight: 600;
 }
 
-.primary-btn {
+.pchat-primary-btn {
   background: #2b7cff;
   color: #fff;
 }
 
-.ghost-btn {
+.pchat-ghost-btn {
   background: #fff;
   color: #2b7cff;
 }
 
-.primary-btn:disabled,
-.ghost-btn:disabled {
+.pchat-primary-btn:disabled,
+.pchat-ghost-btn:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
 
-.error-banner {
+.pchat-error-banner {
   margin: 12px 20px 0;
   border: 1px solid #f4bcbc;
   background: #fff1f1;
@@ -195,16 +192,16 @@ body {
 }
 
 @media (max-width: 980px) {
-  .shell {
+  .pchat-shell {
     grid-template-columns: 1fr;
   }
 
-  .sidebar {
+  .pchat-sidebar {
     border-right: 0;
     border-bottom: 1px solid #d9e1ec;
   }
 
-  .main {
+  .pchat-main {
     min-height: auto;
   }
 }
