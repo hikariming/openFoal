@@ -107,8 +107,8 @@ export async function handleAgentRun(input: {
   const userInput = requireString(req.params, "input");
   const reqRuntimeMode = input.helpers.asRuntimeMode(req.params.runtimeMode);
   const requestedLlm = input.helpers.asLlmOptions(req.params.llm);
-  const tenantId = requireString(req.params, "tenantId") ?? "t_default";
-  const workspaceId = requireString(req.params, "workspaceId") ?? "w_default";
+  const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+  const workspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
   const agentId = requireString(req.params, "agentId") ?? "a_default";
   const actor =
     requireString(req.params, "actor") ??

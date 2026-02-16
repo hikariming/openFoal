@@ -1,4 +1,4 @@
-import { Button, Card, Input, MarkdownRender, Space, Typography } from "@douyinfe/semi-ui";
+import { Button, Card, Input, MarkdownRender, Select, Space, Typography } from "@douyinfe/semi-ui";
 import {
   IconApps,
   IconArrowUp,
@@ -16,7 +16,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GatewayRpcError, getGatewayClient, type GatewayTranscriptItem, type RpcEvent } from "../lib/gateway-client";
-import { getActiveLlmProfile, getSessionRuntimeMode, useAppStore } from "../store/app-store";
+import { getActiveLlmProfile, getSessionRuntimeMode, useAppStore, type LlmProfile } from "../store/app-store";
 
 type ChatRole = "user" | "assistant" | "system" | "tool";
 
@@ -57,8 +57,17 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   const { t } = useTranslation();
   const runtimeMode = useAppStore((state) => getSessionRuntimeMode(state.sessions, state.activeSessionId));
   const llmConfig = useAppStore((state) => state.llmConfig);
+  const setLlmConfig = useAppStore((state) => state.setLlmConfig);
   const upsertSession = useAppStore((state) => state.upsertSession);
   const activeLlmProfile = useMemo(() => getActiveLlmProfile(llmConfig), [llmConfig]);
+  const llmProfileOptions = useMemo(
+    () =>
+      llmConfig.profiles.map((profile) => ({
+        label: formatLlmProfileOptionLabel(profile),
+        value: profile.id
+      })),
+    [llmConfig.profiles]
+  );
   const gatewayClient = useMemo(() => getGatewayClient(), []);
   const historyCache = useRef<Record<string, ChatMessage[]>>({});
   const acceptedLlmCache = useRef<Record<string, AcceptedLlmInfo | undefined>>({});
@@ -68,6 +77,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   const [inputValue, setInputValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
+  const requestedLlm = useMemo(() => buildRequestedLlm(activeLlmProfile), [activeLlmProfile]);
 
   const chatCards = [
     {
@@ -388,13 +398,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
           sessionId,
           input: userText,
           runtimeMode,
-          llm: {
-            ...(activeLlmProfile.modelRef.trim() ? { modelRef: activeLlmProfile.modelRef.trim() } : {}),
-            ...(activeLlmProfile.provider.trim() ? { provider: activeLlmProfile.provider.trim() } : {}),
-            ...(activeLlmProfile.modelId.trim() ? { modelId: activeLlmProfile.modelId.trim() } : {}),
-            ...(activeLlmProfile.apiKey.trim() ? { apiKey: activeLlmProfile.apiKey.trim() } : {}),
-            ...(activeLlmProfile.baseUrl.trim() ? { baseUrl: activeLlmProfile.baseUrl.trim() } : {})
-          }
+          ...(requestedLlm ? { llm: requestedLlm } : {})
         },
         {
           onEvent: (event) => {
@@ -433,9 +437,9 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   };
 
   const runtimeModelLabel = formatAcceptedLlmLabel(acceptedLlm, {
-    modelRef: activeLlmProfile.modelRef,
-    provider: activeLlmProfile.provider,
-    modelId: activeLlmProfile.modelId
+    ...(activeLlmProfile?.modelRef ? { modelRef: activeLlmProfile.modelRef } : {}),
+    ...(activeLlmProfile?.provider ? { provider: activeLlmProfile.provider } : {}),
+    ...(activeLlmProfile?.modelId ? { modelId: activeLlmProfile.modelId } : {})
   });
 
   return (
@@ -545,6 +549,32 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
             placeholder={t("chat.askPlaceholder")}
             suffix={
               <div className="composer-actions">
+                {llmProfileOptions.length > 0 ? (
+                  <div className="composer-model-select-wrap">
+                    <Typography.Text type="tertiary" className="composer-model-select-label">
+                      {t("chat.runtimeModelUsed")}
+                    </Typography.Text>
+                    <Select
+                      className="composer-model-select"
+                      size="small"
+                      value={llmConfig.activeProfileId}
+                      optionList={llmProfileOptions}
+                      disabled={busy}
+                      onChange={(value: unknown) => {
+                        if (typeof value !== "string") {
+                          return;
+                        }
+                        setLlmConfig({
+                          activeProfileId: value
+                        });
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <Typography.Text type="tertiary" className="composer-model-select-empty">
+                    {t("chat.runtimeModelAuto")}
+                  </Typography.Text>
+                )}
                 <Button
                   icon={<IconArrowUp />}
                   theme="solid"
@@ -577,6 +607,54 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
       </div>
     </Card>
   );
+}
+
+function formatLlmProfileOptionLabel(profile: LlmProfile): string {
+  const name = profile.name.trim();
+  if (name) {
+    return name;
+  }
+  const modelRef = profile.modelRef.trim();
+  if (modelRef) {
+    return modelRef;
+  }
+  const provider = profile.provider.trim();
+  const modelId = profile.modelId.trim();
+  if (provider && modelId) {
+    return `${provider} · ${modelId}`;
+  }
+  return provider || modelId || profile.id;
+}
+
+function buildRequestedLlm(
+  profile: LlmProfile | undefined
+):
+  | {
+      modelRef?: string;
+      provider?: string;
+      modelId?: string;
+      apiKey?: string;
+      baseUrl?: string;
+    }
+  | undefined {
+  if (!profile) {
+    return undefined;
+  }
+  const modelRef = profile.modelRef.trim();
+  const provider = profile.provider.trim();
+  const modelId = profile.modelId.trim();
+  const apiKey = profile.apiKey.trim();
+  const baseUrl = profile.baseUrl.trim();
+  if (!modelRef && !provider && !modelId && !apiKey && !baseUrl) {
+    return undefined;
+  }
+  return {
+    ...(modelRef ? { modelRef } : {}),
+    ...(provider ? { provider } : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(apiKey ? { apiKey } : {}),
+    ...(baseUrl ? { baseUrl } : {})
+  };
 }
 
 function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): {
@@ -825,7 +903,7 @@ function readAcceptedLlm(payload: Record<string, unknown>): AcceptedLlmInfo | un
 
 function formatAcceptedLlmLabel(
   accepted: AcceptedLlmInfo | undefined,
-  fallback: { modelRef: string; provider: string; modelId: string }
+  fallback: { modelRef?: string; provider?: string; modelId?: string }
 ): string {
   const modelRef = accepted?.modelRef?.trim();
   if (modelRef) {
@@ -843,12 +921,12 @@ function formatAcceptedLlmLabel(
     return provider;
   }
 
-  const fallbackRef = fallback.modelRef.trim();
+  const fallbackRef = fallback.modelRef?.trim() ?? "";
   if (fallbackRef) {
     return fallbackRef;
   }
-  const fallbackProvider = fallback.provider.trim();
-  const fallbackModelId = fallback.modelId.trim();
+  const fallbackProvider = fallback.provider?.trim() ?? "";
+  const fallbackModelId = fallback.modelId?.trim() ?? "";
   if (fallbackProvider && fallbackModelId) {
     return `${fallbackProvider} · ${fallbackModelId}`;
   }

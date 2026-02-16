@@ -96,6 +96,7 @@ export const zhCN = {
     gatewayOffline: "未连接",
     runtimeMode: "运行模式",
     runtimeModelUsed: "当前模型",
+    runtimeModelAuto: "自动（由后端选择）",
     runtimeLocal: "本地",
     runtimeCloud: "云端",
     contextUsage: "上下文占用",

@@ -453,8 +453,8 @@ export function AppSidebar(props: AppSidebarProps = {}) {
   const addLlmProfile = () => {
     const base = editingLlmProfile ?? activeLlmProfile;
     const nextProfile = createLlmProfile({
-      provider: base?.provider ?? "kimi",
-      modelId: base?.modelId ?? "k2p5",
+      provider: base?.provider ?? "",
+      modelId: base?.modelId ?? "",
       baseUrl: base?.baseUrl ?? ""
     });
     setLlmDraft((prev) => ({

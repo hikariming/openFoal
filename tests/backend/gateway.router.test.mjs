@@ -815,8 +815,8 @@ test("agent.run resolves llm apiKey from secrets repository", async () => {
   const state = createConnectionState();
   state.principal = {
     subject: "u_admin",
-    tenantId: "t_default",
-    workspaceIds: ["w_default"],
+    tenantId: "t_scope_secret",
+    workspaceIds: ["w_scope_secret"],
     roles: ["tenant_admin"],
     authSource: "local",
     claims: {}
@@ -826,8 +826,8 @@ test("agent.run resolves llm apiKey from secrets repository", async () => {
   const secret = await router.handle(
     req("r_secret_upsert_run", "secrets.upsertModelKey", {
       idempotencyKey: "idem_secret_upsert_run_1",
-      tenantId: "t_default",
-      workspaceId: "w_default",
+      tenantId: "t_scope_secret",
+      workspaceId: "w_scope_secret",
       provider: "openai",
       apiKey: "sk-enterprise-from-secret-7788",
       modelId: "gpt-4o-mini"
@@ -861,8 +861,8 @@ test("agent.run resolves llm apiKey from secrets repository", async () => {
   const secretAlias = await router.handle(
     req("r_secret_upsert_alias", "secrets.upsertModelKey", {
       idempotencyKey: "idem_secret_upsert_alias_1",
-      tenantId: "t_default",
-      workspaceId: "w_default",
+      tenantId: "t_scope_secret",
+      workspaceId: "w_scope_secret",
       provider: "kimi-k2.5",
       apiKey: "sk-enterprise-kimi-5566",
       modelId: "kimi-k2.5",
@@ -894,6 +894,60 @@ test("agent.run resolves llm apiKey from secrets repository", async () => {
   assert.equal(acceptedAlias?.payload?.llm?.modelId, "kimi-k2.5");
   assert.equal(acceptedAlias?.payload?.llm?.baseUrl, "https://api.moonshot.cn/v1");
   assert.equal(acceptedAlias?.payload?.llm?.apiKey, undefined);
+});
+
+test("secrets.getModelKeyMeta defaults to principal scope when params are omitted", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  state.principal = {
+    subject: "u_meta_scope",
+    tenantId: "t_meta_scope",
+    workspaceIds: ["w_meta_scope"],
+    roles: ["tenant_admin"],
+    authSource: "local",
+    claims: {}
+  };
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const scopedSecret = await router.handle(
+    req("r_secret_scope_upsert", "secrets.upsertModelKey", {
+      idempotencyKey: "idem_secret_scope_upsert_1",
+      tenantId: "t_meta_scope",
+      workspaceId: "w_meta_scope",
+      provider: "openai",
+      apiKey: "sk-scope-meta-1111",
+      modelId: "gpt-4o-mini"
+    }),
+    state
+  );
+  assert.equal(scopedSecret.response.ok, true);
+
+  const otherSecret = await router.handle(
+    req("r_secret_other_upsert", "secrets.upsertModelKey", {
+      idempotencyKey: "idem_secret_other_upsert_1",
+      tenantId: "t_other_tenant",
+      workspaceId: "w_other_workspace",
+      provider: "deepseek",
+      apiKey: "sk-scope-meta-2222",
+      modelId: "deepseek-chat"
+    }),
+    state
+  );
+  assert.equal(otherSecret.response.ok, true);
+
+  const meta = await router.handle(
+    req("r_secret_meta_scope_default", "secrets.getModelKeyMeta", {}),
+    state
+  );
+  assert.equal(meta.response.ok, true);
+  if (meta.response.ok) {
+    const items = meta.response.payload.items;
+    assert.equal(Array.isArray(items), true);
+    assert.equal(items.length, 1);
+    assert.equal(items[0]?.tenantId, "t_meta_scope");
+    assert.equal(items[0]?.workspaceId, "w_meta_scope");
+    assert.equal(items[0]?.provider, "openai");
+  }
 });
 
 test("high-risk tools run directly", async () => {

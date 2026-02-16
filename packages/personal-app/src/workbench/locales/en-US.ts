@@ -96,6 +96,7 @@ export const enUS = {
     gatewayOffline: "Disconnected",
     runtimeMode: "Runtime",
     runtimeModelUsed: "Model",
+    runtimeModelAuto: "Auto (backend selected)",
     runtimeLocal: "Local",
     runtimeCloud: "Cloud",
     contextUsage: "Context",

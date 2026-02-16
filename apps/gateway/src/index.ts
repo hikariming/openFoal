@@ -944,10 +944,11 @@ async function route(
     }
 
     case "secrets.getModelKeyMeta": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0];
       const items = await modelSecretRepo.listMeta({
         tenantId,
-        ...(requireString(req.params, "workspaceId") ? { workspaceId: requireString(req.params, "workspaceId") } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
         ...(requireString(req.params, "provider") ? { provider: requireString(req.params, "provider") } : {})
       });
       return {

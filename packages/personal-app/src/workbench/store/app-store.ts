@@ -43,7 +43,7 @@ type AppStore = {
   setLlmConfig: (patch: Partial<LlmConfig>) => void;
 };
 
-const DEFAULT_LLM_PROFILES: LlmProfile[] = [
+const LEGACY_PRESET_PROFILES: LlmProfile[] = [
   {
     id: "profile_kimi_k2p5",
     name: "Kimi · k2p5",
@@ -74,8 +74,8 @@ const DEFAULT_LLM_PROFILES: LlmProfile[] = [
 ];
 
 const DEFAULT_LLM_CONFIG: LlmConfig = {
-  activeProfileId: DEFAULT_LLM_PROFILES[0].id,
-  profiles: DEFAULT_LLM_PROFILES
+  activeProfileId: "",
+  profiles: []
 };
 
 const LLM_CONFIG_STORAGE_KEY = "openfoal.desktop.llmConfig.v2";
@@ -150,17 +150,17 @@ export function getSessionRuntimeMode(sessions: SessionItem[], activeSessionId: 
   return getActiveSession(sessions, activeSessionId)?.runtimeMode ?? "local";
 }
 
-export function getActiveLlmProfile(config: LlmConfig): LlmProfile {
+export function getActiveLlmProfile(config: LlmConfig): LlmProfile | undefined {
   const active = config.profiles.find((item) => item.id === config.activeProfileId);
-  return active ?? config.profiles[0] ?? DEFAULT_LLM_CONFIG.profiles[0];
+  return active ?? config.profiles[0];
 }
 
 export function createLlmProfile(seed?: Partial<LlmProfile>): LlmProfile {
   const generatedId = `profile_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const provider = firstNonEmpty(seed?.provider, "kimi") ?? "kimi";
-  const modelId = firstNonEmpty(seed?.modelId, "k2p5") ?? "k2p5";
-  const baseUrl = firstNonEmpty(seed?.baseUrl, baseUrlByProvider(provider)) ?? "";
-  const name = firstNonEmpty(seed?.name, `${provider} · ${modelId}`) ?? `${provider} · ${modelId}`;
+  const provider = firstNonEmpty(seed?.provider) ?? "";
+  const modelId = firstNonEmpty(seed?.modelId) ?? "";
+  const baseUrl = firstNonEmpty(seed?.baseUrl, provider ? baseUrlByProvider(provider) : undefined) ?? "";
+  const name = firstNonEmpty(seed?.name, provider && modelId ? `${provider} · ${modelId}` : undefined) ?? "Custom Model";
   return {
     id: firstNonEmpty(seed?.id, generatedId) ?? generatedId,
     name,
@@ -203,15 +203,15 @@ function parseLegacyLlmConfig(value: unknown): LlmConfig {
     return DEFAULT_LLM_CONFIG;
   }
 
-  const provider = firstNonEmpty(asString(value.provider), DEFAULT_LLM_CONFIG.profiles[0].provider);
-  const modelId = firstNonEmpty(asString(value.modelId), DEFAULT_LLM_CONFIG.profiles[0].modelId);
+  const provider = firstNonEmpty(asString(value.provider));
+  const modelId = firstNonEmpty(asString(value.modelId));
   const apiKey = firstNonEmpty(asString(value.apiKey)) ?? "";
-  const baseUrl = firstNonEmpty(asString(value.baseUrl), DEFAULT_LLM_CONFIG.profiles[0].baseUrl);
+  const baseUrl = firstNonEmpty(asString(value.baseUrl), provider ? baseUrlByProvider(provider) : undefined);
   const profile = createLlmProfile({
     id: "profile_legacy",
     name: "Legacy",
-    provider: provider ?? "kimi",
-    modelId: modelId ?? "k2p5",
+    ...(provider ? { provider } : {}),
+    ...(modelId ? { modelId } : {}),
     apiKey,
     baseUrl: baseUrl ?? ""
   });
@@ -243,6 +243,9 @@ function normalizeLlmConfig(value: unknown): LlmConfig {
       apiKey: asString(item.apiKey) ?? undefined,
       baseUrl: asString(item.baseUrl) ?? undefined
     });
+    if (isLegacyPresetProfile(profile)) {
+      continue;
+    }
     if (seen.has(profile.id)) {
       continue;
     }
@@ -250,12 +253,12 @@ function normalizeLlmConfig(value: unknown): LlmConfig {
     normalizedProfiles.push(profile);
   }
 
-  const profiles = normalizedProfiles.length > 0 ? normalizedProfiles : DEFAULT_LLM_CONFIG.profiles;
-  const activeProfileId = firstNonEmpty(asString(value.activeProfileId), profiles[0].id) ?? profiles[0].id;
+  const profiles = normalizedProfiles;
+  const activeProfileId = firstNonEmpty(asString(value.activeProfileId), profiles[0]?.id) ?? "";
   const activeExists = profiles.some((item) => item.id === activeProfileId);
 
   return {
-    activeProfileId: activeExists ? activeProfileId : profiles[0].id,
+    activeProfileId: activeExists ? activeProfileId : profiles[0]?.id ?? "",
     profiles
   };
 }
@@ -275,6 +278,21 @@ function baseUrlByProvider(provider: string): string {
     return "https://api.anthropic.com";
   }
   return "https://api.moonshot.cn/v1";
+}
+
+function isLegacyPresetProfile(profile: LlmProfile): boolean {
+  const preset = LEGACY_PRESET_PROFILES.find((item) => item.id === profile.id);
+  if (!preset) {
+    return false;
+  }
+  return (
+    profile.name === preset.name &&
+    profile.modelRef === preset.modelRef &&
+    profile.provider === preset.provider &&
+    profile.modelId === preset.modelId &&
+    profile.apiKey === preset.apiKey &&
+    profile.baseUrl === preset.baseUrl
+  );
 }
 
 function sortSessions(sessions: SessionItem[]): SessionItem[] {

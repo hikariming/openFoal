@@ -884,7 +884,7 @@ export class GatewayClient {
     baseUrl?: string;
   }): Promise<GatewayModelKeyMeta | null> {
     await this.ensureConnected();
-    const result = await this.request("secrets.upsertModelKey", {
+    const result = await this.request("secrets.upsertModelKey", this.withScope({
       idempotencyKey: createIdempotencyKey("secrets_upsert_model_key"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
@@ -892,17 +892,17 @@ export class GatewayClient {
       apiKey: input.apiKey,
       ...(input.modelId ? { modelId: input.modelId } : {}),
       ...(input.baseUrl ? { baseUrl: input.baseUrl } : {})
-    });
+    }));
     return isGatewayModelKeyMeta(result.response.payload.secret) ? result.response.payload.secret : null;
   }
 
   async getModelKeyMeta(params: { tenantId?: string; workspaceId?: string; provider?: string } = {}): Promise<GatewayModelKeyMeta[]> {
     await this.ensureConnected();
-    const result = await this.request("secrets.getModelKeyMeta", {
+    const result = await this.request("secrets.getModelKeyMeta", this.withScope({
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
       ...(params.provider ? { provider: params.provider } : {})
-    });
+    }));
     return readArray(result.response.payload.items).filter(isGatewayModelKeyMeta);
   }
 
