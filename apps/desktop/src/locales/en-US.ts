@@ -58,6 +58,8 @@ export const enUS = {
     llmProvider: "Model Provider",
     llmModelId: "Model ID",
     llmModelRef: "Model Ref (modelRef)",
+    runtimeIssuedModel: "Enterprise Applied Model (Latest Run)",
+    runtimeIssuedModelEmpty: "N/A (send one message first)",
     llmProfileActive: "Active Model",
     llmProfileEdit: "Edit Model Config",
     llmProfileName: "Model Label",

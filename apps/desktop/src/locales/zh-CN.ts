@@ -58,6 +58,8 @@ export const zhCN = {
     llmProvider: "模型供应商",
     llmModelId: "模型 ID",
     llmModelRef: "模型引用（modelRef）",
+    runtimeIssuedModel: "企业下发模型（最近一轮）",
+    runtimeIssuedModelEmpty: "暂无（先发一条消息触发）",
     llmProfileActive: "当前使用模型",
     llmProfileEdit: "编辑模型配置",
     llmProfileName: "模型显示名",

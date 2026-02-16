@@ -13,6 +13,7 @@ type GatewayMethod =
   | "policy.update"
   | "audit.query"
   | "metrics.summary"
+  | "secrets.getModelKeyMeta"
   | "memory.get"
   | "memory.search"
   | "memory.appendDaily"
@@ -152,6 +153,18 @@ export type GatewayMetricsSummary = {
   toolCallsTotal: number;
   toolFailures: number;
   p95LatencyMs: number;
+};
+
+export type GatewayModelKeyMeta = {
+  tenantId: string;
+  workspaceId?: string;
+  provider: string;
+  modelId?: string;
+  baseUrl?: string;
+  maskedKey: string;
+  keyLast4: string;
+  updatedBy: string;
+  updatedAt: string;
 };
 
 export type GatewayAuditItem = {
@@ -413,6 +426,18 @@ export class GatewayHttpClient {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid metrics.summary payload");
     }
     return metrics;
+  }
+
+  async getModelKeyMeta(params: { provider?: string } = {}): Promise<GatewayModelKeyMeta[]> {
+    await this.ensureConnected();
+    const result = await this.request("secrets.getModelKeyMeta", withRuntimeScope({
+      ...(params.provider ? { provider: params.provider } : {})
+    }));
+    const items = result.response.payload.items;
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.filter(isGatewayModelKeyMeta);
   }
 
   async memoryGet(params: { path?: string; from?: number; lines?: number } = {}): Promise<GatewayMemoryReadResult> {
@@ -1051,6 +1076,24 @@ function isGatewayMetricsSummary(value: unknown): value is GatewayMetricsSummary
 
 function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isGatewayModelKeyMeta(value: unknown): value is GatewayModelKeyMeta {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.tenantId === "string" &&
+    (item.workspaceId === undefined || typeof item.workspaceId === "string") &&
+    typeof item.provider === "string" &&
+    (item.modelId === undefined || typeof item.modelId === "string") &&
+    (item.baseUrl === undefined || typeof item.baseUrl === "string") &&
+    typeof item.maskedKey === "string" &&
+    typeof item.keyLast4 === "string" &&
+    typeof item.updatedBy === "string" &&
+    typeof item.updatedAt === "string"
+  );
 }
 
 function isGatewayMemoryReadResult(value: unknown): value is GatewayMemoryReadResult {

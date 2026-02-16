@@ -24,7 +24,13 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { getGatewayClient, type GatewayMemorySearchHit, type GatewaySession } from "../lib/gateway-client";
+import {
+  getGatewayClient,
+  type GatewayMemorySearchHit,
+  type GatewayModelKeyMeta,
+  type GatewaySession,
+  type GatewayTranscriptItem
+} from "../lib/gateway-client";
 import {
   createLlmProfile,
   getSessionRuntimeMode,
@@ -37,6 +43,12 @@ import {
 type SideMenu = "new" | "skills" | "automations";
 type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "memory" | "subscription" | "referral" | "experimental";
 type RuntimeSettingsTab = "model" | "status";
+type RuntimeResolvedLlm = {
+  modelRef?: string;
+  provider?: string;
+  modelId?: string;
+  baseUrl?: string;
+};
 
 type AppSidebarProps = {
   defaultRuntimeMode?: RuntimeMode;
@@ -76,6 +88,7 @@ export function AppSidebar(props: AppSidebarProps = {}) {
   const [memorySearchHits, setMemorySearchHits] = useState<GatewayMemorySearchHit[]>([]);
   const [memorySearchMeta, setMemorySearchMeta] = useState("");
   const [llmSavedNotice, setLlmSavedNotice] = useState("");
+  const [runtimeResolvedLlm, setRuntimeResolvedLlm] = useState<RuntimeResolvedLlm | undefined>(undefined);
   const { sessions, activeSessionId, setSessions, upsertSession, setActiveSession, setRuntimeMode, llmConfig, setLlmConfig } =
     useAppStore();
   const runtimeMode = useAppStore((state) => getSessionRuntimeMode(state.sessions, state.activeSessionId));
@@ -98,11 +111,7 @@ export function AppSidebar(props: AppSidebarProps = {}) {
     { key: "referral", label: t("sidebar.referral"), icon: <IconLink /> },
     { key: "experimental", label: t("sidebar.experimental"), icon: <IconGiftStroked /> }
   ];
-  const providerOptions = [
-    { label: "Kimi", value: "kimi" },
-    { label: "OpenAI", value: "openai" },
-    { label: "Anthropic", value: "anthropic" }
-  ];
+  const providerOptions = useMemo(() => buildProviderOptions(llmDraft.profiles), [llmDraft.profiles]);
   const baseUrlOptionsByProvider: Record<string, Array<{ label: string; value: string }>> = {
     kimi: [
       { label: "Kimi CN · api.moonshot.cn", value: "https://api.moonshot.cn/v1" },
@@ -193,6 +202,61 @@ export function AppSidebar(props: AppSidebarProps = {}) {
       cancelled = true;
     };
   }, [activeSessionId, activeSettingsMenu, runtimeTab, settingsModalVisible, upsertSession]);
+
+  useEffect(() => {
+    if (!settingsModalVisible || activeSettingsMenu !== "runtimeModel") {
+      return;
+    }
+    if (!activeSessionId) {
+      setRuntimeResolvedLlm(undefined);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const client = getGatewayClient();
+        await client.ensureConnected();
+        const history = await client.getSessionHistory({
+          sessionId: activeSessionId,
+          limit: 120
+        });
+        if (!cancelled) {
+          setRuntimeResolvedLlm(resolveRuntimeLlmFromTranscript(history));
+        }
+      } catch {
+        if (!cancelled) {
+          setRuntimeResolvedLlm(undefined);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, activeSettingsMenu, settingsModalVisible]);
+
+  useEffect(() => {
+    if (!settingsModalVisible || activeSettingsMenu !== "runtimeModel") {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const client = getGatewayClient();
+        await client.ensureConnected();
+        const issuedModelMeta = await client.getModelKeyMeta();
+        if (!cancelled) {
+          setLlmDraft((prev) => mergeIssuedProfilesIntoConfig(prev, issuedModelMeta));
+        }
+      } catch {
+        // Ignore model meta sync failures to avoid blocking runtime settings usage.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSettingsMenu, settingsModalVisible]);
+
+  const runtimeIssuedModelLabel = formatRuntimeResolvedLlm(runtimeResolvedLlm) ?? t("sidebar.runtimeIssuedModelEmpty");
 
   const applyRuntimeMode = async (nextMode: RuntimeMode): Promise<void> => {
     if (!activeSessionId || nextMode === runtimeMode || runtimePending) {
@@ -731,6 +795,8 @@ export function AppSidebar(props: AppSidebarProps = {}) {
                       ) : null}
 
                       <div className="llm-config-wrap">
+                        <Typography.Text className="settings-label">{t("sidebar.runtimeIssuedModel")}</Typography.Text>
+                        <Typography.Text className="settings-value">{runtimeIssuedModelLabel}</Typography.Text>
                         <Typography.Text className="settings-label">{t("sidebar.llmProfileActive")}</Typography.Text>
                         <Select
                           value={llmDraft.activeProfileId}
@@ -1110,4 +1176,175 @@ function syncStateColor(syncState: "local_only" | "syncing" | "synced" | "confli
 function formatUsage(value: number | undefined): string {
   const usage = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
   return `${Math.round(usage * 100)}%`;
+}
+
+function resolveRuntimeLlmFromTranscript(items: GatewayTranscriptItem[]): RuntimeResolvedLlm | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.event !== "agent.accepted") {
+      continue;
+    }
+    const fromPayload = asRuntimeResolvedLlm(item.payload);
+    if (fromPayload) {
+      return fromPayload;
+    }
+    if (isObjectRecord(item.payload.llm)) {
+      const fromNested = asRuntimeResolvedLlm(item.payload.llm);
+      if (fromNested) {
+        return fromNested;
+      }
+    }
+  }
+  return undefined;
+}
+
+function asRuntimeResolvedLlm(value: unknown): RuntimeResolvedLlm | undefined {
+  if (!isObjectRecord(value)) {
+    return undefined;
+  }
+  const modelRef = stringOrUndefined(value.modelRef);
+  const provider = stringOrUndefined(value.provider);
+  const modelId = stringOrUndefined(value.modelId);
+  const baseUrl = stringOrUndefined(value.baseUrl);
+  if (!modelRef && !provider && !modelId && !baseUrl) {
+    return undefined;
+  }
+  return {
+    ...(modelRef ? { modelRef } : {}),
+    ...(provider ? { provider } : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(baseUrl ? { baseUrl } : {})
+  };
+}
+
+function formatRuntimeResolvedLlm(value: RuntimeResolvedLlm | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value.modelRef) {
+    return value.modelRef;
+  }
+  if (value.provider && value.modelId) {
+    return `${value.provider} · ${value.modelId}`;
+  }
+  if (value.modelId) {
+    return value.modelId;
+  }
+  return value.provider;
+}
+
+function mergeIssuedProfilesIntoConfig(config: LlmConfig, items: GatewayModelKeyMeta[]): LlmConfig {
+  const localProfiles = config.profiles.filter((profile) => !isIssuedProfileId(profile.id));
+  const issuedProfiles = items
+    .map(toIssuedLlmProfile)
+    .filter((profile): profile is LlmProfile => Boolean(profile))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  const profiles = [...localProfiles, ...issuedProfiles];
+  const activeProfileId = profiles.some((profile) => profile.id === config.activeProfileId)
+    ? config.activeProfileId
+    : profiles[0]?.id ?? config.activeProfileId;
+  return {
+    ...config,
+    activeProfileId,
+    profiles
+  };
+}
+
+function toIssuedLlmProfile(item: GatewayModelKeyMeta): LlmProfile | undefined {
+  const provider = item.provider.trim().toLowerCase();
+  if (!provider) {
+    return undefined;
+  }
+  const modelId = item.modelId?.trim() || "default";
+  const scopeSegment = sanitizeProfileSegment(item.workspaceId?.trim() || "tenant");
+  const id = `profile_enterprise_issued_${sanitizeProfileSegment(provider)}_${sanitizeProfileSegment(modelId)}_${scopeSegment}`;
+  const baseUrl = item.baseUrl?.trim() || defaultBaseUrlForProvider(provider);
+  return {
+    id,
+    name: `${providerDisplayName(provider)} · ${modelId}（企业下发）`,
+    modelRef: "",
+    provider,
+    modelId,
+    apiKey: "",
+    baseUrl
+  };
+}
+
+function isIssuedProfileId(value: string): boolean {
+  return value.startsWith("profile_enterprise_issued_");
+}
+
+function sanitizeProfileSegment(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return normalized || "default";
+}
+
+function providerDisplayName(provider: string): string {
+  if (provider === "openai") {
+    return "OpenAI";
+  }
+  if (provider === "anthropic") {
+    return "Anthropic";
+  }
+  if (provider === "kimi" || provider.startsWith("kimi-") || provider.includes("moonshot")) {
+    return "Kimi";
+  }
+  if (provider === "gemini") {
+    return "Gemini";
+  }
+  if (provider === "qwen") {
+    return "Qwen";
+  }
+  if (provider === "deepseek") {
+    return "DeepSeek";
+  }
+  return provider;
+}
+
+function defaultBaseUrlForProvider(provider: string): string {
+  if (provider === "openai") {
+    return "https://api.openai.com/v1";
+  }
+  if (provider === "anthropic") {
+    return "https://api.anthropic.com";
+  }
+  if (provider === "gemini") {
+    return "https://generativelanguage.googleapis.com";
+  }
+  if (provider === "deepseek") {
+    return "https://api.deepseek.com";
+  }
+  if (provider === "qwen") {
+    return "https://dashscope.aliyuncs.com/compatible-mode/v1";
+  }
+  return "https://api.moonshot.cn/v1";
+}
+
+function buildProviderOptions(profiles: LlmProfile[]): Array<{ label: string; value: string }> {
+  const seed = ["kimi", "openai", "anthropic"];
+  const providers = new Set<string>(seed);
+  for (const profile of profiles) {
+    const value = profile.provider.trim().toLowerCase();
+    if (value) {
+      providers.add(value);
+    }
+  }
+  return Array.from(providers.values())
+    .sort((left, right) => left.localeCompare(right))
+    .map((value) => ({
+      label: providerDisplayName(value),
+      value
+    }));
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

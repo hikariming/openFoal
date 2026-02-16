@@ -516,7 +516,7 @@ function buildSystemPromptWithWorkspace(options: PiCoreOptions): string {
     "Memory recall rule: only when the question is about prior work, decisions, dates, preferences, or todos not already present in this chat, run memory.search first, then use memory.get for exact lines."
   );
   lines.push(
-    "URL follow-up rule: when the user gives a URL or asks to continue/check/load a just-mentioned URL, prefer http.request on that URL first."
+    "URL follow-up rule: when the user gives a URL or asks to continue/check/load a just-mentioned URL, call http.request first with extract:'readable', followRedirects:true (and increase timeoutMs/maxBodyChars when needed)."
   );
   lines.push(
     "Do not call file.list/file.read or memory.search for website questions unless the user explicitly asks about local files or memory notes."
