@@ -1,0 +1,178 @@
+const zhCN = {
+  app: {
+    brand: "OpenFoal 企业控制台",
+    subtitle: "治理与运行控制台"
+  },
+  nav: {
+    chat: "聊天",
+    dashboard: "总览",
+    sessions: "会话",
+    users: "用户",
+    policies: "策略",
+    secrets: "模型密钥",
+    audit: "审计",
+    agents: "智能体",
+    targets: "执行目标",
+    budget: "预算",
+    context: "上下文",
+    infra: "基础设施"
+  },
+  common: {
+    loading: "加载中...",
+    refresh: "刷新",
+    save: "保存",
+    create: "创建",
+    createNew: "新建",
+    update: "更新",
+    edit: "编辑",
+    actions: "操作",
+    search: "搜索",
+    filter: "筛选",
+    clear: "清空",
+    apply: "应用",
+    cancel: "取消",
+    confirm: "确认",
+    reset: "重置",
+    loadMore: "加载更多",
+    login: "登录",
+    logout: "退出",
+    language: "语言",
+    pageSize: "每页",
+    total: "总数",
+    previous: "上一页",
+    next: "下一页",
+    tenantId: "租户",
+    workspaceId: "工作区",
+    userId: "用户",
+    scopeKey: "作用域",
+    runtimeMode: "运行模式",
+    enabled: "启用",
+    disabled: "禁用",
+    noData: "暂无数据",
+    forbidden: "无权限访问该页面或操作。"
+  },
+  auth: {
+    title: "企业登录",
+    tenant: "租户代码",
+    username: "用户名",
+    password: "密码"
+  },
+  chat: {
+    brand: "OpenFoal 企业聊天",
+    newSession: "+ 新建会话",
+    emptySessionPreview: "空",
+    noSessionTitle: "无会话",
+    noActiveSession: "当前无激活会话",
+    refresh: "刷新",
+    refreshing: "刷新中...",
+    noMessages: "暂无消息",
+    composerPlaceholder: "输入消息...",
+    send: "发送",
+    running: "运行中...",
+    roleUser: "用户",
+    roleAssistant: "助手",
+    roleSystem: "系统",
+    backToAdmin: "返回管理台"
+  },
+  dashboard: {
+    title: "运行概览",
+    metrics: "指标",
+    recentSessions: "最近会话",
+    recentAudit: "最近审计",
+    runsTotal: "总运行数",
+    runsFailed: "失败运行",
+    toolCalls: "工具调用",
+    p95: "P95 延迟"
+  },
+  sessions: {
+    title: "会话管理",
+    createTitle: "创建会话",
+    sessionTitle: "会话标题",
+    history: "会话历史",
+    view: "查看",
+    local: "本地",
+    cloud: "云端"
+  },
+  users: {
+    title: "用户管理",
+    createUser: "创建用户",
+    status: "状态",
+    resetPassword: "重置密码",
+    memberships: "成员关系",
+    role: "角色",
+    username: "用户名",
+    password: "密码",
+    displayName: "显示名",
+    email: "邮箱",
+    newPassword: "新密码"
+  },
+  policies: {
+    title: "策略管理",
+    toolDefault: "默认工具策略",
+    highRisk: "高风险策略",
+    bashMode: "Bash 模式",
+    toolsOverride: "工具覆盖(JSON)"
+  },
+  secrets: {
+    title: "模型密钥",
+    formTitle: "新增或更新模型密钥",
+    formHint: "支持多渠道配置：可先点渠道预设，再填模型与密钥。",
+    provider: "提供商",
+    modelId: "模型 ID",
+    baseUrl: "Base URL",
+    apiKey: "API Key",
+    masked: "已保存密钥",
+    modelQuickPick: "模型快捷选择",
+    baseUrlQuickPick: "端点快捷选择",
+    clearForm: "重置表单",
+    searchPlaceholder: "搜索 provider / model / workspace / baseUrl",
+    total: "条目数",
+    loadToForm: "载入编辑",
+    providerApiKeyRequired: "provider 和 apiKey 不能为空。"
+  },
+  audit: {
+    title: "审计日志",
+    action: "动作",
+    from: "开始时间",
+    to: "结束时间"
+  },
+  agents: {
+    title: "智能体管理",
+    agentId: "智能体 ID",
+    name: "名称",
+    executionTargetId: "执行目标",
+    policyScopeKey: "策略范围"
+  },
+  targets: {
+    title: "执行目标管理",
+    targetId: "目标 ID",
+    kind: "类型",
+    endpoint: "端点",
+    authToken: "鉴权 Token",
+    isDefault: "默认"
+  },
+  budget: {
+    title: "预算管理",
+    tokenDailyLimit: "日 Token 限额",
+    costMonthlyUsdLimit: "月成本限额(USD)",
+    hardLimit: "硬限制",
+    usage: "使用情况"
+  },
+  context: {
+    title: "上下文管理",
+    layer: "层级",
+    file: "文件",
+    content: "内容",
+    load: "读取",
+    tenant: "租户层",
+    workspace: "工作区层",
+    user: "用户层"
+  },
+  infra: {
+    title: "基础设施",
+    health: "健康检查",
+    reconcile: "存储对账"
+  }
+};
+
+export default zhCN;

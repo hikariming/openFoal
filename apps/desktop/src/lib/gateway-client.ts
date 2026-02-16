@@ -19,6 +19,7 @@ type GatewayMethod =
   | "memory.archive";
 
 type ErrorCode =
+  | "AUTH_REQUIRED"
   | "UNAUTHORIZED"
   | "INVALID_REQUEST"
   | "METHOD_NOT_FOUND"
@@ -89,6 +90,14 @@ interface GatewayClientOptions {
   baseUrl?: string;
   connectionId?: string;
 }
+
+type RuntimeScope = {
+  tenantId?: string;
+  workspaceId?: string;
+  userId?: string;
+  agentId?: string;
+  actor?: string;
+};
 
 const SIDE_EFFECT_METHODS = new Set<GatewayMethod>([
   "agent.run",
@@ -222,6 +231,7 @@ export class GatewayHttpClient {
   private connected = false;
   private connectPromise: Promise<void> | null = null;
   private requestCounter = 0;
+  private lastAccessToken?: string;
 
   constructor(options: GatewayClientOptions = {}) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl ?? readDefaultBaseUrl());
@@ -229,6 +239,11 @@ export class GatewayHttpClient {
   }
 
   async ensureConnected(): Promise<void> {
+    const currentAccessToken = resolveRuntimeAccessToken();
+    if (this.connected && currentAccessToken !== this.lastAccessToken) {
+      this.connected = false;
+    }
+
     if (this.connected) {
       return;
     }
@@ -237,14 +252,25 @@ export class GatewayHttpClient {
     }
 
     this.connectPromise = (async () => {
+      const runtimeScope = readRuntimeScope();
+      const accessToken = currentAccessToken;
       await this.request("connect", {
         client: {
           name: "desktop",
           version: "0.1.0"
         },
-        workspaceId: "w_default"
+        workspaceId: runtimeScope.workspaceId ?? "w_default",
+        ...(accessToken
+          ? {
+              auth: {
+                type: "Bearer",
+                token: accessToken
+              }
+            }
+          : {})
       });
       this.connected = true;
+      this.lastAccessToken = accessToken;
     })();
 
     try {
@@ -256,7 +282,7 @@ export class GatewayHttpClient {
 
   async listSessions(): Promise<GatewaySession[]> {
     await this.ensureConnected();
-    const result = await this.request("sessions.list", {});
+    const result = await this.request("sessions.list", withRuntimeScope({}));
     const items = result.response.payload.items;
     if (!Array.isArray(items)) {
       return [];
@@ -267,6 +293,7 @@ export class GatewayHttpClient {
   async createSession(params?: { title?: string; runtimeMode?: RuntimeMode }): Promise<GatewaySession> {
     await this.ensureConnected();
     const result = await this.request("sessions.create", {
+      ...withRuntimeScope({}),
       ...(params?.title ? { title: params.title } : {}),
       ...(params?.runtimeMode ? { runtimeMode: params.runtimeMode } : {})
     });
@@ -279,7 +306,7 @@ export class GatewayHttpClient {
 
   async getSession(sessionId: string): Promise<GatewaySession | null> {
     await this.ensureConnected();
-    const result = await this.request("sessions.get", { sessionId });
+    const result = await this.request("sessions.get", withRuntimeScope({ sessionId }));
     const session = result.response.payload.session;
     if (session == null) {
       return null;
@@ -297,6 +324,7 @@ export class GatewayHttpClient {
   }): Promise<GatewayTranscriptItem[]> {
     await this.ensureConnected();
     const result = await this.request("sessions.history", {
+      ...withRuntimeScope({}),
       sessionId: params.sessionId,
       ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       ...(typeof params.beforeId === "number" ? { beforeId: params.beforeId } : {})
@@ -314,6 +342,7 @@ export class GatewayHttpClient {
   ): Promise<{ sessionId: string; runtimeMode: RuntimeMode; status: string; effectiveOn?: string }> {
     await this.ensureConnected();
     const result = await this.request("runtime.setMode", {
+      ...withRuntimeScope({}),
       sessionId,
       runtimeMode
     });
@@ -389,6 +418,7 @@ export class GatewayHttpClient {
   async memoryGet(params: { path?: string; from?: number; lines?: number } = {}): Promise<GatewayMemoryReadResult> {
     await this.ensureConnected();
     const result = await this.request("memory.get", {
+      ...withRuntimeScope({}),
       ...(params.path ? { path: params.path } : {}),
       ...(typeof params.from === "number" ? { from: params.from } : {}),
       ...(typeof params.lines === "number" ? { lines: params.lines } : {})
@@ -407,6 +437,7 @@ export class GatewayHttpClient {
   }): Promise<GatewayMemorySearchResult> {
     await this.ensureConnected();
     const result = await this.request("memory.search", {
+      ...withRuntimeScope({}),
       query: params.query,
       ...(typeof params.maxResults === "number" ? { maxResults: params.maxResults } : {}),
       ...(typeof params.minScore === "number" ? { minScore: params.minScore } : {})
@@ -425,6 +456,7 @@ export class GatewayHttpClient {
   }): Promise<GatewayMemoryAppendResult> {
     await this.ensureConnected();
     const result = await this.request("memory.appendDaily", {
+      ...withRuntimeScope({}),
       content: params.content,
       ...(params.date ? { date: params.date } : {}),
       ...(params.includeLongTerm === true ? { includeLongTerm: true } : {})
@@ -443,6 +475,7 @@ export class GatewayHttpClient {
   }): Promise<GatewayMemoryArchiveResult> {
     await this.ensureConnected();
     const result = await this.request("memory.archive", {
+      ...withRuntimeScope({}),
       ...(params.date ? { date: params.date } : {}),
       ...(params.includeLongTerm === false ? { includeLongTerm: false } : {}),
       ...(params.clearDaily === false ? { clearDaily: false } : {})
@@ -456,12 +489,12 @@ export class GatewayHttpClient {
 
   async runAgent(params: RunAgentParams): Promise<{ runId?: string; events: RpcEvent[] }> {
     await this.ensureConnected();
-    const result = await this.request("agent.run", {
+    const result = await this.request("agent.run", withRuntimeRunScope({
       sessionId: params.sessionId,
       input: params.input,
       runtimeMode: params.runtimeMode,
       ...(params.llm ? { llm: params.llm } : {})
-    });
+    }));
     const runId = asString(result.response.payload.runId);
     return {
       runId,
@@ -601,19 +634,27 @@ export class GatewayHttpClient {
           name: "desktop",
           version: "0.1.0"
         },
-        workspaceId: "w_default"
+        workspaceId: readRuntimeScope().workspaceId ?? "w_default",
+        ...(resolveRuntimeAccessToken()
+          ? {
+              auth: {
+                type: "Bearer",
+                token: resolveRuntimeAccessToken()
+              }
+            }
+          : {})
       });
       if (!connectRes.ok) {
         throw new GatewayWsPreflightError(connectRes.error.message);
       }
 
       runRequestSent = true;
-      const runRes = await requestOverWs("agent.run", {
+      const runRes = await requestOverWs("agent.run", withRuntimeRunScope({
         sessionId: params.sessionId,
         input: params.input,
         runtimeMode: params.runtimeMode,
         ...(params.llm ? { llm: params.llm } : {})
-      });
+      }));
 
       if (!runRes.ok) {
         throw new GatewayRpcError(runRes.error.code, runRes.error.message);
@@ -663,10 +704,12 @@ export class GatewayHttpClient {
 
     let response: Response;
     try {
+      const accessToken = resolveRuntimeAccessToken();
       response = await fetch(endpoint.toString(), {
         method: "POST",
         headers: {
-          "content-type": "application/json"
+          "content-type": "application/json",
+          ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {})
         },
         body: JSON.stringify(req)
       });
@@ -675,6 +718,7 @@ export class GatewayHttpClient {
     }
 
     if (!response.ok) {
+      this.connected = false;
       throw new GatewayRpcError("HTTP_ERROR", `HTTP ${response.status}`);
     }
 
@@ -683,6 +727,9 @@ export class GatewayHttpClient {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid gateway response");
     }
     if (!payload.response.ok) {
+      if (payload.response.error.code === "AUTH_REQUIRED" || payload.response.error.code === "UNAUTHORIZED") {
+        this.connected = false;
+      }
       throw new GatewayRpcError(payload.response.error.code, payload.response.error.message);
     }
     return {
@@ -766,6 +813,88 @@ function readRuntimeConfigUseWebSocket(): boolean | null {
   }
   const value = (config as { gatewayUseWebSocket?: unknown }).gatewayUseWebSocket;
   return typeof value === "boolean" ? value : null;
+}
+
+function resolveRuntimeAccessToken(): string | undefined {
+  const configToken = readRuntimeConfigToken();
+  if (configToken) {
+    return configToken;
+  }
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  const token = window.localStorage.getItem("openfoal_access_token");
+  if (!token) {
+    return undefined;
+  }
+  const normalized = token.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function readRuntimeConfigToken(): string | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  const config = (window as { __OPENFOAL_CONFIG__?: unknown }).__OPENFOAL_CONFIG__;
+  if (!config || typeof config !== "object") {
+    return undefined;
+  }
+  const value = (config as { gatewayAccessToken?: unknown }).gatewayAccessToken;
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function readRuntimeScope(): RuntimeScope {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  const config = (window as { __OPENFOAL_CONFIG__?: unknown }).__OPENFOAL_CONFIG__;
+  if (!config || typeof config !== "object") {
+    return {};
+  }
+  const scopeConfig = config as {
+    tenantId?: unknown;
+    workspaceId?: unknown;
+    userId?: unknown;
+    agentId?: unknown;
+    actor?: unknown;
+  };
+  return {
+    ...(normalizeOptionalString(scopeConfig.tenantId) ? { tenantId: normalizeOptionalString(scopeConfig.tenantId) } : {}),
+    ...(normalizeOptionalString(scopeConfig.workspaceId) ? { workspaceId: normalizeOptionalString(scopeConfig.workspaceId) } : {}),
+    ...(normalizeOptionalString(scopeConfig.userId) ? { userId: normalizeOptionalString(scopeConfig.userId) } : {}),
+    ...(normalizeOptionalString(scopeConfig.agentId) ? { agentId: normalizeOptionalString(scopeConfig.agentId) } : {}),
+    ...(normalizeOptionalString(scopeConfig.actor) ? { actor: normalizeOptionalString(scopeConfig.actor) } : {})
+  };
+}
+
+function withRuntimeScope(params: Record<string, unknown>): Record<string, unknown> {
+  const scope = readRuntimeScope();
+  return {
+    ...params,
+    ...(scope.tenantId ? { tenantId: scope.tenantId } : {}),
+    ...(scope.workspaceId ? { workspaceId: scope.workspaceId } : {})
+  };
+}
+
+function withRuntimeRunScope(params: Record<string, unknown>): Record<string, unknown> {
+  const scope = readRuntimeScope();
+  return {
+    ...withRuntimeScope(params),
+    ...(scope.agentId ? { agentId: scope.agentId } : {}),
+    ...(scope.actor ? { actor: scope.actor } : {})
+  };
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {

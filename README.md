@@ -203,6 +203,7 @@ npm run up:enterprise:all
 ```
 
 该命令会一键拉起并验活企业全栈：`gateway + web-console + docker-runner + postgres + redis + minio + bootstrap-enterprise`。
+`up:enterprise:all` 仅启动企业栈，不会启动个人版 `5180`。
 
 仅启动（不跑 smoke）可用：
 
@@ -218,21 +219,38 @@ npm run up:enterprise
 
 访问：
 
-1. 企业控制台：`http://127.0.0.1:5173`
+1. 企业控制台：`http://127.0.0.1:5200`
+   - `member` 默认进入：`/chat`
+   - `workspace_admin/tenant_admin` 默认进入：`/admin/dashboard`
+   - 旧治理路由（如 `/dashboard`）会自动重定向到 `/admin/*`
 2. 网关健康：`http://127.0.0.1:8787/health`
 3. PostgreSQL：`127.0.0.1:15432`（可通过 `OPENFOAL_PG_HOST_PORT` 改）
 4. Redis：`127.0.0.1:16379`（可通过 `OPENFOAL_REDIS_HOST_PORT` 改）
 5. MinIO S3 API：`http://127.0.0.1:19000`（可通过 `OPENFOAL_MINIO_HOST_PORT` 改）
 6. MinIO Console：`http://127.0.0.1:19001`（可通过 `OPENFOAL_MINIO_CONSOLE_PORT` 改）
 
+双栈启动（企业 + 个人并行）：
+
+```bash
+npm run up:dual
+```
+
+访问：
+1. 企业控制台：`http://127.0.0.1:5200`
+2. 个人版：`http://127.0.0.1:5180`
+
 常用运维命令：
 
 ```bash
 npm run up:enterprise:all
+npm run up:dual
 npm run logs:personal
 npm run logs:enterprise
+npm run logs:dual
 npm run ps:docker
+npm run ps:dual
 npm run down:personal
+npm run down:dual
 npm run down:enterprise:all
 npm run down:enterprise
 ```

@@ -17,6 +17,42 @@ type ChatMessage = {
   text: string;
 };
 
+export type ChatLabels = {
+  brand: string;
+  newSession: string;
+  emptySessionPreview: string;
+  noSessionTitle: string;
+  noActiveSession: string;
+  refresh: string;
+  refreshing: string;
+  noMessages: string;
+  composerPlaceholder: string;
+  send: string;
+  running: string;
+  roleUser: string;
+  roleAssistant: string;
+  roleSystem: string;
+  home: string;
+};
+
+const DEFAULT_CHAT_LABELS: ChatLabels = {
+  brand: "OpenFoal Personal",
+  newSession: "+ New Session",
+  emptySessionPreview: "empty",
+  noSessionTitle: "No Session",
+  noActiveSession: "No active session",
+  refresh: "Refresh",
+  refreshing: "Refreshing...",
+  noMessages: "No messages yet.",
+  composerPlaceholder: "Type a message...",
+  send: "Send",
+  running: "Running...",
+  roleUser: "user",
+  roleAssistant: "assistant",
+  roleSystem: "system",
+  home: "Back"
+};
+
 export interface PersonalChatAppProps {
   shell?: "standalone" | "embedded";
   fixedSessionId?: string;
@@ -24,10 +60,21 @@ export interface PersonalChatAppProps {
   runtimeMode?: RuntimeMode;
   llm?: RunAgentParams["llm"];
   clientOptions?: PersonalGatewayClientOptions;
+  labels?: Partial<ChatLabels>;
+  homePath?: string;
+  showHomeButton?: boolean;
 }
 
 export function PersonalChatApp(props: PersonalChatAppProps) {
   const shell = props.shell ?? "standalone";
+  const defaultRuntimeMode = props.runtimeMode ?? "local";
+  const labels = useMemo<ChatLabels>(
+    () => ({
+      ...DEFAULT_CHAT_LABELS,
+      ...(props.labels ?? {})
+    }),
+    [props.labels]
+  );
   const assistantDraftId = useRef<string | null>(null);
   const client = useMemo(() => new GatewayClient(props.clientOptions), [props.clientOptions]);
 
@@ -41,7 +88,10 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
 
   const effectiveSessionId = shell === "embedded" ? props.fixedSessionId ?? "" : activeSessionId;
   const activeSession = sessions.find((item) => item.id === effectiveSessionId);
-  const headerTitle = shell === "embedded" ? props.fixedSessionTitle ?? activeSession?.title ?? "Session" : activeSession?.title ?? "No Session";
+  const headerTitle =
+    shell === "embedded"
+      ? props.fixedSessionTitle ?? activeSession?.title ?? labels.noSessionTitle
+      : activeSession?.title ?? labels.noSessionTitle;
 
   const loadSessions = useCallback(async () => {
     if (shell !== "standalone") {
@@ -53,7 +103,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
       await client.ensureConnected();
       let listed = await client.listSessions();
       if (listed.length === 0) {
-        const created = await client.createSession({ title: "personal", runtimeMode: "local" });
+        const created = await client.createSession({ title: "personal", runtimeMode: defaultRuntimeMode });
         listed = [created];
       }
       setSessions(listed);
@@ -63,7 +113,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
     } finally {
       setLoading(false);
     }
-  }, [client, shell]);
+  }, [client, defaultRuntimeMode, shell]);
 
   const loadHistory = useCallback(
     async (sessionId: string) => {
@@ -194,7 +244,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
         {
           sessionId: effectiveSessionId,
           input: text,
-          runtimeMode: props.runtimeMode ?? "local",
+          runtimeMode: defaultRuntimeMode,
           ...(props.llm ? { llm: props.llm } : {})
         },
         {
@@ -230,7 +280,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
     try {
       const created = await client.createSession({
         title: `session-${new Date().toISOString().slice(11, 19)}`,
-        runtimeMode: "local"
+        runtimeMode: defaultRuntimeMode
       });
       setSessions((prev) => [created, ...prev]);
       setActiveSessionId(created.id);
@@ -239,13 +289,30 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
     }
   };
 
+  const handleHome = () => {
+    if (!props.homePath || typeof window === "undefined") {
+      return;
+    }
+    window.location.assign(props.homePath);
+  };
+
+  const roleLabel = (role: ChatMessage["role"]): string => {
+    if (role === "user") {
+      return labels.roleUser;
+    }
+    if (role === "assistant") {
+      return labels.roleAssistant;
+    }
+    return labels.roleSystem;
+  };
+
   return (
     <div className={shell === "standalone" ? "pchat-shell" : "pchat-shell pchat-shell-embedded"}>
       {shell === "standalone" ? (
         <aside className="pchat-sidebar">
-          <div className="pchat-brand">OpenFoal Personal</div>
+          <div className="pchat-brand">{labels.brand}</div>
           <button className="pchat-primary-btn" onClick={() => void createSession()}>
-            + New Session
+            {labels.newSession}
           </button>
           <div className="pchat-session-list">
             {sessions.map((session) => (
@@ -255,7 +322,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
                 onClick={() => setActiveSessionId(session.id)}
               >
                 <span className="pchat-session-title">{session.title}</span>
-                <span className="pchat-session-preview">{session.preview || "empty"}</span>
+                <span className="pchat-session-preview">{session.preview || labels.emptySessionPreview}</span>
               </button>
             ))}
           </div>
@@ -266,30 +333,37 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
         <header className="pchat-header">
           <div>
             <h1>{headerTitle}</h1>
-            <p>{effectiveSessionId ? `${effectiveSessionId} · ${props.runtimeMode ?? "local"}` : "No active session"}</p>
+            <p>{effectiveSessionId ? `${effectiveSessionId} · ${defaultRuntimeMode}` : labels.noActiveSession}</p>
           </div>
-          <button
-            className="pchat-ghost-btn"
-            onClick={() => {
-              if (shell === "standalone") {
-                void loadSessions();
-              } else {
-                void loadHistory(effectiveSessionId);
-              }
-            }}
-            disabled={loading}
-          >
-            {loading ? "Refreshing..." : "Refresh"}
-          </button>
+          <div className="pchat-header-actions">
+            {props.showHomeButton ? (
+              <button className="pchat-ghost-btn" onClick={handleHome}>
+                {labels.home}
+              </button>
+            ) : null}
+            <button
+              className="pchat-ghost-btn"
+              onClick={() => {
+                if (shell === "standalone") {
+                  void loadSessions();
+                } else {
+                  void loadHistory(effectiveSessionId);
+                }
+              }}
+              disabled={loading}
+            >
+              {loading ? labels.refreshing : labels.refresh}
+            </button>
+          </div>
         </header>
 
         {error ? <div className="pchat-error-banner">{error}</div> : null}
 
         <div className="pchat-messages">
-          {messages.length === 0 ? <div className="pchat-empty">No messages yet.</div> : null}
+          {messages.length === 0 ? <div className="pchat-empty">{labels.noMessages}</div> : null}
           {messages.map((message) => (
             <article key={message.id} className={`pchat-msg ${message.role}`}>
-              <div className="pchat-msg-role">{message.role}</div>
+              <div className="pchat-msg-role">{roleLabel(message.role)}</div>
               <pre>{message.text}</pre>
             </article>
           ))}
@@ -299,7 +373,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            placeholder="Type a message..."
+            placeholder={labels.composerPlaceholder}
             onKeyDown={(event) => {
               if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                 event.preventDefault();
@@ -309,7 +383,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
             disabled={busy || !effectiveSessionId}
           />
           <button className="pchat-primary-btn" onClick={() => void handleSend()} disabled={busy || !effectiveSessionId}>
-            {busy ? "Running..." : "Send"}
+            {busy ? labels.running : labels.send}
           </button>
         </footer>
       </main>

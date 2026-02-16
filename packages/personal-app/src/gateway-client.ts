@@ -107,7 +107,13 @@ export interface PersonalGatewayClientOptions {
   baseUrl?: string;
   clientName?: string;
   clientVersion?: string;
+  accessToken?: string;
+  getAccessToken?: () => string | undefined;
+  tenantId?: string;
   workspaceId?: string;
+  agentId?: string;
+  actor?: string;
+  preferWebSocket?: boolean;
 }
 
 export class GatewayClient {
@@ -115,7 +121,13 @@ export class GatewayClient {
   private readonly connectionId: string;
   private readonly clientName: string;
   private readonly clientVersion: string;
+  private readonly initialAccessToken?: string;
+  private readonly getAccessToken?: () => string | undefined;
+  private readonly tenantId?: string;
   private readonly workspaceId: string;
+  private readonly agentId?: string;
+  private readonly actor?: string;
+  private readonly preferWebSocket: boolean;
   private connected = false;
   private connectPromise: Promise<void> | null = null;
   private requestCounter = 0;
@@ -125,7 +137,13 @@ export class GatewayClient {
     this.connectionId = createConnectionId();
     this.clientName = options.clientName ?? "personal-shell";
     this.clientVersion = options.clientVersion ?? "0.1.0";
+    this.initialAccessToken = sanitizeOptionalString(options.accessToken);
+    this.getAccessToken = options.getAccessToken;
+    this.tenantId = sanitizeOptionalString(options.tenantId);
     this.workspaceId = options.workspaceId ?? "w_default";
+    this.agentId = sanitizeOptionalString(options.agentId);
+    this.actor = sanitizeOptionalString(options.actor);
+    this.preferWebSocket = options.preferWebSocket !== false;
   }
 
   async ensureConnected(): Promise<void> {
@@ -137,12 +155,21 @@ export class GatewayClient {
     }
 
     this.connectPromise = (async () => {
+      const accessToken = this.resolveAccessToken();
       await this.request("connect", {
         client: {
           name: this.clientName,
           version: this.clientVersion
         },
-        workspaceId: this.workspaceId
+        workspaceId: this.workspaceId,
+        ...(accessToken
+          ? {
+              auth: {
+                type: "Bearer",
+                token: accessToken
+              }
+            }
+          : {})
       });
       this.connected = true;
     })();
@@ -156,7 +183,7 @@ export class GatewayClient {
 
   async listSessions(): Promise<GatewaySession[]> {
     await this.ensureConnected();
-    const result = await this.request("sessions.list", {});
+    const result = await this.request("sessions.list", this.withScope({}));
     const items = result.response.payload.items;
     if (!Array.isArray(items)) {
       return [];
@@ -167,6 +194,7 @@ export class GatewayClient {
   async createSession(params?: { title?: string; runtimeMode?: RuntimeMode }): Promise<GatewaySession> {
     await this.ensureConnected();
     const result = await this.request("sessions.create", {
+      ...this.withScope({}),
       ...(params?.title ? { title: params.title } : {}),
       ...(params?.runtimeMode ? { runtimeMode: params.runtimeMode } : {})
     });
@@ -184,6 +212,7 @@ export class GatewayClient {
   }): Promise<GatewayTranscriptItem[]> {
     await this.ensureConnected();
     const result = await this.request("sessions.history", {
+      ...this.withScope({}),
       sessionId: params.sessionId,
       ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       ...(typeof params.beforeId === "number" ? { beforeId: params.beforeId } : {})
@@ -199,6 +228,22 @@ export class GatewayClient {
     params: RunAgentParams,
     handlers: RunAgentStreamHandlers = {}
   ): Promise<{ runId?: string; events: RpcEvent[]; transport: "ws" | "http" }> {
+    if (!this.preferWebSocket) {
+      const fallback = await this.request("agent.run", this.withRunScope({
+        sessionId: params.sessionId,
+        input: params.input,
+        runtimeMode: params.runtimeMode,
+        ...(params.llm ? { llm: params.llm } : {})
+      }));
+      for (const event of fallback.events) {
+        handlers.onEvent?.(event);
+      }
+      return {
+        runId: asString(fallback.response.payload.runId),
+        events: fallback.events,
+        transport: "http"
+      };
+    }
     try {
       const wsResult = await this.runAgentViaWs(params, handlers);
       return {
@@ -209,12 +254,12 @@ export class GatewayClient {
       if (!(error instanceof GatewayWsPreflightError)) {
         throw error;
       }
-      const fallback = await this.request("agent.run", {
+      const fallback = await this.request("agent.run", this.withRunScope({
         sessionId: params.sessionId,
         input: params.input,
         runtimeMode: params.runtimeMode,
         ...(params.llm ? { llm: params.llm } : {})
-      });
+      }));
       for (const event of fallback.events) {
         handlers.onEvent?.(event);
       }
@@ -306,12 +351,21 @@ export class GatewayClient {
       });
     };
 
+    const wsAccessToken = this.resolveAccessToken();
     const connectRes = await requestOverWs("connect", {
       client: {
         name: this.clientName,
         version: this.clientVersion
       },
-      workspaceId: this.workspaceId
+      workspaceId: this.workspaceId,
+      ...(wsAccessToken
+        ? {
+            auth: {
+              type: "Bearer",
+              token: wsAccessToken
+            }
+          }
+        : {})
     });
 
     if (!connectRes.ok) {
@@ -319,12 +373,12 @@ export class GatewayClient {
       throw new GatewayWsPreflightError(`${connectRes.error.code}: ${connectRes.error.message}`);
     }
 
-    const runRes = await requestOverWs("agent.run", {
+    const runRes = await requestOverWs("agent.run", this.withRunScope({
       sessionId: params.sessionId,
       input: params.input,
       runtimeMode: params.runtimeMode,
       ...(params.llm ? { llm: params.llm } : {})
-    });
+    }));
 
     if (!runRes.ok) {
       cleanup();
@@ -357,10 +411,12 @@ export class GatewayClient {
     const endpoint = new URL("/rpc", this.baseUrl);
     endpoint.searchParams.set("connectionId", this.connectionId);
 
+    const accessToken = this.resolveAccessToken();
     const response = await fetch(endpoint.toString(), {
       method: "POST",
       headers: {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {})
       },
       body: JSON.stringify(req)
     }).catch((error: unknown) => {
@@ -383,6 +439,35 @@ export class GatewayClient {
       events: payload.events
     };
   }
+
+  private resolveAccessToken(): string | undefined {
+    const dynamic = sanitizeOptionalString(this.getAccessToken?.());
+    return dynamic ?? this.initialAccessToken;
+  }
+
+  private withScope(params: Record<string, unknown>): Record<string, unknown> {
+    return {
+      ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+      workspaceId: this.workspaceId,
+      ...params
+    };
+  }
+
+  private withRunScope(params: Record<string, unknown>): Record<string, unknown> {
+    return {
+      ...this.withScope(params),
+      ...(this.agentId ? { agentId: this.agentId } : {}),
+      ...(this.actor ? { actor: this.actor } : {})
+    };
+  }
+}
+
+function sanitizeOptionalString(value: string | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function readDefaultBaseUrl(): string {

@@ -14,7 +14,7 @@
 2. 端口未占用：
    - `8787`（gateway）
    - `5180`（personal-web）
-   - `5173`（web-console）
+   - `5200`（web-console）
    - `15432`（postgres，默认映射）
    - `16379`（redis，默认映射）
    - `19000`（minio s3 api，默认映射）
@@ -61,6 +61,7 @@ npm run up:enterprise:all
 
 1. `up:enterprise:all` 会执行企业全栈启动并自动运行 `smoke:enterprise:full`（一键可用）。
 2. 如果只想启动不跑 smoke，使用 `npm run up:enterprise`。
+3. `up:enterprise:all` 仅启动企业栈，不会启动个人版 `5180`。
 
 默认认证模式：
 
@@ -77,7 +78,10 @@ npm run up:enterprise:all
 
 访问：
 
-1. 企业控制台：`http://127.0.0.1:5173`
+1. 企业控制台：`http://127.0.0.1:5200`
+   - `member` 默认进入：`/chat`
+   - `workspace_admin/tenant_admin` 默认进入：`/admin/dashboard`
+   - 旧治理路由会重定向到 `/admin/*`
 2. 网关健康：`http://127.0.0.1:8787/health`
 3. PostgreSQL：`127.0.0.1:15432`
 4. Redis：`127.0.0.1:16379`
@@ -208,6 +212,24 @@ curl -sS "http://127.0.0.1:8787/rpc?connectionId=enterprise_manual" \
 
 ```bash
 npm run down:enterprise:all
+```
+
+### 4.7 双栈启动（企业 + 个人）
+
+```bash
+cd /Users/rqq/openFoal
+npm run up:dual
+```
+
+访问：
+
+1. 企业控制台：`http://127.0.0.1:5200`
+2. 个人版：`http://127.0.0.1:5180`
+
+停止双栈：
+
+```bash
+npm run down:dual
 ```
 
 ## 5. 自动化验证

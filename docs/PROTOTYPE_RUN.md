@@ -20,7 +20,7 @@ npm install
 npm run dev:web
 ```
 
-默认地址：`http://localhost:5173`
+默认地址：`http://localhost:5200`
 
 ## 3) 启动个人版桌面（Web）原型
 

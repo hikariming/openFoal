@@ -6,6 +6,7 @@ RUN npm install -g pnpm@9.15.4
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/web-console ./apps/web-console
+COPY apps/desktop ./apps/desktop
 COPY packages ./packages
 
 RUN pnpm install --no-frozen-lockfile
@@ -14,6 +15,7 @@ RUN pnpm --filter @openfoal/web-console build
 FROM nginx:1.27-alpine
 
 COPY --from=build /app/apps/web-console/dist /usr/share/nginx/html
+COPY docker/web-console.nginx.conf /etc/nginx/conf.d/default.conf
 
 ENV OPENFOAL_GATEWAY_BASE_URL=http://localhost:8787
 

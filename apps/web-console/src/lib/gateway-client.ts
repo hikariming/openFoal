@@ -1,78 +1,29 @@
 export type RuntimeMode = "local" | "cloud";
 export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
 export type PolicyDecision = "deny" | "allow";
+export type UserRole = "tenant_admin" | "workspace_admin" | "member";
+export type UserStatus = "active" | "disabled";
+export type ExecutionMode = "local_sandbox" | "enterprise_cloud";
+export type ContextLayer = "tenant" | "workspace" | "user";
+export type ContextFile = "AGENTS.md" | "SOUL.md" | "TOOLS.md" | "USER.md";
 
-type GatewayMethod =
-  | "connect"
-  | "runtime.setMode"
-  | "sessions.list"
-  | "policy.get"
-  | "audit.query"
-  | "metrics.summary"
-  | "users.list"
-  | "users.create"
-  | "users.updateStatus"
-  | "users.resetPassword"
-  | "users.updateMemberships"
-  | "secrets.upsertModelKey"
-  | "secrets.getModelKeyMeta";
-
-interface RpcRequestFrame {
-  type: "req";
-  id: string;
-  method: GatewayMethod;
-  params: Record<string, unknown>;
-}
-
-interface RpcResponseSuccess {
-  type: "res";
-  id: string;
-  ok: true;
-  payload: Record<string, unknown>;
-}
-
-interface RpcResponseFailure {
-  type: "res";
-  id: string;
-  ok: false;
-  error: {
-    code: string;
-    message: string;
-  };
-}
-
-type RpcResponse = RpcResponseSuccess | RpcResponseFailure;
-
-interface RpcEvent {
-  type: "event";
-  event: string;
-  payload: Record<string, unknown>;
-  seq: number;
-  stateVersion: number;
-}
-
-interface RpcEnvelope {
-  response: RpcResponse;
-  events: RpcEvent[];
-}
-
-interface RpcSuccessEnvelope {
-  response: RpcResponseSuccess;
-  events: RpcEvent[];
-}
-
-const SIDE_EFFECT_METHODS = new Set<GatewayMethod>([
-  "runtime.setMode",
-  "users.create",
-  "users.updateStatus",
-  "users.resetPassword",
-  "users.updateMemberships",
-  "secrets.upsertModelKey"
-]);
+export type GatewayPrincipal = {
+  subject: string;
+  userId: string;
+  tenantId: string;
+  workspaceIds: string[];
+  roles: UserRole[];
+  authSource: string;
+  displayName?: string;
+};
 
 export type GatewaySession = {
   id: string;
   sessionKey: string;
+  tenantId: string;
+  workspaceId: string;
+  ownerUserId: string;
+  visibility: "private" | "workspace";
   title: string;
   preview: string;
   runtimeMode: RuntimeMode;
@@ -84,14 +35,32 @@ export type GatewaySession = {
   updatedAt: string;
 };
 
+export type GatewayTranscriptItem = {
+  id: number;
+  role: string;
+  text: string;
+  createdAt?: string;
+  [key: string]: unknown;
+};
+
 export type GatewayPolicy = {
+  tenantId: string;
+  workspaceId: string;
   scopeKey: string;
+  storageBackend?: string;
   toolDefault: PolicyDecision;
   highRisk: PolicyDecision;
   bashMode: "sandbox" | "host";
   tools: Record<string, PolicyDecision>;
   version: number;
   updatedAt: string;
+};
+
+export type GatewayPolicyPatch = {
+  toolDefault?: PolicyDecision;
+  highRisk?: PolicyDecision;
+  bashMode?: "sandbox" | "host";
+  tools?: Record<string, PolicyDecision>;
 };
 
 export type GatewayMetricsSummary = {
@@ -101,10 +70,6 @@ export type GatewayMetricsSummary = {
   toolFailures: number;
   p95LatencyMs: number;
 };
-
-export type UserRole = "tenant_admin" | "workspace_admin" | "member";
-export type UserStatus = "active" | "disabled";
-export type ExecutionMode = "local_sandbox" | "enterprise_cloud";
 
 export type GatewayUserMembership = {
   workspaceId: string;
@@ -172,6 +137,164 @@ export type GatewayAuditQueryResult = {
   nextCursor?: number;
 };
 
+export type GatewayAgent = {
+  tenantId: string;
+  workspaceId: string;
+  agentId: string;
+  name: string;
+  runtimeMode: RuntimeMode;
+  executionTargetId?: string;
+  policyScopeKey?: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  version: number;
+  updatedAt: string;
+};
+
+export type GatewayExecutionTarget = {
+  targetId: string;
+  tenantId: string;
+  workspaceId?: string;
+  kind: "local-host" | "docker-runner";
+  endpoint?: string;
+  authToken?: string;
+  isDefault: boolean;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  version: number;
+  updatedAt: string;
+};
+
+export type GatewayBudgetPolicy = {
+  scopeKey: string;
+  tokenDailyLimit: number | null;
+  costMonthlyUsdLimit: number | null;
+  hardLimit: boolean;
+  version: number;
+  updatedAt: string;
+};
+
+export type GatewayBudgetUsage = {
+  scopeKey: string;
+  date: string;
+  month: string;
+  tokensUsedDaily: number;
+  costUsdMonthly: number;
+  runsRejectedDaily: number;
+};
+
+export type GatewayBudgetResult = {
+  policy: GatewayBudgetPolicy;
+  usage: GatewayBudgetUsage;
+};
+
+export type GatewayContextResult = {
+  layer: ContextLayer;
+  file: ContextFile;
+  text: string;
+};
+
+export type GatewayInfraHealth = {
+  serverTime: string;
+  checks: Record<string, unknown>;
+};
+
+export type GatewayReconcileResult = {
+  uploaded: number;
+  scanned: number;
+  skipped?: number;
+  [key: string]: unknown;
+};
+
+type GatewayMethod =
+  | "connect"
+  | "runtime.setMode"
+  | "sessions.create"
+  | "sessions.list"
+  | "sessions.get"
+  | "sessions.history"
+  | "agents.list"
+  | "agents.upsert"
+  | "users.list"
+  | "users.create"
+  | "users.updateStatus"
+  | "users.resetPassword"
+  | "users.updateMemberships"
+  | "secrets.upsertModelKey"
+  | "secrets.getModelKeyMeta"
+  | "executionTargets.list"
+  | "executionTargets.upsert"
+  | "budget.get"
+  | "budget.update"
+  | "policy.get"
+  | "policy.update"
+  | "audit.query"
+  | "metrics.summary"
+  | "context.get"
+  | "context.upsert"
+  | "infra.health"
+  | "infra.storage.reconcile";
+
+interface RpcRequestFrame {
+  type: "req";
+  id: string;
+  method: GatewayMethod;
+  params: Record<string, unknown>;
+}
+
+interface RpcResponseSuccess {
+  type: "res";
+  id: string;
+  ok: true;
+  payload: Record<string, unknown>;
+}
+
+interface RpcResponseFailure {
+  type: "res";
+  id: string;
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+  };
+}
+
+type RpcResponse = RpcResponseSuccess | RpcResponseFailure;
+
+interface RpcEvent {
+  type: "event";
+  event: string;
+  payload: Record<string, unknown>;
+  seq: number;
+  stateVersion: number;
+}
+
+interface RpcEnvelope {
+  response: RpcResponse;
+  events: RpcEvent[];
+}
+
+interface RpcSuccessEnvelope {
+  response: RpcResponseSuccess;
+  events: RpcEvent[];
+}
+
+const SIDE_EFFECT_METHODS = new Set<GatewayMethod>([
+  "runtime.setMode",
+  "sessions.create",
+  "agents.upsert",
+  "users.create",
+  "users.updateStatus",
+  "users.resetPassword",
+  "users.updateMemberships",
+  "secrets.upsertModelKey",
+  "executionTargets.upsert",
+  "budget.update",
+  "policy.update",
+  "context.upsert",
+  "infra.storage.reconcile"
+]);
+
 export class GatewayRpcError extends Error {
   readonly code: string;
 
@@ -187,8 +310,9 @@ export class GatewayClient {
   private readonly connectionId: string;
   private accessToken?: string;
   private connected = false;
-  private connectPromise: Promise<void> | null = null;
+  private connectPromise: Promise<GatewayPrincipal | undefined> | null = null;
   private requestCounter = 0;
+  private principal?: GatewayPrincipal;
 
   constructor(baseUrl = readDefaultBaseUrl()) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
@@ -203,22 +327,27 @@ export class GatewayClient {
   setAccessToken(token?: string): void {
     this.accessToken = token && token.trim().length > 0 ? token.trim() : undefined;
     this.connected = false;
+    this.principal = undefined;
     persistAccessToken(this.accessToken);
   }
 
-  async ensureConnected(): Promise<void> {
+  getPrincipal(): GatewayPrincipal | undefined {
+    return this.principal;
+  }
+
+  async ensureConnected(): Promise<GatewayPrincipal | undefined> {
     if (this.connected) {
-      return;
+      return this.principal;
     }
     if (this.connectPromise) {
       return this.connectPromise;
     }
 
     this.connectPromise = (async () => {
-      await this.request("connect", {
+      const result = await this.request("connect", {
         client: {
           name: "web-console",
-          version: "0.1.0"
+          version: "0.2.0"
         },
         workspaceId: "w_default",
         ...(this.accessToken
@@ -230,32 +359,127 @@ export class GatewayClient {
             }
           : {})
       });
+      const principal = toGatewayPrincipal(result.response.payload.principal);
+      this.principal = principal;
       this.connected = true;
+      return principal;
     })();
 
     try {
-      await this.connectPromise;
+      return await this.connectPromise;
     } finally {
       this.connectPromise = null;
     }
   }
 
-  async listSessions(): Promise<GatewaySession[]> {
+  async listSessions(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewaySession[]> {
     await this.ensureConnected();
-    const result = await this.request("sessions.list", {});
-    const items = result.response.payload.items;
-    if (!Array.isArray(items)) {
-      return [];
-    }
-    return items.filter(isGatewaySession);
+    const result = await this.request("sessions.list", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
+    });
+    return readArray(result.response.payload.items).filter(isGatewaySession);
   }
 
-  async getPolicy(scopeKey = "default"): Promise<GatewayPolicy> {
+  async createSession(input: {
+    title?: string;
+    runtimeMode?: RuntimeMode;
+    tenantId?: string;
+    workspaceId?: string;
+    ownerUserId?: string;
+    visibility?: "private" | "workspace";
+  }): Promise<GatewaySession | null> {
     await this.ensureConnected();
-    const result = await this.request("policy.get", { scopeKey });
+    const result = await this.request("sessions.create", {
+      ...(input.title ? { title: input.title } : {}),
+      ...(input.runtimeMode ? { runtimeMode: input.runtimeMode } : {}),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      ...(input.ownerUserId ? { ownerUserId: input.ownerUserId } : {}),
+      ...(input.visibility ? { visibility: input.visibility } : {})
+    });
+    return isGatewaySession(result.response.payload.session) ? result.response.payload.session : null;
+  }
+
+  async getSession(input: { sessionId: string; tenantId?: string; workspaceId?: string }): Promise<GatewaySession | null> {
+    await this.ensureConnected();
+    const result = await this.request("sessions.get", {
+      sessionId: input.sessionId,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {})
+    });
+    return isGatewaySession(result.response.payload.session) ? result.response.payload.session : null;
+  }
+
+  async getSessionHistory(input: {
+    sessionId: string;
+    tenantId?: string;
+    workspaceId?: string;
+    limit?: number;
+    beforeId?: number;
+  }): Promise<GatewayTranscriptItem[]> {
+    await this.ensureConnected();
+    const result = await this.request("sessions.history", {
+      sessionId: input.sessionId,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      ...(typeof input.limit === "number" ? { limit: input.limit } : {}),
+      ...(typeof input.beforeId === "number" ? { beforeId: input.beforeId } : {})
+    });
+    return readArray(result.response.payload.items).map((item) => toTranscriptItem(item)).filter(Boolean) as GatewayTranscriptItem[];
+  }
+
+  async setRuntimeMode(input: {
+    sessionId: string;
+    runtimeMode: RuntimeMode;
+    tenantId?: string;
+    workspaceId?: string;
+  }): Promise<{ executionMode?: ExecutionMode; status?: string }> {
+    await this.ensureConnected();
+    const result = await this.request("runtime.setMode", {
+      idempotencyKey: createIdempotencyKey("runtime_set_mode"),
+      sessionId: input.sessionId,
+      runtimeMode: input.runtimeMode,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {})
+    });
+    return {
+      ...(asExecutionMode(result.response.payload.executionMode) ? { executionMode: asExecutionMode(result.response.payload.executionMode) } : {}),
+      ...(typeof result.response.payload.status === "string" ? { status: result.response.payload.status } : {})
+    };
+  }
+
+  async getPolicy(params: { tenantId?: string; workspaceId?: string; scopeKey?: string } = {}): Promise<GatewayPolicy> {
+    await this.ensureConnected();
+    const result = await this.request("policy.get", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.scopeKey ? { scopeKey: params.scopeKey } : {})
+    });
     const policy = result.response.payload.policy;
     if (!isGatewayPolicy(policy)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid policy.get payload");
+    }
+    return policy;
+  }
+
+  async updatePolicy(input: {
+    patch: GatewayPolicyPatch;
+    tenantId?: string;
+    workspaceId?: string;
+    scopeKey?: string;
+  }): Promise<GatewayPolicy> {
+    await this.ensureConnected();
+    const result = await this.request("policy.update", {
+      idempotencyKey: createIdempotencyKey("policy_update"),
+      patch: input.patch,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
+    });
+    const policy = result.response.payload.policy;
+    if (!isGatewayPolicy(policy)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid policy.update payload");
     }
     return policy;
   }
@@ -271,17 +495,19 @@ export class GatewayClient {
       ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       ...(typeof params.cursor === "number" ? { cursor: params.cursor } : {})
     });
-    const items = result.response.payload.items;
-    const nextCursor = asPositiveInt(result.response.payload.nextCursor);
     return {
-      items: Array.isArray(items) ? items.filter(isGatewayAuditItem) : [],
-      ...(nextCursor ? { nextCursor } : {})
+      items: readArray(result.response.payload.items).filter(isGatewayAuditItem),
+      ...(asPositiveInt(result.response.payload.nextCursor) ? { nextCursor: asPositiveInt(result.response.payload.nextCursor) } : {})
     };
   }
 
-  async getMetricsSummary(): Promise<GatewayMetricsSummary> {
+  async getMetricsSummary(params: { tenantId?: string; workspaceId?: string; agentId?: string } = {}): Promise<GatewayMetricsSummary> {
     await this.ensureConnected();
-    const result = await this.request("metrics.summary", {});
+    const result = await this.request("metrics.summary", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.agentId ? { agentId: params.agentId } : {})
+    });
     const metrics = result.response.payload.metrics;
     if (!isGatewayMetricsSummary(metrics)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid metrics.summary payload");
@@ -295,11 +521,7 @@ export class GatewayClient {
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
     });
-    const items = result.response.payload.items;
-    if (!Array.isArray(items)) {
-      return [];
-    }
-    return items.filter(isGatewayTenantUser);
+    return readArray(result.response.payload.items).filter(isGatewayTenantUser);
   }
 
   async createUser(input: {
@@ -320,20 +542,12 @@ export class GatewayClient {
       ...(input.displayName ? { displayName: input.displayName } : {}),
       ...(input.email ? { email: input.email } : {}),
       ...(input.status ? { status: input.status } : {}),
-      memberships: input.memberships.map((item) => ({
-        workspaceId: item.workspaceId,
-        role: item.role
-      }))
+      memberships: input.memberships.map((item) => ({ workspaceId: item.workspaceId, role: item.role }))
     });
-    const user = result.response.payload.user;
-    return isGatewayTenantUser(user) ? user : null;
+    return isGatewayTenantUser(result.response.payload.user) ? result.response.payload.user : null;
   }
 
-  async updateUserStatus(input: {
-    tenantId?: string;
-    userId: string;
-    status: UserStatus;
-  }): Promise<void> {
+  async updateUserStatus(input: { tenantId?: string; userId: string; status: UserStatus }): Promise<void> {
     await this.ensureConnected();
     await this.request("users.updateStatus", {
       idempotencyKey: createIdempotencyKey("users_update_status"),
@@ -343,11 +557,7 @@ export class GatewayClient {
     });
   }
 
-  async resetUserPassword(input: {
-    tenantId?: string;
-    userId: string;
-    newPassword: string;
-  }): Promise<void> {
+  async resetUserPassword(input: { tenantId?: string; userId: string; newPassword: string }): Promise<void> {
     await this.ensureConnected();
     await this.request("users.resetPassword", {
       idempotencyKey: createIdempotencyKey("users_reset_password"),
@@ -367,16 +577,9 @@ export class GatewayClient {
       idempotencyKey: createIdempotencyKey("users_update_memberships"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       userId: input.userId,
-      memberships: input.memberships.map((item) => ({
-        workspaceId: item.workspaceId,
-        role: item.role
-      }))
+      memberships: input.memberships.map((item) => ({ workspaceId: item.workspaceId, role: item.role }))
     });
-    const memberships = result.response.payload.memberships;
-    if (!Array.isArray(memberships)) {
-      return [];
-    }
-    return memberships.filter(isGatewayUserMembership);
+    return readArray(result.response.payload.memberships).filter(isGatewayUserMembership);
   }
 
   async upsertModelKey(input: {
@@ -397,41 +600,213 @@ export class GatewayClient {
       ...(input.modelId ? { modelId: input.modelId } : {}),
       ...(input.baseUrl ? { baseUrl: input.baseUrl } : {})
     });
-    const secret = result.response.payload.secret;
-    return isGatewayModelKeyMeta(secret) ? secret : null;
+    return isGatewayModelKeyMeta(result.response.payload.secret) ? result.response.payload.secret : null;
   }
 
-  async getModelKeyMeta(params: {
-    tenantId?: string;
-    workspaceId?: string;
-    provider?: string;
-  } = {}): Promise<GatewayModelKeyMeta[]> {
+  async getModelKeyMeta(params: { tenantId?: string; workspaceId?: string; provider?: string } = {}): Promise<GatewayModelKeyMeta[]> {
     await this.ensureConnected();
     const result = await this.request("secrets.getModelKeyMeta", {
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
       ...(params.provider ? { provider: params.provider } : {})
     });
-    const items = result.response.payload.items;
-    if (!Array.isArray(items)) {
-      return [];
-    }
-    return items.filter(isGatewayModelKeyMeta);
+    return readArray(result.response.payload.items).filter(isGatewayModelKeyMeta);
   }
 
-  async setRuntimeMode(input: {
-    sessionId: string;
-    runtimeMode: RuntimeMode;
-  }): Promise<{ executionMode?: ExecutionMode; status?: string }> {
+  async listAgents(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewayAgent[]> {
     await this.ensureConnected();
-    const result = await this.request("runtime.setMode", {
-      idempotencyKey: createIdempotencyKey("runtime_set_mode"),
-      sessionId: input.sessionId,
-      runtimeMode: input.runtimeMode
+    const result = await this.request("agents.list", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
     });
+    return readArray(result.response.payload.items).filter(isGatewayAgent);
+  }
+
+  async upsertAgent(input: {
+    tenantId?: string;
+    workspaceId?: string;
+    agentId: string;
+    name?: string;
+    runtimeMode?: RuntimeMode;
+    executionTargetId?: string;
+    policyScopeKey?: string;
+    enabled?: boolean;
+    config?: Record<string, unknown>;
+  }): Promise<GatewayAgent | null> {
+    await this.ensureConnected();
+    const result = await this.request("agents.upsert", {
+      idempotencyKey: createIdempotencyKey("agents_upsert"),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      agentId: input.agentId,
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.runtimeMode ? { runtimeMode: input.runtimeMode } : {}),
+      ...(input.executionTargetId ? { executionTargetId: input.executionTargetId } : {}),
+      ...(input.policyScopeKey ? { policyScopeKey: input.policyScopeKey } : {}),
+      ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : {}),
+      ...(input.config ? { config: input.config } : {})
+    });
+    return isGatewayAgent(result.response.payload.agent) ? result.response.payload.agent : null;
+  }
+
+  async listExecutionTargets(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewayExecutionTarget[]> {
+    await this.ensureConnected();
+    const result = await this.request("executionTargets.list", {
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
+    });
+    return readArray(result.response.payload.items).filter(isGatewayExecutionTarget);
+  }
+
+  async upsertExecutionTarget(input: {
+    tenantId?: string;
+    workspaceId?: string;
+    targetId: string;
+    kind: "local-host" | "docker-runner";
+    endpoint?: string;
+    authToken?: string;
+    isDefault?: boolean;
+    enabled?: boolean;
+    config?: Record<string, unknown>;
+  }): Promise<GatewayExecutionTarget | null> {
+    await this.ensureConnected();
+    const result = await this.request("executionTargets.upsert", {
+      idempotencyKey: createIdempotencyKey("targets_upsert"),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      targetId: input.targetId,
+      kind: input.kind,
+      ...(input.endpoint ? { endpoint: input.endpoint } : {}),
+      ...(input.authToken ? { authToken: input.authToken } : {}),
+      ...(typeof input.isDefault === "boolean" ? { isDefault: input.isDefault } : {}),
+      ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : {}),
+      ...(input.config ? { config: input.config } : {})
+    });
+    return isGatewayExecutionTarget(result.response.payload.target) ? result.response.payload.target : null;
+  }
+
+  async getBudget(params: { scopeKey?: string; date?: string } = {}): Promise<GatewayBudgetResult> {
+    await this.ensureConnected();
+    const result = await this.request("budget.get", {
+      ...(params.scopeKey ? { scopeKey: params.scopeKey } : {}),
+      ...(params.date ? { date: params.date } : {})
+    });
+    const policy = result.response.payload.policy;
+    const usage = result.response.payload.usage;
+    if (!isGatewayBudgetPolicy(policy) || !isGatewayBudgetUsage(usage)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid budget.get payload");
+    }
+    return { policy, usage };
+  }
+
+  async updateBudget(input: {
+    scopeKey?: string;
+    tokenDailyLimit?: number | null;
+    costMonthlyUsdLimit?: number | null;
+    hardLimit?: boolean;
+    tenantId?: string;
+    workspaceId?: string;
+  }): Promise<GatewayBudgetResult> {
+    await this.ensureConnected();
+    const patch: Record<string, unknown> = {
+      ...(input.tokenDailyLimit !== undefined ? { tokenDailyLimit: input.tokenDailyLimit } : {}),
+      ...(input.costMonthlyUsdLimit !== undefined ? { costMonthlyUsdLimit: input.costMonthlyUsdLimit } : {}),
+      ...(input.hardLimit !== undefined ? { hardLimit: input.hardLimit } : {})
+    };
+    const result = await this.request("budget.update", {
+      idempotencyKey: createIdempotencyKey("budget_update"),
+      ...(input.scopeKey ? { scopeKey: input.scopeKey } : {}),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      patch
+    });
+    const policy = result.response.payload.policy;
+    const usage = result.response.payload.usage;
+    if (!isGatewayBudgetPolicy(policy) || !isGatewayBudgetUsage(usage)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid budget.update payload");
+    }
+    return { policy, usage };
+  }
+
+  async getContext(input: {
+    layer: ContextLayer;
+    file: ContextFile;
+    tenantId?: string;
+    workspaceId?: string;
+    userId?: string;
+  }): Promise<GatewayContextResult> {
+    await this.ensureConnected();
+    const result = await this.request("context.get", {
+      layer: input.layer,
+      file: input.file,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      ...(input.userId ? { userId: input.userId } : {})
+    });
+    const context = result.response.payload.context;
+    if (!isGatewayContextResult(context)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid context.get payload");
+    }
+    return context;
+  }
+
+  async upsertContext(input: {
+    layer: ContextLayer;
+    file: ContextFile;
+    content: string;
+    tenantId?: string;
+    workspaceId?: string;
+    userId?: string;
+  }): Promise<GatewayContextResult> {
+    await this.ensureConnected();
+    const result = await this.request("context.upsert", {
+      idempotencyKey: createIdempotencyKey("context_upsert"),
+      layer: input.layer,
+      file: input.file,
+      content: input.content,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      ...(input.userId ? { userId: input.userId } : {})
+    });
+    const context = result.response.payload.context;
+    if (!isRecord(context) || !isContextLayer(context.layer) || !isContextFile(context.file)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid context.upsert payload");
+    }
     return {
-      ...(asExecutionMode(result.response.payload.executionMode) ? { executionMode: asExecutionMode(result.response.payload.executionMode) } : {}),
-      ...(typeof result.response.payload.status === "string" ? { status: result.response.payload.status } : {})
+      layer: context.layer,
+      file: context.file,
+      text: input.content
+    };
+  }
+
+  async getInfraHealth(): Promise<GatewayInfraHealth> {
+    await this.ensureConnected();
+    const result = await this.request("infra.health", {});
+    const health = result.response.payload.health;
+    if (!isRecord(health) || typeof health.serverTime !== "string" || !isRecord(health.checks)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid infra.health payload");
+    }
+    return {
+      serverTime: health.serverTime,
+      checks: health.checks
+    };
+  }
+
+  async reconcileStorage(): Promise<GatewayReconcileResult> {
+    await this.ensureConnected();
+    const result = await this.request("infra.storage.reconcile", {
+      idempotencyKey: createIdempotencyKey("infra_storage_reconcile")
+    });
+    const reconcile = result.response.payload.reconcile;
+    if (!isRecord(reconcile)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid infra.storage.reconcile payload");
+    }
+    const uploaded = asNumber(reconcile.uploaded, 0);
+    const scanned = asNumber(reconcile.scanned, 0);
+    return {
+      ...reconcile,
+      uploaded,
+      scanned
     };
   }
 
@@ -539,10 +914,12 @@ export class GatewayClient {
         body: JSON.stringify(req)
       });
     } catch (error) {
+      this.connected = false;
       throw new GatewayRpcError("NETWORK_ERROR", toErrorMessage(error));
     }
 
     if (!response.ok) {
+      this.connected = false;
       throw new GatewayRpcError("HTTP_ERROR", `HTTP ${response.status}`);
     }
 
@@ -551,6 +928,10 @@ export class GatewayClient {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid gateway response");
     }
     if (!payload.response.ok) {
+      if (payload.response.error.code === "AUTH_REQUIRED" || payload.response.error.code === "UNAUTHORIZED") {
+        this.connected = false;
+        this.principal = undefined;
+      }
       throw new GatewayRpcError(payload.response.error.code, payload.response.error.message);
     }
     return {
@@ -614,115 +995,218 @@ function isRpcEnvelope(value: Partial<RpcEnvelope>): value is RpcEnvelope {
 }
 
 function isGatewaySession(value: unknown): value is GatewaySession {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false;
   }
-  const item = value as Record<string, unknown>;
   return (
-    typeof item.id === "string" &&
-    typeof item.sessionKey === "string" &&
-    typeof item.title === "string" &&
-    typeof item.preview === "string" &&
-    (item.runtimeMode === "local" || item.runtimeMode === "cloud") &&
-    (item.syncState === "local_only" || item.syncState === "syncing" || item.syncState === "synced" || item.syncState === "conflict") &&
-    typeof item.contextUsage === "number" &&
-    typeof item.compactionCount === "number" &&
-    (item.memoryFlushState === "idle" ||
-      item.memoryFlushState === "pending" ||
-      item.memoryFlushState === "flushed" ||
-      item.memoryFlushState === "skipped") &&
-    (item.memoryFlushAt === undefined || typeof item.memoryFlushAt === "string") &&
-    typeof item.updatedAt === "string"
+    typeof value.id === "string" &&
+    typeof value.sessionKey === "string" &&
+    typeof value.tenantId === "string" &&
+    typeof value.workspaceId === "string" &&
+    typeof value.ownerUserId === "string" &&
+    (value.visibility === "private" || value.visibility === "workspace") &&
+    typeof value.title === "string" &&
+    typeof value.preview === "string" &&
+    (value.runtimeMode === "local" || value.runtimeMode === "cloud") &&
+    (value.syncState === "local_only" || value.syncState === "syncing" || value.syncState === "synced" || value.syncState === "conflict") &&
+    typeof value.contextUsage === "number" &&
+    typeof value.compactionCount === "number" &&
+    (value.memoryFlushState === "idle" ||
+      value.memoryFlushState === "pending" ||
+      value.memoryFlushState === "flushed" ||
+      value.memoryFlushState === "skipped") &&
+    typeof value.updatedAt === "string"
   );
 }
 
+function toTranscriptItem(value: unknown): GatewayTranscriptItem | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = asPositiveInt(value.id);
+  const role = typeof value.role === "string" ? value.role : "assistant";
+  const text = typeof value.text === "string" ? value.text : typeof value.content === "string" ? value.content : "";
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    role,
+    text,
+    ...(typeof value.createdAt === "string" ? { createdAt: value.createdAt } : {}),
+    ...value
+  };
+}
+
 function isGatewayPolicy(value: unknown): value is GatewayPolicy {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false;
   }
-  const item = value as Record<string, unknown>;
   return (
-    typeof item.scopeKey === "string" &&
-    isPolicyDecision(item.toolDefault) &&
-    isPolicyDecision(item.highRisk) &&
-    (item.bashMode === "sandbox" || item.bashMode === "host") &&
-    Boolean(item.tools && typeof item.tools === "object" && !Array.isArray(item.tools)) &&
-    typeof item.version === "number" &&
-    typeof item.updatedAt === "string"
+    typeof value.tenantId === "string" &&
+    typeof value.workspaceId === "string" &&
+    typeof value.scopeKey === "string" &&
+    isPolicyDecision(value.toolDefault) &&
+    isPolicyDecision(value.highRisk) &&
+    (value.bashMode === "sandbox" || value.bashMode === "host") &&
+    isRecord(value.tools) &&
+    typeof value.version === "number" &&
+    typeof value.updatedAt === "string"
   );
 }
 
 function isGatewayMetricsSummary(value: unknown): value is GatewayMetricsSummary {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false;
   }
-  const item = value as Record<string, unknown>;
   return (
-    typeof item.runsTotal === "number" &&
-    typeof item.runsFailed === "number" &&
-    typeof item.toolCallsTotal === "number" &&
-    typeof item.toolFailures === "number" &&
-    typeof item.p95LatencyMs === "number"
+    typeof value.runsTotal === "number" &&
+    typeof value.runsFailed === "number" &&
+    typeof value.toolCallsTotal === "number" &&
+    typeof value.toolFailures === "number" &&
+    typeof value.p95LatencyMs === "number"
   );
 }
 
 function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  return isRecord(value);
 }
 
 function isGatewayUserMembership(value: unknown): value is GatewayUserMembership {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false;
   }
-  const item = value as Record<string, unknown>;
-  return typeof item.workspaceId === "string" && isUserRole(item.role);
+  return typeof value.workspaceId === "string" && isUserRole(value.role);
 }
 
 function isGatewayTenantUser(value: unknown): value is GatewayTenantUser {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false;
   }
-  const item = value as Record<string, unknown>;
-  const user = item.user;
-  const tenant = item.tenant;
-  const memberships = item.memberships;
-  if (!user || typeof user !== "object" || Array.isArray(user)) {
+  const user = value.user;
+  const tenant = value.tenant;
+  const memberships = value.memberships;
+  if (!isRecord(user) || !isRecord(tenant) || !Array.isArray(memberships)) {
     return false;
   }
-  if (!tenant || typeof tenant !== "object" || Array.isArray(tenant)) {
-    return false;
-  }
-  if (!Array.isArray(memberships)) {
-    return false;
-  }
-  const userItem = user as Record<string, unknown>;
-  const tenantItem = tenant as Record<string, unknown>;
   return (
-    typeof userItem.id === "string" &&
-    typeof userItem.username === "string" &&
-    isUserStatus(userItem.status) &&
-    (userItem.source === "local" || userItem.source === "external") &&
-    typeof tenantItem.tenantId === "string" &&
-    typeof tenantItem.userId === "string" &&
-    typeof tenantItem.defaultWorkspaceId === "string" &&
-    isUserStatus(tenantItem.status) &&
+    typeof user.id === "string" &&
+    typeof user.username === "string" &&
+    isUserStatus(user.status) &&
+    (user.source === "local" || user.source === "external") &&
+    typeof tenant.tenantId === "string" &&
+    typeof tenant.userId === "string" &&
+    typeof tenant.defaultWorkspaceId === "string" &&
+    isUserStatus(tenant.status) &&
     memberships.every(isGatewayUserMembership)
   );
 }
 
 function isGatewayModelKeyMeta(value: unknown): value is GatewayModelKeyMeta {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false;
   }
-  const item = value as Record<string, unknown>;
   return (
-    typeof item.tenantId === "string" &&
-    typeof item.provider === "string" &&
-    typeof item.maskedKey === "string" &&
-    typeof item.keyLast4 === "string" &&
-    typeof item.updatedBy === "string" &&
-    typeof item.updatedAt === "string"
+    typeof value.tenantId === "string" &&
+    typeof value.provider === "string" &&
+    typeof value.maskedKey === "string" &&
+    typeof value.keyLast4 === "string" &&
+    typeof value.updatedBy === "string" &&
+    typeof value.updatedAt === "string"
   );
+}
+
+function isGatewayAgent(value: unknown): value is GatewayAgent {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.tenantId === "string" &&
+    typeof value.workspaceId === "string" &&
+    typeof value.agentId === "string" &&
+    typeof value.name === "string" &&
+    (value.runtimeMode === "local" || value.runtimeMode === "cloud") &&
+    typeof value.enabled === "boolean" &&
+    isRecord(value.config) &&
+    typeof value.version === "number" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isGatewayExecutionTarget(value: unknown): value is GatewayExecutionTarget {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.targetId === "string" &&
+    typeof value.tenantId === "string" &&
+    (value.kind === "local-host" || value.kind === "docker-runner") &&
+    typeof value.isDefault === "boolean" &&
+    typeof value.enabled === "boolean" &&
+    isRecord(value.config) &&
+    typeof value.version === "number" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isGatewayBudgetPolicy(value: unknown): value is GatewayBudgetPolicy {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.scopeKey === "string" &&
+    (typeof value.tokenDailyLimit === "number" || value.tokenDailyLimit === null) &&
+    (typeof value.costMonthlyUsdLimit === "number" || value.costMonthlyUsdLimit === null) &&
+    typeof value.hardLimit === "boolean" &&
+    typeof value.version === "number" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isGatewayBudgetUsage(value: unknown): value is GatewayBudgetUsage {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.scopeKey === "string" &&
+    typeof value.date === "string" &&
+    typeof value.month === "string" &&
+    typeof value.tokensUsedDaily === "number" &&
+    typeof value.costUsdMonthly === "number" &&
+    typeof value.runsRejectedDaily === "number"
+  );
+}
+
+function isGatewayContextResult(value: unknown): value is GatewayContextResult {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return isContextLayer(value.layer) && isContextFile(value.file) && typeof value.text === "string";
+}
+
+function toGatewayPrincipal(value: unknown): GatewayPrincipal | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const roles = Array.isArray(value.roles) ? value.roles.filter(isUserRole) : [];
+  if (
+    typeof value.subject !== "string" ||
+    typeof value.userId !== "string" ||
+    typeof value.tenantId !== "string" ||
+    !Array.isArray(value.workspaceIds)
+  ) {
+    return undefined;
+  }
+  const workspaceIds = value.workspaceIds.filter((item): item is string => typeof item === "string");
+  return {
+    subject: value.subject,
+    userId: value.userId,
+    tenantId: value.tenantId,
+    workspaceIds,
+    roles,
+    authSource: typeof value.authSource === "string" ? value.authSource : "unknown",
+    ...(typeof value.displayName === "string" ? { displayName: value.displayName } : {})
+  };
 }
 
 function isPolicyDecision(value: unknown): value is PolicyDecision {
@@ -737,11 +1221,16 @@ function isUserStatus(value: unknown): value is UserStatus {
   return value === "active" || value === "disabled";
 }
 
+function isContextLayer(value: unknown): value is ContextLayer {
+  return value === "tenant" || value === "workspace" || value === "user";
+}
+
+function isContextFile(value: unknown): value is ContextFile {
+  return value === "AGENTS.md" || value === "SOUL.md" || value === "TOOLS.md" || value === "USER.md";
+}
+
 function asExecutionMode(value: unknown): ExecutionMode | undefined {
-  if (value === "local_sandbox" || value === "enterprise_cloud") {
-    return value;
-  }
-  return undefined;
+  return value === "local_sandbox" || value === "enterprise_cloud" ? value : undefined;
 }
 
 function asPositiveInt(value: unknown): number | undefined {
@@ -752,6 +1241,21 @@ function asPositiveInt(value: unknown): number | undefined {
   return normalized > 0 ? normalized : undefined;
 }
 
+function asNumber(value: unknown, fallback: number): number {
+  if (typeof value !== "number") {
+    return fallback;
+  }
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function readArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -760,9 +1264,7 @@ function toErrorMessage(error: unknown): string {
 }
 
 function safeJson(response: Response): Promise<unknown> {
-  return response
-    .json()
-    .catch(() => ({}));
+  return response.json().catch(() => ({}));
 }
 
 function readStoredAccessToken(): string | undefined {

@@ -1,5 +1,5 @@
 const gatewayBaseUrl = (process.env.OPENFOAL_E2E_GATEWAY_BASE_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
-const webConsoleUrl = (process.env.OPENFOAL_E2E_WEB_CONSOLE_URL ?? "http://127.0.0.1:5173").replace(/\/$/, "");
+const webConsoleUrl = (process.env.OPENFOAL_E2E_WEB_CONSOLE_URL ?? "http://127.0.0.1:5200").replace(/\/$/, "");
 const connectionId = process.env.OPENFOAL_E2E_CONNECTION_ID ?? `p2_docker_${Date.now().toString(36)}`;
 const authUsername = process.env.OPENFOAL_E2E_AUTH_USERNAME ?? "admin";
 const authPassword = process.env.OPENFOAL_E2E_AUTH_PASSWORD ?? "admin123!";

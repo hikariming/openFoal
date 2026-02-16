@@ -4,7 +4,6 @@ services:
     build:
       context: .
       dockerfile: docker/gateway.Dockerfile
-    container_name: openfoal-gateway
     environment:
       OPENFOAL_GATEWAY_HOST: "0.0.0.0"
       OPENFOAL_GATEWAY_PORT: "8787"
@@ -37,7 +36,7 @@ services:
       - gateway_data:/data
       - enterprise_storage:/data/openfoal
     ports:
-      - "8787:8787"
+      - "${OPENFOAL_GATEWAY_HOST_PORT:-8787}:8787"
     healthcheck:
       test:
         [
@@ -57,7 +56,6 @@ services:
     build:
       context: .
       dockerfile: docker/personal-web.Dockerfile
-    container_name: openfoal-personal-web
     depends_on:
       gateway:
         condition: service_healthy
@@ -70,20 +68,18 @@ services:
     build:
       context: .
       dockerfile: docker/web-console.Dockerfile
-    container_name: openfoal-web-console
     depends_on:
       gateway:
         condition: service_healthy
     environment:
       OPENFOAL_GATEWAY_BASE_URL: "http://localhost:8787"
     ports:
-      - "5173:80"
+      - "${OPENFOAL_WEB_CONSOLE_HOST_PORT:-5200}:80"
     restart: unless-stopped
 
   postgres:
     profiles: ["enterprise"]
     image: postgres:16-alpine
-    container_name: openfoal-postgres
     environment:
       POSTGRES_DB: "${OPENFOAL_PG_DB:-openfoal}"
       POSTGRES_USER: "${OPENFOAL_PG_USER:-openfoal}"
@@ -105,7 +101,6 @@ services:
   redis:
     profiles: ["enterprise"]
     image: redis:7-alpine
-    container_name: openfoal-redis
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
@@ -124,7 +119,6 @@ services:
   minio:
     profiles: ["enterprise"]
     image: minio/minio:RELEASE.2025-07-23T15-54-02Z
-    container_name: openfoal-minio
     environment:
       MINIO_ROOT_USER: "${OPENFOAL_MINIO_ACCESS_KEY:-openfoal}"
       MINIO_ROOT_PASSWORD: "${OPENFOAL_MINIO_SECRET_KEY:-openfoal123}"
@@ -139,7 +133,6 @@ services:
   minio-init:
     profiles: ["enterprise"]
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z
-    container_name: openfoal-minio-init
     depends_on:
       minio:
         condition: service_started
@@ -160,7 +153,6 @@ services:
     build:
       context: .
       dockerfile: docker/docker-runner.Dockerfile
-    container_name: openfoal-docker-runner
     environment:
       ORCHESTRATOR_HOST: "0.0.0.0"
       ORCHESTRATOR_PORT: "8081"
@@ -207,7 +199,6 @@ services:
   bootstrap-enterprise:
     profiles: ["enterprise"]
     image: node:22-alpine
-    container_name: openfoal-bootstrap-enterprise
     depends_on:
       gateway:
         condition: service_healthy

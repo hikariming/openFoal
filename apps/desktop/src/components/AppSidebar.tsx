@@ -38,10 +38,20 @@ type SideMenu = "new" | "skills" | "automations";
 type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "memory" | "subscription" | "referral" | "experimental";
 type RuntimeSettingsTab = "model" | "status";
 
-export function AppSidebar() {
+type AppSidebarProps = {
+  defaultRuntimeMode?: RuntimeMode;
+  accountName?: string;
+  accountEmail?: string;
+  onSignOut?: () => void;
+};
+
+export function AppSidebar(props: AppSidebarProps = {}) {
   const navigate = useNavigate();
   const location = useLocation();
   const { t, i18n } = useTranslation();
+  const defaultRuntimeMode = props.defaultRuntimeMode ?? "local";
+  const accountName = props.accountName?.trim() || "啵鸣喵";
+  const accountEmail = props.accountEmail?.trim() || "OpenFoal@example.com";
   const [userMenuVisible, setUserMenuVisible] = useState(false);
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [activeSettingsMenu, setActiveSettingsMenu] = useState<SettingsMenu>("account");
@@ -133,7 +143,9 @@ export function AppSidebar() {
         const client = getGatewayClient();
         let listed = await client.listSessions();
         if (listed.length === 0) {
-          const created = await client.createSession();
+          const created = await client.createSession({
+            runtimeMode: defaultRuntimeMode
+          });
           listed = [created];
         }
         if (!cancelled) {
@@ -148,7 +160,7 @@ export function AppSidebar() {
     return () => {
       cancelled = true;
     };
-  }, [setSessions]);
+  }, [defaultRuntimeMode, setSessions]);
 
   useEffect(() => {
     if (!settingsModalVisible || activeSettingsMenu !== "runtimeModel" || runtimeTab !== "status") {
@@ -414,7 +426,9 @@ export function AppSidebar() {
     if (itemKey === "new") {
       void (async () => {
         try {
-          const created = await getGatewayClient().createSession();
+          const created = await getGatewayClient().createSession({
+            runtimeMode: defaultRuntimeMode
+          });
           upsertSession(mapGatewaySessionToStoreSession(created));
           setActiveSession(created.id);
           navigate("/chat");
@@ -520,9 +534,9 @@ export function AppSidebar() {
                   啵鸣
                 </Avatar>
                 <div>
-                  <Typography.Text className="account-name">啵鸣喵</Typography.Text>
+                  <Typography.Text className="account-name">{accountName}</Typography.Text>
                   <Typography.Text type="tertiary" className="account-email">
-                    OpenFoal@example.com
+                    {accountEmail}
                   </Typography.Text>
                 </div>
               </div>
@@ -552,7 +566,13 @@ export function AppSidebar() {
                 <span>{t("sidebar.iosApp")}</span>
               </button>
               <div className="account-divider" />
-              <button type="button" className="account-menu-btn account-menu-btn-danger">
+              <button
+                type="button"
+                className="account-menu-btn account-menu-btn-danger"
+                onClick={() => {
+                  props.onSignOut?.();
+                }}
+              >
                 <IconExit />
                 <span>{t("sidebar.signOut")}</span>
               </button>
@@ -564,9 +584,9 @@ export function AppSidebar() {
               啵鸣
             </Avatar>
             <div className="user-trigger-copy">
-              <Typography.Text className="user-trigger-name">啵鸣喵</Typography.Text>
+              <Typography.Text className="user-trigger-name">{accountName}</Typography.Text>
               <Typography.Text type="tertiary" className="user-trigger-plan">
-                OpenFoal@example.com
+                {accountEmail}
               </Typography.Text>
             </div>
             {userMenuVisible ? <IconChevronUp className="muted-icon" /> : <IconChevronDown className="muted-icon" />}

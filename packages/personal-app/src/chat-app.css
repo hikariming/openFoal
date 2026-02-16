@@ -77,6 +77,12 @@
   gap: 8px;
 }
 
+.pchat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .pchat-header h1 {
   margin: 0;
   font-size: 20px;
