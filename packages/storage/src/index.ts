@@ -11,6 +11,7 @@ export type RuntimeMode = "local" | "cloud";
 export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
 export type MemoryFlushState = "idle" | "pending" | "flushed" | "skipped";
 export type PolicyDecision = "deny" | "allow";
+export type SessionVisibility = "private" | "workspace";
 
 export const DEFAULT_SESSION_TITLE = "new-session";
 export const DEFAULT_SESSION_PREVIEW = "";
@@ -18,6 +19,11 @@ export const DEFAULT_SESSION_PREVIEW = "";
 export interface SessionRecord {
   id: string;
   sessionKey: string;
+  tenantId: string;
+  workspaceId: string;
+  ownerUserId: string;
+  storageBackend?: string;
+  visibility: SessionVisibility;
   title: string;
   preview: string;
   runtimeMode: RuntimeMode;
@@ -36,17 +42,27 @@ export interface SessionMetaPatch {
   memoryFlushAt?: string;
 }
 
+export interface SessionScope {
+  tenantId: string;
+  workspaceId?: string;
+  ownerUserId?: string;
+}
+
 export interface SessionRepository {
-  list(): Promise<SessionRecord[]>;
-  get(sessionId: string): Promise<SessionRecord | undefined>;
+  list(scope?: SessionScope): Promise<SessionRecord[]>;
+  get(sessionId: string, scope?: SessionScope): Promise<SessionRecord | undefined>;
   upsert(session: SessionRecord): Promise<void>;
-  setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode): Promise<SessionRecord | undefined>;
-  updateMeta(sessionId: string, patch: SessionMetaPatch): Promise<SessionRecord | undefined>;
+  setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode, scope?: SessionScope): Promise<SessionRecord | undefined>;
+  updateMeta(sessionId: string, patch: SessionMetaPatch, scope?: SessionScope): Promise<SessionRecord | undefined>;
 }
 
 export interface TranscriptRecord {
   id: number;
   sessionId: string;
+  tenantId: string;
+  workspaceId: string;
+  ownerUserId: string;
+  storageBackend?: string;
   runId?: string;
   event: string;
   payload: Record<string, unknown>;
@@ -56,12 +72,15 @@ export interface TranscriptRecord {
 export interface TranscriptRepository {
   append(entry: {
     sessionId: string;
+    tenantId?: string;
+    workspaceId?: string;
+    ownerUserId?: string;
     runId?: string;
     event: string;
     payload: Record<string, unknown>;
     createdAt?: string;
   }): Promise<void>;
-  list(sessionId: string, limit?: number, beforeId?: number): Promise<TranscriptRecord[]>;
+  list(sessionId: string, scopeOrLimit?: SessionScope | number, limit?: number, beforeId?: number): Promise<TranscriptRecord[]>;
 }
 
 export interface IdempotencyResult {
@@ -88,7 +107,10 @@ export interface IdempotencyRepository {
 }
 
 export interface PolicyRecord {
+  tenantId: string;
+  workspaceId: string;
   scopeKey: string;
+  storageBackend?: string;
   toolDefault: PolicyDecision;
   highRisk: PolicyDecision;
   bashMode: "sandbox" | "host";
@@ -105,8 +127,17 @@ export interface PolicyPatch {
 }
 
 export interface PolicyRepository {
-  get(scopeKey?: string): Promise<PolicyRecord>;
-  update(patch: PolicyPatch, scopeKey?: string): Promise<PolicyRecord>;
+  get(scope?: { tenantId: string; workspaceId: string; scopeKey?: string } | string): Promise<PolicyRecord>;
+  update(
+    patch: PolicyPatch,
+    scope?:
+      | {
+      tenantId: string;
+      workspaceId: string;
+      scopeKey?: string;
+    }
+      | string
+  ): Promise<PolicyRecord>;
 }
 
 export interface MetricsRunRecord {
@@ -163,12 +194,31 @@ export class InMemorySessionRepository implements SessionRepository {
     }
   }
 
-  async list(): Promise<SessionRecord[]> {
-    return Array.from(this.sessions.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  async list(scope?: SessionScope): Promise<SessionRecord[]> {
+    const effectiveScope = normalizeSessionScope(scope);
+    return Array.from(this.sessions.values())
+      .filter((item) => item.tenantId === effectiveScope.tenantId)
+      .filter((item) => (effectiveScope.workspaceId ? item.workspaceId === effectiveScope.workspaceId : true))
+      .filter((item) => (effectiveScope.ownerUserId ? item.ownerUserId === effectiveScope.ownerUserId : true))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  async get(sessionId: string): Promise<SessionRecord | undefined> {
-    return this.sessions.get(sessionId);
+  async get(sessionId: string, scope?: SessionScope): Promise<SessionRecord | undefined> {
+    const effectiveScope = normalizeSessionScope(scope);
+    const found = this.sessions.get(sessionId);
+    if (!found) {
+      return undefined;
+    }
+    if (found.tenantId !== effectiveScope.tenantId) {
+      return undefined;
+    }
+    if (effectiveScope.workspaceId && found.workspaceId !== effectiveScope.workspaceId) {
+      return undefined;
+    }
+    if (effectiveScope.ownerUserId && found.ownerUserId !== effectiveScope.ownerUserId) {
+      return undefined;
+    }
+    return found;
   }
 
   async upsert(session: SessionRecord): Promise<void> {
@@ -178,8 +228,8 @@ export class InMemorySessionRepository implements SessionRepository {
     });
   }
 
-  async setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode): Promise<SessionRecord | undefined> {
-    const current = this.sessions.get(sessionId);
+  async setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode, scope?: SessionScope): Promise<SessionRecord | undefined> {
+    const current = await this.get(sessionId, scope);
     if (!current) {
       return undefined;
     }
@@ -193,8 +243,8 @@ export class InMemorySessionRepository implements SessionRepository {
     return next;
   }
 
-  async updateMeta(sessionId: string, patch: SessionMetaPatch): Promise<SessionRecord | undefined> {
-    const current = this.sessions.get(sessionId);
+  async updateMeta(sessionId: string, patch: SessionMetaPatch, scope?: SessionScope): Promise<SessionRecord | undefined> {
+    const current = await this.get(sessionId, scope);
     if (!current) {
       return undefined;
     }
@@ -218,6 +268,9 @@ export class InMemoryTranscriptRepository implements TranscriptRepository {
 
   async append(entry: {
     sessionId: string;
+    tenantId?: string;
+    workspaceId?: string;
+    ownerUserId?: string;
     runId?: string;
     event: string;
     payload: Record<string, unknown>;
@@ -226,6 +279,9 @@ export class InMemoryTranscriptRepository implements TranscriptRepository {
     this.items.push({
       id: this.nextId++,
       sessionId: entry.sessionId,
+      tenantId: sanitizeId(entry.tenantId, "t_default"),
+      workspaceId: sanitizeId(entry.workspaceId, "w_default"),
+      ownerUserId: sanitizeId(entry.ownerUserId, "u_legacy"),
       runId: entry.runId,
       event: entry.event,
       payload: entry.payload,
@@ -233,9 +289,15 @@ export class InMemoryTranscriptRepository implements TranscriptRepository {
     });
   }
 
-  async list(sessionId: string, limit = 50, beforeId?: number): Promise<TranscriptRecord[]> {
-    const filtered = this.items.filter((item) => item.sessionId === sessionId && (beforeId ? item.id < beforeId : true));
-    return filtered.slice(Math.max(0, filtered.length - limit));
+  async list(sessionId: string, scopeOrLimit?: SessionScope | number, limit?: number, beforeId?: number): Promise<TranscriptRecord[]> {
+    const parsed = resolveTranscriptListArgs(scopeOrLimit, limit, beforeId);
+    const filtered = this.items
+      .filter((item) => item.sessionId === sessionId)
+      .filter((item) => item.tenantId === parsed.scope.tenantId)
+      .filter((item) => (parsed.scope.workspaceId ? item.workspaceId === parsed.scope.workspaceId : true))
+      .filter((item) => (parsed.scope.ownerUserId ? item.ownerUserId === parsed.scope.ownerUserId : true))
+      .filter((item) => (parsed.beforeId ? item.id < parsed.beforeId : true));
+    return filtered.slice(Math.max(0, filtered.length - parsed.limit));
   }
 }
 
@@ -268,22 +330,45 @@ export class InMemoryPolicyRepository implements PolicyRepository {
   constructor(seed?: PolicyRecord[]) {
     const initial = seed ?? [defaultPolicy()];
     for (const item of initial) {
-      this.store.set(item.scopeKey, normalizePolicy(item));
+      this.store.set(toPolicyScopeKey(item.tenantId, item.workspaceId, item.scopeKey), normalizePolicy(item));
     }
   }
 
-  async get(scopeKey = "default"): Promise<PolicyRecord> {
-    const existing = this.store.get(scopeKey);
+  async get(scope?: { tenantId: string; workspaceId: string; scopeKey?: string } | string): Promise<PolicyRecord> {
+    const resolved = resolvePolicyScope(scope);
+    const scopeKey = resolved.scopeKey ?? "default";
+    const storageKey = toPolicyScopeKey(resolved.tenantId, resolved.workspaceId, scopeKey);
+    const existing = this.store.get(storageKey);
     if (existing) {
       return { ...existing, tools: { ...existing.tools } };
     }
-    const created = { ...defaultPolicy(), scopeKey };
-    this.store.set(scopeKey, created);
+    const created = {
+      ...defaultPolicy(),
+      tenantId: resolved.tenantId,
+      workspaceId: resolved.workspaceId,
+      scopeKey
+    };
+    this.store.set(storageKey, created);
     return { ...created, tools: { ...created.tools } };
   }
 
-  async update(patch: PolicyPatch, scopeKey = "default"): Promise<PolicyRecord> {
-    const current = await this.get(scopeKey);
+  async update(
+    patch: PolicyPatch,
+    scope?:
+      | {
+      tenantId: string;
+      workspaceId: string;
+      scopeKey?: string;
+    }
+      | string
+  ): Promise<PolicyRecord> {
+    const resolved = resolvePolicyScope(scope);
+    const scopeKey = resolved.scopeKey ?? "default";
+    const current = await this.get({
+      tenantId: resolved.tenantId,
+      workspaceId: resolved.workspaceId,
+      scopeKey
+    });
     const merged: PolicyRecord = normalizePolicy({
       ...current,
       ...(patch.toolDefault ? { toolDefault: patch.toolDefault } : {}),
@@ -293,7 +378,7 @@ export class InMemoryPolicyRepository implements PolicyRepository {
       version: current.version + 1,
       updatedAt: nowIso()
     });
-    this.store.set(scopeKey, merged);
+    this.store.set(toPolicyScopeKey(resolved.tenantId, resolved.workspaceId, scopeKey), merged);
     return { ...merged, tools: { ...merged.tools } };
   }
 }
@@ -345,14 +430,21 @@ export class SqliteSessionRepository implements SessionRepository {
     this.dbPath = normalizeDbPath(dbPath);
   }
 
-  async list(): Promise<SessionRecord[]> {
+  async list(scope?: SessionScope): Promise<SessionRecord[]> {
     ensureSchema(this.dbPath);
+    const effectiveScope = normalizeSessionScope(scope);
+    const ownerFilter = effectiveScope.ownerUserId ? ` AND owner_user_id = ${sqlString(effectiveScope.ownerUserId)}` : "";
+    const workspaceFilter = effectiveScope.workspaceId ? ` AND workspace_id = ${sqlString(effectiveScope.workspaceId)}` : "";
     return queryJson<SessionRecord>(
       this.dbPath,
       `
         SELECT
           id AS id,
           session_key AS sessionKey,
+          tenant_id AS tenantId,
+          workspace_id AS workspaceId,
+          owner_user_id AS ownerUserId,
+          visibility AS visibility,
           title AS title,
           preview AS preview,
           runtime_mode AS runtimeMode,
@@ -363,19 +455,29 @@ export class SqliteSessionRepository implements SessionRepository {
           memory_flush_at AS memoryFlushAt,
           updated_at AS updatedAt
         FROM sessions
+        WHERE tenant_id = ${sqlString(effectiveScope.tenantId)}
+        ${workspaceFilter}
+        ${ownerFilter}
         ORDER BY updated_at DESC;
       `
     ).map(normalizeSession);
   }
 
-  async get(sessionId: string): Promise<SessionRecord | undefined> {
+  async get(sessionId: string, scope?: SessionScope): Promise<SessionRecord | undefined> {
     ensureSchema(this.dbPath);
+    const effectiveScope = normalizeSessionScope(scope);
+    const ownerFilter = effectiveScope.ownerUserId ? ` AND owner_user_id = ${sqlString(effectiveScope.ownerUserId)}` : "";
+    const workspaceFilter = effectiveScope.workspaceId ? ` AND workspace_id = ${sqlString(effectiveScope.workspaceId)}` : "";
     const rows = queryJson<SessionRecord>(
       this.dbPath,
       `
         SELECT
           id AS id,
           session_key AS sessionKey,
+          tenant_id AS tenantId,
+          workspace_id AS workspaceId,
+          owner_user_id AS ownerUserId,
+          visibility AS visibility,
           title AS title,
           preview AS preview,
           runtime_mode AS runtimeMode,
@@ -387,6 +489,9 @@ export class SqliteSessionRepository implements SessionRepository {
           updated_at AS updatedAt
         FROM sessions
         WHERE id = ${sqlString(sessionId)}
+          AND tenant_id = ${sqlString(effectiveScope.tenantId)}
+          ${workspaceFilter}
+          ${ownerFilter}
         LIMIT 1;
       `
     );
@@ -403,6 +508,10 @@ export class SqliteSessionRepository implements SessionRepository {
         INSERT INTO sessions (
           id,
           session_key,
+          tenant_id,
+          workspace_id,
+          owner_user_id,
+          visibility,
           title,
           preview,
           runtime_mode,
@@ -416,6 +525,10 @@ export class SqliteSessionRepository implements SessionRepository {
         VALUES (
           ${sqlString(normalized.id)},
           ${sqlString(normalized.sessionKey)},
+          ${sqlString(normalized.tenantId)},
+          ${sqlString(normalized.workspaceId)},
+          ${sqlString(normalized.ownerUserId)},
+          ${sqlString(normalized.visibility)},
           ${sqlString(normalized.title)},
           ${sqlString(normalized.preview)},
           ${sqlString(normalized.runtimeMode)},
@@ -428,6 +541,10 @@ export class SqliteSessionRepository implements SessionRepository {
         )
         ON CONFLICT(id) DO UPDATE SET
           session_key = excluded.session_key,
+          tenant_id = excluded.tenant_id,
+          workspace_id = excluded.workspace_id,
+          owner_user_id = excluded.owner_user_id,
+          visibility = excluded.visibility,
           title = excluded.title,
           preview = excluded.preview,
           runtime_mode = excluded.runtime_mode,
@@ -441,9 +558,10 @@ export class SqliteSessionRepository implements SessionRepository {
     );
   }
 
-  async setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode): Promise<SessionRecord | undefined> {
+  async setRuntimeMode(sessionId: string, runtimeMode: RuntimeMode, scope?: SessionScope): Promise<SessionRecord | undefined> {
     ensureSchema(this.dbPath);
-    const existing = await this.get(sessionId);
+    const effectiveScope = normalizeSessionScope(scope);
+    const existing = await this.get(sessionId, effectiveScope);
     if (!existing) {
       return undefined;
     }
@@ -454,16 +572,20 @@ export class SqliteSessionRepository implements SessionRepository {
       `
         UPDATE sessions
         SET runtime_mode = ${sqlString(runtimeMode)}, updated_at = ${sqlString(updatedAt)}
-        WHERE id = ${sqlString(sessionId)};
+        WHERE id = ${sqlString(sessionId)}
+          AND tenant_id = ${sqlString(effectiveScope.tenantId)}
+          ${effectiveScope.workspaceId ? `AND workspace_id = ${sqlString(effectiveScope.workspaceId)}` : ""}
+          ${effectiveScope.ownerUserId ? `AND owner_user_id = ${sqlString(effectiveScope.ownerUserId)}` : ""};
       `
     );
 
-    return await this.get(sessionId);
+    return await this.get(sessionId, effectiveScope);
   }
 
-  async updateMeta(sessionId: string, patch: SessionMetaPatch): Promise<SessionRecord | undefined> {
+  async updateMeta(sessionId: string, patch: SessionMetaPatch, scope?: SessionScope): Promise<SessionRecord | undefined> {
     ensureSchema(this.dbPath);
-    const existing = await this.get(sessionId);
+    const effectiveScope = normalizeSessionScope(scope);
+    const existing = await this.get(sessionId, effectiveScope);
     if (!existing) {
       return undefined;
     }
@@ -487,11 +609,14 @@ export class SqliteSessionRepository implements SessionRepository {
           memory_flush_state = ${sqlString(merged.memoryFlushState)},
           memory_flush_at = ${sqlMaybeString(merged.memoryFlushAt)},
           updated_at = ${sqlString(merged.updatedAt)}
-        WHERE id = ${sqlString(sessionId)};
+        WHERE id = ${sqlString(sessionId)}
+          AND tenant_id = ${sqlString(effectiveScope.tenantId)}
+          ${effectiveScope.workspaceId ? `AND workspace_id = ${sqlString(effectiveScope.workspaceId)}` : ""}
+          ${effectiveScope.ownerUserId ? `AND owner_user_id = ${sqlString(effectiveScope.ownerUserId)}` : ""};
       `
     );
 
-    return await this.get(sessionId);
+    return await this.get(sessionId, effectiveScope);
   }
 }
 
@@ -504,18 +629,36 @@ export class SqliteTranscriptRepository implements TranscriptRepository {
 
   async append(entry: {
     sessionId: string;
+    tenantId?: string;
+    workspaceId?: string;
+    ownerUserId?: string;
     runId?: string;
     event: string;
     payload: Record<string, unknown>;
     createdAt?: string;
   }): Promise<void> {
     ensureSchema(this.dbPath);
+    const tenantId = sanitizeId(entry.tenantId, "t_default");
+    const workspaceId = sanitizeId(entry.workspaceId, "w_default");
+    const ownerUserId = sanitizeId(entry.ownerUserId, "u_legacy");
     execSql(
       this.dbPath,
       `
-        INSERT INTO transcript (session_id, run_id, event, payload_json, created_at)
+        INSERT INTO transcript (
+          session_id,
+          tenant_id,
+          workspace_id,
+          owner_user_id,
+          run_id,
+          event,
+          payload_json,
+          created_at
+        )
         VALUES (
           ${sqlString(entry.sessionId)},
+          ${sqlString(tenantId)},
+          ${sqlString(workspaceId)},
+          ${sqlString(ownerUserId)},
           ${sqlMaybeString(entry.runId)},
           ${sqlString(entry.event)},
           ${sqlString(JSON.stringify(entry.payload))},
@@ -525,13 +668,22 @@ export class SqliteTranscriptRepository implements TranscriptRepository {
     );
   }
 
-  async list(sessionId: string, limit = 50, beforeId?: number): Promise<TranscriptRecord[]> {
+  async list(sessionId: string, scopeOrLimit?: SessionScope | number, limit?: number, beforeId?: number): Promise<TranscriptRecord[]> {
     ensureSchema(this.dbPath);
-    const safeLimit = Math.max(1, Math.floor(limit));
-    const beforeFilter = typeof beforeId === "number" && Number.isFinite(beforeId) ? ` AND id < ${Math.floor(beforeId)}` : "";
+    const parsed = resolveTranscriptListArgs(scopeOrLimit, limit, beforeId);
+    const safeLimit = Math.max(1, Math.floor(parsed.limit));
+    const beforeFilter =
+      typeof parsed.beforeId === "number" && Number.isFinite(parsed.beforeId)
+        ? ` AND id < ${Math.floor(parsed.beforeId)}`
+        : "";
+    const workspaceFilter = parsed.scope.workspaceId ? ` AND workspace_id = ${sqlString(parsed.scope.workspaceId)}` : "";
+    const ownerFilter = parsed.scope.ownerUserId ? ` AND owner_user_id = ${sqlString(parsed.scope.ownerUserId)}` : "";
     const rows = queryJson<{
       id: number;
       sessionId: string;
+      tenantId: string;
+      workspaceId: string;
+      ownerUserId: string;
       runId: string | null;
       event: string;
       payloadJson: string;
@@ -542,21 +694,30 @@ export class SqliteTranscriptRepository implements TranscriptRepository {
         SELECT
           id AS id,
           session_id AS sessionId,
+          tenant_id AS tenantId,
+          workspace_id AS workspaceId,
+          owner_user_id AS ownerUserId,
           run_id AS runId,
           event AS event,
           payload_json AS payloadJson,
           created_at AS createdAt
-        FROM (
-          SELECT
-            id,
-            session_id,
-            run_id,
-            event,
-            payload_json,
-            created_at
-          FROM transcript
-          WHERE session_id = ${sqlString(sessionId)}
-          ${beforeFilter}
+          FROM (
+            SELECT
+              id,
+              session_id,
+              tenant_id,
+              workspace_id,
+              owner_user_id,
+              run_id,
+              event,
+              payload_json,
+              created_at
+            FROM transcript
+            WHERE session_id = ${sqlString(sessionId)}
+              AND tenant_id = ${sqlString(parsed.scope.tenantId)}
+              ${workspaceFilter}
+              ${ownerFilter}
+            ${beforeFilter}
           ORDER BY id DESC
           LIMIT ${safeLimit}
         )
@@ -567,6 +728,9 @@ export class SqliteTranscriptRepository implements TranscriptRepository {
     return rows.map((row) => ({
       id: row.id,
       sessionId: row.sessionId,
+      tenantId: row.tenantId,
+      workspaceId: row.workspaceId,
+      ownerUserId: row.ownerUserId,
       runId: row.runId ?? undefined,
       event: row.event,
       payload: parseJsonObject(row.payloadJson),
@@ -647,9 +811,13 @@ export class SqlitePolicyRepository implements PolicyRepository {
     this.dbPath = normalizeDbPath(dbPath);
   }
 
-  async get(scopeKey = "default"): Promise<PolicyRecord> {
+  async get(scope?: { tenantId: string; workspaceId: string; scopeKey?: string } | string): Promise<PolicyRecord> {
     ensureSchema(this.dbPath);
+    const resolved = resolvePolicyScope(scope);
+    const scopeKey = resolved.scopeKey ?? "default";
     const rows = queryJson<{
+      tenantId: string;
+      workspaceId: string;
       scopeKey: string;
       policyJson: string;
       version: number;
@@ -658,28 +826,56 @@ export class SqlitePolicyRepository implements PolicyRepository {
       this.dbPath,
       `
         SELECT
+          tenant_id AS tenantId,
+          workspace_id AS workspaceId,
           scope_key AS scopeKey,
           policy_json AS policyJson,
           version AS version,
           updated_at AS updatedAt
         FROM policy
-        WHERE scope_key = ${sqlString(scopeKey)}
+        WHERE tenant_id = ${sqlString(resolved.tenantId)}
+          AND workspace_id = ${sqlString(resolved.workspaceId)}
+          AND scope_key = ${sqlString(scopeKey)}
         LIMIT 1;
       `
     );
 
     if (rows.length === 0) {
-      const created = normalizePolicy({ ...defaultPolicy(), scopeKey });
-      await this.update(created, scopeKey);
-      return await this.get(scopeKey);
+      const created = normalizePolicy({
+        ...defaultPolicy(),
+        tenantId: resolved.tenantId,
+        workspaceId: resolved.workspaceId,
+        scopeKey
+      });
+      await this.update(created, {
+        tenantId: resolved.tenantId,
+        workspaceId: resolved.workspaceId,
+        scopeKey
+      });
+      return await this.get(resolved);
     }
 
     return parsePolicyRow(rows[0]);
   }
 
-  async update(patch: PolicyPatch, scopeKey = "default"): Promise<PolicyRecord> {
+  async update(
+    patch: PolicyPatch,
+    scope?:
+      | {
+      tenantId: string;
+      workspaceId: string;
+      scopeKey?: string;
+    }
+      | string
+  ): Promise<PolicyRecord> {
     ensureSchema(this.dbPath);
-    const current = await this.get(scopeKey);
+    const resolved = resolvePolicyScope(scope);
+    const scopeKey = resolved.scopeKey ?? "default";
+    const current = await this.get({
+      tenantId: resolved.tenantId,
+      workspaceId: resolved.workspaceId,
+      scopeKey
+    });
     const merged = normalizePolicy({
       ...current,
       ...(patch.toolDefault ? { toolDefault: patch.toolDefault } : {}),
@@ -693,8 +889,10 @@ export class SqlitePolicyRepository implements PolicyRepository {
     execSql(
       this.dbPath,
       `
-        INSERT INTO policy (scope_key, policy_json, version, updated_at)
+        INSERT INTO policy (tenant_id, workspace_id, scope_key, policy_json, version, updated_at)
         VALUES (
+          ${sqlString(resolved.tenantId)},
+          ${sqlString(resolved.workspaceId)},
           ${sqlString(scopeKey)},
           ${sqlString(JSON.stringify({
             toolDefault: merged.toolDefault,
@@ -705,14 +903,18 @@ export class SqlitePolicyRepository implements PolicyRepository {
           ${sqlInt(merged.version)},
           ${sqlString(merged.updatedAt)}
         )
-        ON CONFLICT(scope_key) DO UPDATE SET
+        ON CONFLICT(tenant_id, workspace_id, scope_key) DO UPDATE SET
           policy_json = excluded.policy_json,
           version = excluded.version,
           updated_at = excluded.updated_at;
       `
     );
 
-    return await this.get(scopeKey);
+    return await this.get({
+      tenantId: resolved.tenantId,
+      workspaceId: resolved.workspaceId,
+      scopeKey
+    });
   }
 }
 
@@ -804,7 +1006,14 @@ export class SqliteMetricsRepository implements MetricsRepository {
   }
 }
 
-function parsePolicyRow(row: { scopeKey: string; policyJson: string; version: number; updatedAt: string }): PolicyRecord {
+function parsePolicyRow(row: {
+  tenantId: string;
+  workspaceId: string;
+  scopeKey: string;
+  policyJson: string;
+  version: number;
+  updatedAt: string;
+}): PolicyRecord {
   let parsed: Record<string, unknown> = {};
   try {
     const value = JSON.parse(row.policyJson);
@@ -816,6 +1025,8 @@ function parsePolicyRow(row: { scopeKey: string; policyJson: string; version: nu
   }
 
   return normalizePolicy({
+    tenantId: row.tenantId,
+    workspaceId: row.workspaceId,
     scopeKey: row.scopeKey,
     toolDefault: asPolicyDecision(parsed.toolDefault) ?? defaultPolicy().toolDefault,
     highRisk: asPolicyDecision(parsed.highRisk) ?? defaultPolicy().highRisk,
@@ -860,6 +1071,10 @@ function defaultSession(): SessionRecord {
   return {
     id: "s_default",
     sessionKey: "workspace:w_default/agent:a_default/main",
+    tenantId: "t_default",
+    workspaceId: "w_default",
+    ownerUserId: "u_legacy",
+    visibility: "workspace",
     title: DEFAULT_SESSION_TITLE,
     preview: DEFAULT_SESSION_PREVIEW,
     runtimeMode: "local",
@@ -873,6 +1088,8 @@ function defaultSession(): SessionRecord {
 
 function defaultPolicy(): PolicyRecord {
   return {
+    tenantId: "t_default",
+    workspaceId: "w_default",
     scopeKey: "default",
     toolDefault: "deny",
     highRisk: "allow",
@@ -923,6 +1140,10 @@ function ensureSchema(dbPath: string): void {
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         session_key TEXT NOT NULL,
+        tenant_id TEXT NOT NULL DEFAULT 't_default',
+        workspace_id TEXT NOT NULL DEFAULT 'w_default',
+        owner_user_id TEXT NOT NULL DEFAULT 'u_legacy',
+        visibility TEXT NOT NULL DEFAULT 'workspace',
         title TEXT NOT NULL DEFAULT 'new-session',
         preview TEXT NOT NULL DEFAULT '',
         runtime_mode TEXT NOT NULL,
@@ -940,6 +1161,9 @@ function ensureSchema(dbPath: string): void {
       CREATE TABLE IF NOT EXISTS transcript (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL DEFAULT 't_default',
+        workspace_id TEXT NOT NULL DEFAULT 'w_default',
+        owner_user_id TEXT NOT NULL DEFAULT 'u_legacy',
         run_id TEXT,
         event TEXT NOT NULL,
         payload_json TEXT NOT NULL,
@@ -957,10 +1181,13 @@ function ensureSchema(dbPath: string): void {
       );
 
       CREATE TABLE IF NOT EXISTS policy (
-        scope_key TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL DEFAULT 't_default',
+        workspace_id TEXT NOT NULL DEFAULT 'w_default',
+        scope_key TEXT NOT NULL,
         policy_json TEXT NOT NULL,
         version INTEGER NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, workspace_id, scope_key)
       );
 
       CREATE TABLE IF NOT EXISTS run_metrics (
@@ -980,6 +1207,8 @@ function ensureSchema(dbPath: string): void {
   );
 
   ensureSessionColumns(dbPath);
+  ensureTranscriptColumns(dbPath);
+  ensurePolicySchema(dbPath);
   ensureRunMetricsColumns(dbPath);
 
   const seed = defaultSession();
@@ -989,6 +1218,10 @@ function ensureSchema(dbPath: string): void {
       INSERT OR IGNORE INTO sessions (
         id,
         session_key,
+        tenant_id,
+        workspace_id,
+        owner_user_id,
+        visibility,
         title,
         preview,
         runtime_mode,
@@ -1002,6 +1235,10 @@ function ensureSchema(dbPath: string): void {
       VALUES (
         ${sqlString(seed.id)},
         ${sqlString(seed.sessionKey)},
+        ${sqlString(seed.tenantId)},
+        ${sqlString(seed.workspaceId)},
+        ${sqlString(seed.ownerUserId)},
+        ${sqlString(seed.visibility)},
         ${sqlString(seed.title)},
         ${sqlString(seed.preview)},
         ${sqlString(seed.runtimeMode)},
@@ -1019,8 +1256,10 @@ function ensureSchema(dbPath: string): void {
   execSql(
     dbPath,
     `
-      INSERT OR IGNORE INTO policy (scope_key, policy_json, version, updated_at)
+      INSERT OR IGNORE INTO policy (tenant_id, workspace_id, scope_key, policy_json, version, updated_at)
       VALUES (
+        ${sqlString(policy.tenantId)},
+        ${sqlString(policy.workspaceId)},
         ${sqlString(policy.scopeKey)},
         ${sqlString(
           JSON.stringify({
@@ -1107,6 +1346,148 @@ function ensureSessionColumns(dbPath: string): void {
       `
     );
   }
+
+  if (!names.has("tenant_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 't_default';
+      `
+    );
+  }
+
+  if (!names.has("workspace_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'w_default';
+      `
+    );
+  }
+
+  if (!names.has("owner_user_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'u_legacy';
+      `
+    );
+  }
+
+  if (!names.has("visibility")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE sessions
+        ADD COLUMN visibility TEXT NOT NULL DEFAULT 'workspace';
+      `
+    );
+  }
+
+  execSql(
+    dbPath,
+    `
+      CREATE INDEX IF NOT EXISTS idx_sessions_scope_updated_at
+      ON sessions(tenant_id, workspace_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_sessions_owner_updated_at
+      ON sessions(tenant_id, owner_user_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_sessions_tenant_session_id
+      ON sessions(tenant_id, id);
+    `
+  );
+}
+
+function ensureTranscriptColumns(dbPath: string): void {
+  const columns = queryJson<{ name: string }>(
+    dbPath,
+    `
+      PRAGMA table_info(transcript);
+    `
+  );
+  const names = new Set(columns.map((item) => item.name));
+
+  if (!names.has("tenant_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE transcript
+        ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 't_default';
+      `
+    );
+  }
+
+  if (!names.has("workspace_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE transcript
+        ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'w_default';
+      `
+    );
+  }
+
+  if (!names.has("owner_user_id")) {
+    execSql(
+      dbPath,
+      `
+        ALTER TABLE transcript
+        ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'u_legacy';
+      `
+    );
+  }
+
+  execSql(
+    dbPath,
+    `
+      CREATE INDEX IF NOT EXISTS idx_transcript_tenant_session_id
+      ON transcript(tenant_id, session_id, id DESC);
+    `
+  );
+}
+
+function ensurePolicySchema(dbPath: string): void {
+  const columns = queryJson<{ name: string }>(
+    dbPath,
+    `
+      PRAGMA table_info(policy);
+    `
+  );
+  const names = new Set(columns.map((item) => item.name));
+  if (names.has("tenant_id") && names.has("workspace_id")) {
+    execSql(
+      dbPath,
+      `
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_policy_scope_unique
+        ON policy(tenant_id, workspace_id, scope_key);
+      `
+    );
+    return;
+  }
+
+  execSql(
+    dbPath,
+    `
+      CREATE TABLE IF NOT EXISTS policy_migrated (
+        tenant_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        policy_json TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, workspace_id, scope_key)
+      );
+      INSERT OR REPLACE INTO policy_migrated (tenant_id, workspace_id, scope_key, policy_json, version, updated_at)
+      SELECT 't_default', 'w_default', scope_key, policy_json, version, updated_at
+      FROM policy;
+      DROP TABLE policy;
+      ALTER TABLE policy_migrated RENAME TO policy;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_policy_scope_unique
+      ON policy(tenant_id, workspace_id, scope_key);
+    `
+  );
 }
 
 function ensureRunMetricsColumns(dbPath: string): void {
@@ -1244,6 +1625,10 @@ function normalizeSession(input: SessionRecord): SessionRecord {
   return {
     id: input.id,
     sessionKey: input.sessionKey,
+    tenantId: sanitizeId((input as { tenantId?: unknown }).tenantId, "t_default"),
+    workspaceId: sanitizeId((input as { workspaceId?: unknown }).workspaceId, "w_default"),
+    ownerUserId: sanitizeId((input as { ownerUserId?: unknown }).ownerUserId, "u_legacy"),
+    visibility: normalizeSessionVisibility((input as { visibility?: unknown }).visibility),
     title: input.title,
     preview: input.preview,
     runtimeMode: input.runtimeMode,
@@ -1290,6 +1675,8 @@ function normalizeMemoryFlushState(value: unknown): MemoryFlushState {
 
 function normalizePolicy(policy: PolicyRecord): PolicyRecord {
   return {
+    tenantId: sanitizeId((policy as { tenantId?: unknown }).tenantId, "t_default"),
+    workspaceId: sanitizeId((policy as { workspaceId?: unknown }).workspaceId, "w_default"),
     scopeKey: policy.scopeKey,
     toolDefault: asPolicyDecision(policy.toolDefault) ?? "deny",
     highRisk: asPolicyDecision(policy.highRisk) ?? "allow",
@@ -1318,9 +1705,79 @@ function asPolicyDecision(value: unknown): PolicyDecision | undefined {
   return value === "deny" || value === "allow" ? value : undefined;
 }
 
+function normalizeSessionVisibility(value: unknown): SessionVisibility {
+  return value === "private" ? "private" : "workspace";
+}
+
+function sanitizeId(value: unknown, fallback: string): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const out = value.trim();
+  if (!out) {
+    return fallback;
+  }
+  return out.replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+function toPolicyScopeKey(tenantId: string, workspaceId: string, scopeKey: string): string {
+  return `${sanitizeId(tenantId, "t_default")}::${sanitizeId(workspaceId, "w_default")}::${sanitizeId(scopeKey, "default")}`;
+}
+
+function resolvePolicyScope(
+  scope?: { tenantId: string; workspaceId: string; scopeKey?: string } | string
+): { tenantId: string; workspaceId: string; scopeKey?: string } {
+  if (typeof scope === "string") {
+    return {
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      scopeKey: scope
+    };
+  }
+  return {
+    tenantId: sanitizeId(scope?.tenantId, "t_default"),
+    workspaceId: sanitizeId(scope?.workspaceId, "w_default"),
+    ...(scope?.scopeKey ? { scopeKey: sanitizeId(scope.scopeKey, "default") } : {})
+  };
+}
+
+function normalizeSessionScope(scope?: SessionScope): SessionScope {
+  return {
+    tenantId: sanitizeId(scope?.tenantId, "t_default"),
+    ...(scope?.workspaceId ? { workspaceId: sanitizeId(scope.workspaceId, "w_default") } : {}),
+    ...(scope?.ownerUserId ? { ownerUserId: sanitizeId(scope.ownerUserId, "u_legacy") } : {})
+  };
+}
+
+function resolveTranscriptListArgs(
+  scopeOrLimit?: SessionScope | number,
+  limit?: number,
+  beforeId?: number
+): { scope: SessionScope; limit: number; beforeId?: number } {
+  let scope: SessionScope | undefined;
+  let resolvedLimit = limit;
+  let resolvedBeforeId = beforeId;
+  if (typeof scopeOrLimit === "number") {
+    resolvedLimit = scopeOrLimit;
+    resolvedBeforeId = typeof limit === "number" ? limit : undefined;
+  } else {
+    scope = scopeOrLimit;
+  }
+  return {
+    scope: normalizeSessionScope(scope),
+    limit: typeof resolvedLimit === "number" && Number.isFinite(resolvedLimit) ? Math.max(1, Math.floor(resolvedLimit)) : 50,
+    ...(typeof resolvedBeforeId === "number" && Number.isFinite(resolvedBeforeId)
+      ? { beforeId: Math.max(1, Math.floor(resolvedBeforeId)) }
+      : {})
+  };
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 export * from "./p2.js";
 export * from "./auth.js";
+export * from "./postgres.js";
+export * from "./redis.js";
+export * from "./blob.js";

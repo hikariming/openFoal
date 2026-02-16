@@ -2,6 +2,7 @@ import { createRuntimeCoreService, type CoreEvent, type CoreService } from "../.
 import {
   DEFAULT_SESSION_PREVIEW,
   DEFAULT_SESSION_TITLE,
+  FsBlobStore,
   InMemoryAuthStore,
   InMemoryIdempotencyRepository,
   InMemoryAgentRepository,
@@ -13,6 +14,20 @@ import {
   InMemoryPolicyRepository,
   InMemorySessionRepository,
   InMemoryTranscriptRepository,
+  MinioBlobStore,
+  PostgresAgentRepository,
+  PostgresAuditRepository,
+  PostgresAuthStore,
+  PostgresBudgetRepository,
+  PostgresExecutionTargetRepository,
+  PostgresIdempotencyRepository,
+  PostgresMetricsRepository,
+  PostgresModelSecretRepository,
+  PostgresPolicyRepository,
+  PostgresSessionRepository,
+  PostgresTranscriptRepository,
+  RedisConnectionBindingStore,
+  RedisIdempotencyRepository,
   SqliteAgentRepository,
   SqliteAuthStore,
   SqliteAuditRepository,
@@ -24,10 +39,12 @@ import {
   SqlitePolicyRepository,
   SqliteSessionRepository,
   SqliteTranscriptRepository,
+  syncLocalDirectoryToMinio,
   type AgentDefinitionRecord,
   type AgentRepository,
   type AuditQuery,
   type AuditRepository,
+  type BlobStore,
   type BudgetPolicyPatch,
   type BudgetRepository,
   type ExecutionTargetRecord,
@@ -82,8 +99,11 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { createHash } from "node:crypto";
+// @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
+import { resolve as resolvePath } from "node:path";
 
 declare const Buffer: any;
+declare const process: any;
 
 export interface ConnectionState {
   connected: boolean;
@@ -118,6 +138,11 @@ export interface GatewayServerOptions {
   host?: string;
   port?: number;
   sqlitePath?: string;
+  storageBackend?: "sqlite" | "postgres";
+  postgresUrl?: string;
+  redisUrl?: string;
+  blobBackend?: "fs" | "minio";
+  enterpriseStorageRoot?: string;
   router?: GatewayRouter;
 }
 
@@ -163,6 +188,10 @@ interface GatewayDeps {
   metricsRepo?: MetricsRepository;
   authStore?: AuthStore;
   authRuntime?: GatewayAuthRuntime;
+  blobStore?: BlobStore;
+  blobBackend?: "fs" | "minio";
+  storageBackend?: "memory" | "sqlite" | "postgres";
+  enterpriseStorageRoot?: string;
   now?: () => Date;
 }
 
@@ -189,6 +218,10 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const metricsRepo = deps.metricsRepo ?? new InMemoryMetricsRepository();
   const authStore = deps.authStore ?? new InMemoryAuthStore();
   const now = deps.now ?? (() => new Date());
+  const blobStore = deps.blobStore;
+  const blobBackend = deps.blobBackend ?? "fs";
+  const storageBackend = deps.storageBackend ?? "memory";
+  const enterpriseStorageRoot = deps.enterpriseStorageRoot ?? sanitizeStorageRoot(process.env.OPENFOAL_ENTERPRISE_STORAGE_ROOT ?? "/data/openfoal");
   const authRuntime = deps.authRuntime ?? createGatewayAuthRuntime({
     config: resolveAuthRuntimeConfig(),
     store: authStore,
@@ -199,10 +232,12 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const enableCloudProbe = deps.dockerRunnerInvoker === undefined;
   const dockerRunnerInvoker = deps.dockerRunnerInvoker ?? invokeDockerRunnerOverHttp;
   const sessionExecutionTargets = new Map<string, ExecutionTargetRecord>();
+  const sessionToolScopes = new Map<string, { tenantId: string; workspaceId: string; userId: string; workspaceRoot?: string }>();
   const targetAwareToolExecutor = createExecutionTargetToolExecutor({
     local: baseToolExecutor,
     dockerRunnerInvoker,
-    getExecutionTarget: (sessionId) => sessionExecutionTargets.get(sessionId)
+    getExecutionTarget: (sessionId) => sessionExecutionTargets.get(sessionId),
+    getToolScope: (sessionId) => sessionToolScopes.get(sessionId)
   });
   const policyAwareToolExecutor = createPolicyAwareToolExecutor({
     base: targetAwareToolExecutor,
@@ -290,12 +325,18 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         policyRepo,
         metricsRepo,
         authStore,
-          internalToolExecutor,
-          sessionExecutionTargets,
-          enableCloudProbe,
-          now,
-          options
-        );
+        idempotencyRepo,
+        internalToolExecutor,
+        sessionExecutionTargets,
+        sessionToolScopes,
+        enableCloudProbe,
+        storageBackend,
+        blobBackend,
+        blobStore,
+        enterpriseStorageRoot,
+        now,
+        options
+      );
 
       if (idempotencyKey && result.response.ok) {
         await idempotencyRepo.set(idempotencyKey, {
@@ -326,27 +367,101 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
 export async function startGatewayServer(options: GatewayServerOptions = {}): Promise<GatewayServerHandle> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
+  const storageBackend = options.storageBackend ?? resolveGatewayStorageBackend(process.env.OPENFOAL_GATEWAY_STORAGE_BACKEND);
+  const postgresUrl = options.postgresUrl ?? readNonEmptyString(process.env.OPENFOAL_POSTGRES_URL);
+  const redisUrl = options.redisUrl ?? readNonEmptyString(process.env.OPENFOAL_REDIS_URL);
+  const blobBackend = options.blobBackend ?? resolveBlobBackend(process.env.OPENFOAL_BLOB_BACKEND);
+  const enterpriseStorageRoot = options.enterpriseStorageRoot ?? sanitizeStorageRoot(process.env.OPENFOAL_ENTERPRISE_STORAGE_ROOT ?? "/data/openfoal");
+  const idempotencyBackend = resolveIdempotencyBackend(process.env.OPENFOAL_IDEMPOTENCY_BACKEND, storageBackend);
+  const blobStore =
+    storageBackend === "postgres"
+      ? blobBackend === "minio"
+        ? new MinioBlobStore({
+            endpoint: readNonEmptyString(process.env.OPENFOAL_MINIO_ENDPOINT),
+            region: readNonEmptyString(process.env.OPENFOAL_MINIO_REGION),
+            accessKeyId: readNonEmptyString(process.env.OPENFOAL_MINIO_ACCESS_KEY),
+            secretAccessKey: readNonEmptyString(process.env.OPENFOAL_MINIO_SECRET_KEY),
+            bucket: readNonEmptyString(process.env.OPENFOAL_MINIO_BUCKET)
+          })
+        : new FsBlobStore(enterpriseStorageRoot)
+      : undefined;
+  const connectionBindingStore =
+    storageBackend === "postgres" && redisUrl
+      ? new RedisConnectionBindingStore({
+          redisUrl,
+          keyPrefix: "openfoal:conn"
+        })
+      : undefined;
+
   const router =
     options.router ??
-    createGatewayRouter({
-      sessionRepo: new SqliteSessionRepository(options.sqlitePath),
-      transcriptRepo: new SqliteTranscriptRepository(options.sqlitePath),
-      idempotencyRepo: new SqliteIdempotencyRepository(options.sqlitePath),
-      agentRepo: new SqliteAgentRepository(options.sqlitePath),
-      executionTargetRepo: new SqliteExecutionTargetRepository(options.sqlitePath),
-      budgetRepo: new SqliteBudgetRepository(options.sqlitePath),
-      auditRepo: new SqliteAuditRepository(options.sqlitePath),
-      modelSecretRepo: new SqliteModelSecretRepository(options.sqlitePath),
-      policyRepo: new SqlitePolicyRepository(options.sqlitePath),
-      metricsRepo: new SqliteMetricsRepository(options.sqlitePath),
-      authStore: new SqliteAuthStore(options.sqlitePath)
-    });
+    (storageBackend === "postgres"
+      ? createGatewayRouter({
+          sessionRepo: new PostgresSessionRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          transcriptRepo: new PostgresTranscriptRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          idempotencyRepo:
+            idempotencyBackend === "redis" && redisUrl
+              ? new RedisIdempotencyRepository({
+                  redisUrl,
+                  keyPrefix: "openfoal:idem"
+                })
+              : new PostgresIdempotencyRepository({
+                  ...(postgresUrl ? { connectionString: postgresUrl } : {})
+                }),
+          agentRepo: new PostgresAgentRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          executionTargetRepo: new PostgresExecutionTargetRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          budgetRepo: new PostgresBudgetRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          auditRepo: new PostgresAuditRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          modelSecretRepo: new PostgresModelSecretRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          policyRepo: new PostgresPolicyRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          metricsRepo: new PostgresMetricsRepository({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          authStore: new PostgresAuthStore({
+            ...(postgresUrl ? { connectionString: postgresUrl } : {})
+          }),
+          ...(blobStore ? { blobStore } : {}),
+          blobBackend,
+          storageBackend: "postgres",
+          enterpriseStorageRoot
+        })
+      : createGatewayRouter({
+          sessionRepo: new SqliteSessionRepository(options.sqlitePath),
+          transcriptRepo: new SqliteTranscriptRepository(options.sqlitePath),
+          idempotencyRepo: new SqliteIdempotencyRepository(options.sqlitePath),
+          agentRepo: new SqliteAgentRepository(options.sqlitePath),
+          executionTargetRepo: new SqliteExecutionTargetRepository(options.sqlitePath),
+          budgetRepo: new SqliteBudgetRepository(options.sqlitePath),
+          auditRepo: new SqliteAuditRepository(options.sqlitePath),
+          modelSecretRepo: new SqliteModelSecretRepository(options.sqlitePath),
+          policyRepo: new SqlitePolicyRepository(options.sqlitePath),
+          metricsRepo: new SqliteMetricsRepository(options.sqlitePath),
+          authStore: new SqliteAuthStore(options.sqlitePath),
+          storageBackend: "sqlite",
+          enterpriseStorageRoot
+        }));
   const httpConnections = new Map<string, ConnectionState>();
   const sockets = new Set<any>();
 
   const server = createServer(async (req: any, res: any) => {
     try {
-      await handleHttpRequest(req, res, router, httpConnections);
+      await handleHttpRequest(req, res, router, httpConnections, connectionBindingStore);
     } catch (error) {
       writeJson(res, 500, {
         error: "INTERNAL_ERROR",
@@ -395,9 +510,15 @@ async function route(
   policyRepo: PolicyRepository,
   metricsRepo: MetricsRepository,
   authStore: AuthStore,
+  idempotencyRepo: IdempotencyRepository,
   internalToolExecutor: ToolExecutor,
   sessionExecutionTargets: Map<string, ExecutionTargetRecord>,
+  sessionToolScopes: Map<string, { tenantId: string; workspaceId: string; userId: string; workspaceRoot?: string }>,
   enableCloudProbe: boolean,
+  storageBackend: "memory" | "sqlite" | "postgres",
+  blobBackend: "fs" | "minio",
+  blobStore: BlobStore | undefined,
+  enterpriseStorageRoot: string,
   now: () => Date,
   options: GatewayHandleOptions
 ): Promise<GatewayHandleResult> {
@@ -412,6 +533,7 @@ async function route(
             ? {
                 principal: {
                   subject: state.principal.subject,
+                  userId: state.principal.userId,
                   tenantId: state.principal.tenantId,
                   workspaceIds: [...state.principal.workspaceIds],
                   roles: [...state.principal.roles],
@@ -428,7 +550,19 @@ async function route(
     case "sessions.create": {
       const titleParam = requireString(req.params, "title");
       const runtimeMode = asRuntimeMode(req.params.runtimeMode) ?? "local";
-      const session = createSession(createSessionId(), runtimeMode, titleParam ?? DEFAULT_SESSION_TITLE);
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
+      const ownerUserId = resolveSessionOwnerUserId(req.params, state);
+      const visibility = resolveSessionVisibility(req.params, state);
+      const session = createSession({
+        id: createSessionId(),
+        runtimeMode,
+        title: titleParam ?? DEFAULT_SESSION_TITLE,
+        tenantId,
+        workspaceId,
+        ownerUserId,
+        visibility
+      });
       await sessionRepo.upsert(session);
       return {
         response: makeSuccessRes(req.id, { session }),
@@ -437,7 +571,8 @@ async function route(
     }
 
     case "sessions.list": {
-      const items = await sessionRepo.list();
+      const scope = resolveSessionScope(req.params, state);
+      const items = await sessionRepo.list(scope);
       return {
         response: makeSuccessRes(req.id, { items }),
         events: []
@@ -449,7 +584,8 @@ async function route(
       if (!sessionId) {
         return invalidParams(req.id, "sessions.get 需要 sessionId");
       }
-      const session = await sessionRepo.get(sessionId);
+      const scope = resolveSessionScope(req.params, state);
+      const session = await sessionRepo.get(sessionId, scope);
       return {
         response: makeSuccessRes(req.id, { session: session ?? null }),
         events: []
@@ -462,7 +598,8 @@ async function route(
         return invalidParams(req.id, "sessions.history 需要 sessionId");
       }
 
-      const session = await sessionRepo.get(sessionId);
+      const scope = resolveSessionScope(req.params, state);
+      const session = await sessionRepo.get(sessionId, scope);
       if (!session) {
         return {
           response: makeErrorRes(req.id, "INVALID_REQUEST", `未知会话: ${sessionId}`),
@@ -483,7 +620,7 @@ async function route(
         return invalidParams(req.id, "sessions.history 的 beforeId 必须是正整数");
       }
 
-      const items = await transcriptRepo.list(sessionId, limit, beforeId);
+      const items = await transcriptRepo.list(sessionId, scope, limit, beforeId);
       return {
         response: makeSuccessRes(req.id, { items }),
         events: []
@@ -920,6 +1057,7 @@ async function route(
       const auditWorkspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
       const auditActor = requireString(req.params, "actor") ?? state.principal?.displayName ?? state.principal?.subject ?? "system";
       const executionMode = runtimeMode === "local" ? "local_sandbox" : "enterprise_cloud";
+      const scope = resolveSessionScope(req.params, state);
 
       if (state.runningSessionIds.has(sessionId)) {
         state.queuedModeChanges.set(sessionId, runtimeMode);
@@ -949,7 +1087,7 @@ async function route(
         };
       }
 
-      const updated = await sessionRepo.setRuntimeMode(sessionId, runtimeMode);
+      const updated = await sessionRepo.setRuntimeMode(sessionId, runtimeMode, scope);
       if (!updated) {
         return {
           response: makeErrorRes(req.id, "INVALID_REQUEST", `未知会话: ${sessionId}`),
@@ -1000,7 +1138,17 @@ async function route(
       const tenantId = requireString(req.params, "tenantId") ?? "t_default";
       const workspaceId = requireString(req.params, "workspaceId") ?? "w_default";
       const agentId = requireString(req.params, "agentId") ?? "a_default";
-      const actor = requireString(req.params, "actor") ?? "user";
+      const actor =
+        requireString(req.params, "actor") ??
+        state.principal?.displayName ??
+        (state.principal ? resolvePrincipalUserId(state.principal) : undefined) ??
+        "user";
+      const ownerUserId = resolveSessionOwnerUserId(req.params, state);
+      const sessionScope = {
+        tenantId,
+        workspaceId,
+        ...(canReadCrossUserSessions(state.principal) ? {} : { ownerUserId })
+      };
       const explicitTargetId = requireString(req.params, "executionTargetId");
       if (!sessionId || !input) {
         return invalidParams(req.id, "agent.run 需要 sessionId 和 input");
@@ -1123,14 +1271,31 @@ async function route(
         };
       }
 
-      let session = await sessionRepo.get(sessionId);
+      let session = await sessionRepo.get(sessionId, sessionScope);
       if (!session) {
-        session = createSession(sessionId, reqRuntimeMode ?? "local");
+        const existingSession = await sessionRepo.get(sessionId, {
+          tenantId,
+          workspaceId
+        });
+        if (existingSession) {
+          return {
+            response: makeErrorRes(req.id, "FORBIDDEN", `会话 ${sessionId} 无访问权限`),
+            events: []
+          };
+        }
+        session = createSession({
+          id: sessionId,
+          runtimeMode: reqRuntimeMode ?? "local",
+          tenantId,
+          workspaceId,
+          ownerUserId,
+          visibility: resolveSessionVisibility(req.params, state)
+        });
         await sessionRepo.upsert(session);
       }
 
       if (reqRuntimeMode && reqRuntimeMode !== session.runtimeMode) {
-        const updated = await sessionRepo.setRuntimeMode(sessionId, reqRuntimeMode);
+        const updated = await sessionRepo.setRuntimeMode(sessionId, reqRuntimeMode, sessionScope);
         if (updated) {
           session = updated;
         }
@@ -1148,6 +1313,12 @@ async function route(
         sessionRepo,
         toolExecutor: internalToolExecutor,
         session,
+        scope: sessionScope,
+        toolContext: {
+          tenantId: session.tenantId,
+          workspaceId: session.workspaceId,
+          userId: session.ownerUserId
+        },
         input,
         now
       });
@@ -1184,6 +1355,9 @@ async function route(
 
       await transcriptRepo.append({
         sessionId,
+        tenantId: session.tenantId,
+        workspaceId: session.workspaceId,
+        ownerUserId: session.ownerUserId,
         event: "user.input",
         payload: { input },
         createdAt: now().toISOString()
@@ -1192,13 +1366,18 @@ async function route(
       const sessionWithInput = withSessionInput(session, input);
       if (sessionWithInput.title !== session.title || sessionWithInput.preview !== session.preview) {
         await sessionRepo.upsert(sessionWithInput);
-        const refreshed = await sessionRepo.get(sessionId);
+        const refreshed = await sessionRepo.get(sessionId, sessionScope);
         session = refreshed ?? sessionWithInput;
         emit(createEvent(state, "session.updated", { session }));
       }
 
       state.runningSessionIds.add(sessionId);
       sessionExecutionTargets.set(sessionId, selectedTarget);
+      sessionToolScopes.set(sessionId, {
+        tenantId: session.tenantId,
+        workspaceId: session.workspaceId,
+        userId: session.ownerUserId
+      });
       try {
         for await (const coreEvent of coreService.run({
           sessionId,
@@ -1225,12 +1404,13 @@ async function route(
       } finally {
         state.runningSessionIds.delete(sessionId);
         sessionExecutionTargets.delete(sessionId);
+        sessionToolScopes.delete(sessionId);
       }
 
       const queuedMode = state.queuedModeChanges.get(sessionId);
       if (queuedMode) {
         state.queuedModeChanges.delete(sessionId);
-        const updated = await sessionRepo.setRuntimeMode(sessionId, queuedMode);
+        const updated = await sessionRepo.setRuntimeMode(sessionId, queuedMode, sessionScope);
         if (updated) {
           emit(
             createEvent(state, "runtime.mode_changed", {
@@ -1255,7 +1435,7 @@ async function route(
           toolFailures: Math.max(1, toolFailures),
           createdAt: now().toISOString()
         });
-        await persistTranscript(sessionId, transcriptRepo, undefined, allEvents, now);
+        await persistTranscript(session, transcriptRepo, undefined, allEvents, now);
         return {
           response: makeErrorRes(req.id, "INTERNAL_ERROR", "agent.run 未返回 runId"),
           events: responseEvents
@@ -1265,7 +1445,7 @@ async function route(
       const finalUsage = estimateContextUsage(session.contextUsage, input, completedOutput);
       await sessionRepo.updateMeta(sessionId, {
         contextUsage: finalUsage
-      });
+      }, sessionScope);
 
       await metricsRepo.recordRun({
         sessionId,
@@ -1313,7 +1493,7 @@ async function route(
         createdAt: now().toISOString()
       });
 
-      await persistTranscript(sessionId, transcriptRepo, acceptedRunId, allEvents, now);
+      await persistTranscript(session, transcriptRepo, acceptedRunId, allEvents, now);
 
       return {
         response: makeSuccessRes(req.id, {
@@ -1341,8 +1521,14 @@ async function route(
     }
 
     case "policy.get": {
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
       const scopeKey = requireString(req.params, "scopeKey") ?? "default";
-      const policy = await policyRepo.get(scopeKey);
+      const policy = await policyRepo.get({
+        tenantId,
+        workspaceId,
+        scopeKey
+      });
       return {
         response: makeSuccessRes(req.id, {
           policy
@@ -1352,15 +1538,21 @@ async function route(
     }
 
     case "policy.update": {
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
       const scopeKey = requireString(req.params, "scopeKey") ?? "default";
       const patch = toPolicyPatch(req.params);
       if (!patch) {
         return invalidParams(req.id, "policy.update 需要至少一个可更新字段");
       }
-      const policy = await policyRepo.update(patch, scopeKey);
+      const policy = await policyRepo.update(patch, {
+        tenantId,
+        workspaceId,
+        scopeKey
+      });
       await auditRepo.append({
-        tenantId: requireString(req.params, "tenantId") ?? "t_default",
-        workspaceId: requireString(req.params, "workspaceId") ?? "w_default",
+        tenantId,
+        workspaceId,
         action: "policy.update",
         actor: requireString(req.params, "actor") ?? "system",
         resourceType: "policy",
@@ -1409,16 +1601,168 @@ async function route(
       };
     }
 
+    case "infra.health": {
+      if (!state.principal || !state.principal.roles.includes("tenant_admin")) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", "仅 tenant_admin 可访问 infra.health"),
+          events: []
+        };
+      }
+      const tenantId = state.principal.tenantId;
+      const workspaceId = state.principal.workspaceIds[0] ?? "w_default";
+
+      const checks: Record<string, unknown> = {
+        storage: {
+          backend: storageBackend,
+          ok: true
+        },
+        idempotency: {
+          backend: idempotencyRepo instanceof RedisIdempotencyRepository ? "redis" : storageBackend === "postgres" ? "postgres" : "sqlite",
+          ok: true
+        },
+        blob: {
+          backend: blobBackend,
+          ok: blobStore ? true : false
+        },
+        orchestrator: {
+          endpoint: process.env.OPENFOAL_ORCHESTRATOR_HEALTH_URL ?? "",
+          ok: true
+        }
+      };
+
+      try {
+        await sessionRepo.list({
+          tenantId,
+          workspaceId
+        });
+      } catch (error) {
+        checks.storage = {
+          backend: storageBackend,
+          ok: false,
+          error: toErrorMessage(error)
+        };
+      }
+
+      try {
+        const probeKey = `health/${tenantId}/${Date.now().toString(36)}.json`;
+        await idempotencyRepo.set(probeKey, {
+          fingerprint: "health-check",
+          result: {
+            response: {
+              ok: true
+            },
+            events: []
+          }
+        });
+        const found = await idempotencyRepo.get(probeKey);
+        checks.idempotency = {
+          backend: idempotencyRepo instanceof RedisIdempotencyRepository ? "redis" : storageBackend === "postgres" ? "postgres" : "sqlite",
+          ok: Boolean(found)
+        };
+      } catch (error) {
+        checks.idempotency = {
+          backend: idempotencyRepo instanceof RedisIdempotencyRepository ? "redis" : storageBackend === "postgres" ? "postgres" : "sqlite",
+          ok: false,
+          error: toErrorMessage(error)
+        };
+      }
+
+      if (blobStore) {
+        try {
+          const healthKey = `health/${tenantId}/probe.txt`;
+          await blobStore.putText(healthKey, `ok ${now().toISOString()}`);
+          const head = await blobStore.head(healthKey);
+          checks.blob = {
+            backend: blobBackend,
+            ok: Boolean(head),
+            ...(head ? { size: head.size } : {})
+          };
+        } catch (error) {
+          checks.blob = {
+            backend: blobBackend,
+            ok: false,
+            error: toErrorMessage(error)
+          };
+        }
+      }
+
+      return {
+        response: makeSuccessRes(req.id, {
+          health: {
+            serverTime: now().toISOString(),
+            checks
+          }
+        }),
+        events: []
+      };
+    }
+
+    case "infra.storage.reconcile": {
+      if (!state.principal || !state.principal.roles.includes("tenant_admin")) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", "仅 tenant_admin 可执行 infra.storage.reconcile"),
+          events: []
+        };
+      }
+      if (!blobStore || blobBackend !== "minio" || !(blobStore instanceof MinioBlobStore)) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", "当前环境未启用 MinIO blob backend"),
+          events: []
+        };
+      }
+      try {
+        const report = await syncLocalDirectoryToMinio({
+          localRoot: enterpriseStorageRoot,
+          keyPrefix: "",
+          store: blobStore
+        });
+        await auditRepo.append({
+          tenantId: state.principal.tenantId,
+          workspaceId: state.principal.workspaceIds[0] ?? "w_default",
+          action: "infra.storage.reconcile",
+          actor: state.principal.displayName ?? state.principal.subject,
+          resourceType: "blob_storage",
+          resourceId: "openfoal-enterprise",
+          metadata: {
+            uploaded: report.uploaded,
+            scanned: report.scanned
+          },
+          createdAt: now().toISOString()
+        });
+        return {
+          response: makeSuccessRes(req.id, {
+            reconcile: report
+          }),
+          events: []
+        };
+      } catch (error) {
+        return {
+          response: makeErrorRes(req.id, "INTERNAL_ERROR", `reconcile 失败: ${toErrorMessage(error)}`),
+          events: []
+        };
+      }
+    }
+
     case "memory.get": {
+      const memoryScope = resolveMemoryToolArgs(req.params, state, "read");
+      if (!memoryScope.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", memoryScope.message),
+          events: []
+        };
+      }
       const toolResult = await internalToolExecutor.execute(
         {
           name: "memory.get",
-          args: req.params
+          args: memoryScope.args
         },
         {
           runId: `memory_get_${Date.now().toString(36)}`,
           sessionId: "session_memory_api",
-          runtimeMode: "local"
+          runtimeMode: "local",
+          ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+          ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+          ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
         }
       );
       if (!toolResult.ok) {
@@ -1440,15 +1784,25 @@ async function route(
     }
 
     case "memory.search": {
+      const memoryScope = resolveMemoryToolArgs(req.params, state, "read");
+      if (!memoryScope.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", memoryScope.message),
+          events: []
+        };
+      }
       const toolResult = await internalToolExecutor.execute(
         {
           name: "memory.search",
-          args: req.params
+          args: memoryScope.args
         },
         {
           runId: `memory_search_${Date.now().toString(36)}`,
           sessionId: "session_memory_api",
-          runtimeMode: "local"
+          runtimeMode: "local",
+          ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+          ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+          ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
         }
       );
       if (!toolResult.ok) {
@@ -1470,15 +1824,25 @@ async function route(
     }
 
     case "memory.appendDaily": {
+      const memoryScope = resolveMemoryToolArgs(req.params, state, "write");
+      if (!memoryScope.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", memoryScope.message),
+          events: []
+        };
+      }
       const toolResult = await internalToolExecutor.execute(
         {
           name: "memory.appendDaily",
-          args: req.params
+          args: memoryScope.args
         },
         {
           runId: `memory_append_${Date.now().toString(36)}`,
           sessionId: "session_memory_api",
-          runtimeMode: "local"
+          runtimeMode: "local",
+          ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+          ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+          ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
         }
       );
       if (!toolResult.ok) {
@@ -1500,26 +1864,37 @@ async function route(
     }
 
     case "memory.archive": {
+      const memoryScope = resolveMemoryToolArgs(req.params, state, "write");
+      if (!memoryScope.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", memoryScope.message),
+          events: []
+        };
+      }
       const date = normalizeMemoryDate(req.params.date);
       if (!date) {
         return invalidParams(req.id, "memory.archive 的 date 必须为 YYYY-MM-DD");
       }
       const includeLongTerm = req.params.includeLongTerm !== false;
       const clearDaily = req.params.clearDaily !== false;
-      const dailyPath = `memory/${date}.md`;
+      const dailyPath = resolveDailyMemoryPath(memoryScope.args, date);
 
       let dailyText = "";
       const readResult = await internalToolExecutor.execute(
         {
           name: "file.read",
           args: {
+            ...memoryScope.args,
             path: dailyPath
           }
         },
         {
           runId: `memory_archive_read_${Date.now().toString(36)}`,
           sessionId: "session_memory_api",
-          runtimeMode: "local"
+          runtimeMode: "local",
+          ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+          ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+          ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
         }
       );
       if (readResult.ok) {
@@ -1546,6 +1921,7 @@ async function route(
           {
             name: "file.write",
             args: {
+              ...memoryScope.args,
               path: "MEMORY.md",
               content: `${archivedContent}\n`,
               append: true
@@ -1554,7 +1930,10 @@ async function route(
           {
             runId: `memory_archive_append_${Date.now().toString(36)}`,
             sessionId: "session_memory_api",
-            runtimeMode: "local"
+            runtimeMode: "local",
+            ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+            ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+            ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
           }
         );
         if (!appendResult.ok) {
@@ -1574,6 +1953,7 @@ async function route(
           {
             name: "file.write",
             args: {
+              ...memoryScope.args,
               path: dailyPath,
               content: "",
               append: false
@@ -1582,7 +1962,10 @@ async function route(
           {
             runId: `memory_archive_clear_${Date.now().toString(36)}`,
             sessionId: "session_memory_api",
-            runtimeMode: "local"
+            runtimeMode: "local",
+            ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+            ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+            ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
           }
         );
         if (!clearResult.ok) {
@@ -1612,6 +1995,99 @@ async function route(
       };
     }
 
+    case "context.get": {
+      const contextRead = resolveContextAccess(req.params, state, "read");
+      if (!contextRead.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", contextRead.message),
+          events: []
+        };
+      }
+      const readResult = await internalToolExecutor.execute(
+        {
+          name: "file.read",
+          args: {
+            path: contextRead.fileName
+          }
+        },
+        {
+          runId: `context_get_${Date.now().toString(36)}`,
+          sessionId: "session_context_api",
+          runtimeMode: "local",
+          workspaceRoot: contextRead.root
+        }
+      );
+      if (!readResult.ok) {
+        return {
+          response: makeErrorRes(
+            req.id,
+            readResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+            readResult.error?.message ?? "context.get 失败"
+          ),
+          events: []
+        };
+      }
+      return {
+        response: makeSuccessRes(req.id, {
+          context: {
+            layer: contextRead.layer,
+            file: contextRead.fileName,
+            text: readResult.output ?? ""
+          }
+        }),
+        events: []
+      };
+    }
+
+    case "context.upsert": {
+      const contextWrite = resolveContextAccess(req.params, state, "write");
+      if (!contextWrite.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", contextWrite.message),
+          events: []
+        };
+      }
+      const content = requireString(req.params, "content");
+      if (!content) {
+        return invalidParams(req.id, "context.upsert 需要 content");
+      }
+      const writeResult = await internalToolExecutor.execute(
+        {
+          name: "file.write",
+          args: {
+            path: contextWrite.fileName,
+            content,
+            append: false
+          }
+        },
+        {
+          runId: `context_upsert_${Date.now().toString(36)}`,
+          sessionId: "session_context_api",
+          runtimeMode: "local",
+          workspaceRoot: contextWrite.root
+        }
+      );
+      if (!writeResult.ok) {
+        return {
+          response: makeErrorRes(
+            req.id,
+            writeResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+            writeResult.error?.message ?? "context.upsert 失败"
+          ),
+          events: []
+        };
+      }
+      return {
+        response: makeSuccessRes(req.id, {
+          context: {
+            layer: contextWrite.layer,
+            file: contextWrite.fileName
+          }
+        }),
+        events: []
+      };
+    }
+
     default: {
       return {
         response: makeErrorRes(req.id, "METHOD_NOT_FOUND", `未知方法: ${req.method}`),
@@ -1622,7 +2098,7 @@ async function route(
 }
 
 async function persistTranscript(
-  sessionId: string,
+  session: SessionRecord,
   transcriptRepo: TranscriptRepository,
   runId: string | undefined,
   events: EventFrame[],
@@ -1630,7 +2106,10 @@ async function persistTranscript(
 ): Promise<void> {
   for (const event of filterEventsForTranscript(events)) {
     await transcriptRepo.append({
-      sessionId,
+      sessionId: session.id,
+      tenantId: session.tenantId,
+      workspaceId: session.workspaceId,
+      ownerUserId: session.ownerUserId,
       runId,
       event: event.event,
       payload: event.payload,
@@ -1660,7 +2139,8 @@ async function handleHttpRequest(
   req: any,
   res: any,
   router: GatewayRouter,
-  httpConnections: Map<string, ConnectionState>
+  httpConnections: Map<string, ConnectionState>,
+  connectionBindingStore?: RedisConnectionBindingStore
 ): Promise<void> {
   const method = typeof req.method === "string" ? req.method.toUpperCase() : "";
   const pathname = readPathname(req.url, req.headers?.host);
@@ -1762,9 +2242,59 @@ async function handleHttpRequest(
     const body = await readJsonBody(req);
     const connectionId = readConnectionId(req.url, req.headers?.host, req.headers?.["x-openfoal-connection-id"]);
     const state = getOrCreateConnectionState(httpConnections, connectionId);
+    const authorization = typeof req.headers?.authorization === "string" ? req.headers.authorization : undefined;
+    const rpcMethod = readWsMethod(body);
+    if (state.principal && rpcMethod !== "connect") {
+      if (!authorization) {
+        writeJson(res, 401, {
+          error: "AUTH_REQUIRED",
+          message: "enterprise 模式下 /rpc 每次请求都必须带 Authorization"
+        });
+        return;
+      }
+      try {
+        const mePayload = await router.auth?.me(authorization);
+        const current = readPrincipalFromMePayload(mePayload);
+        if (!current || current.subject !== state.principal.subject || current.tenantId !== state.principal.tenantId) {
+          writeJson(res, 401, {
+            error: "UNAUTHORIZED",
+            message: "Authorization 与 connection principal 不一致"
+          });
+          return;
+        }
+        if (connectionBindingStore) {
+          const binding = await connectionBindingStore.get(connectionId);
+          if (!binding || binding.subject !== state.principal.subject || binding.tenantId !== state.principal.tenantId) {
+            writeJson(res, 401, {
+              error: "UNAUTHORIZED",
+              message: "connection principal 与 redis 绑定不一致"
+            });
+            return;
+          }
+        }
+      } catch (error) {
+        writeAuthHttpError(res, error);
+        return;
+      }
+    }
     const result = await router.handle(body, state, {
       transport: "http"
     });
+    if (connectionBindingStore && rpcMethod === "connect") {
+      if (result.response.ok && state.principal) {
+        await connectionBindingStore.bind({
+          connectionId,
+          subject: state.principal.subject,
+          userId: resolvePrincipalUserId(state.principal),
+          tenantId: state.principal.tenantId,
+          workspaceIds: [...state.principal.workspaceIds],
+          roles: [...state.principal.roles],
+          boundAt: new Date().toISOString()
+        });
+      } else {
+        await connectionBindingStore.remove(connectionId);
+      }
+    }
     writeJson(res, 200, result);
     return;
   }
@@ -1999,6 +2529,28 @@ function readWsMethod(input: unknown): MethodName | undefined {
   return method as MethodName;
 }
 
+function readPrincipalFromMePayload(payload: Record<string, unknown> | undefined): {
+  subject: string;
+  tenantId: string;
+} | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return undefined;
+  }
+  const principalRaw = (payload as Record<string, unknown>).principal;
+  if (!principalRaw || typeof principalRaw !== "object" || Array.isArray(principalRaw)) {
+    return undefined;
+  }
+  const subject = asString((principalRaw as Record<string, unknown>).subject);
+  const tenantId = asString((principalRaw as Record<string, unknown>).tenantId);
+  if (!subject || !tenantId) {
+    return undefined;
+  }
+  return {
+    subject,
+    tenantId
+  };
+}
+
 async function readJsonBody(req: any): Promise<unknown> {
   const chunks: any[] = [];
   await new Promise<void>((resolve, reject) => {
@@ -2087,13 +2639,25 @@ async function closeServer(server: any): Promise<void> {
   });
 }
 
-function createSession(id: string, runtimeMode: RuntimeMode, title = DEFAULT_SESSION_TITLE): SessionRecord {
+function createSession(input: {
+  id: string;
+  runtimeMode: RuntimeMode;
+  title?: string;
+  tenantId: string;
+  workspaceId: string;
+  ownerUserId: string;
+  visibility: "private" | "workspace";
+}): SessionRecord {
   return {
-    id,
-    sessionKey: `workspace:w_default/agent:a_default/main:thread:${id}`,
-    title: normalizeSessionTitle(title),
+    id: input.id,
+    sessionKey: `tenant:${input.tenantId}/workspace:${input.workspaceId}/owner:${input.ownerUserId}/thread:${input.id}`,
+    tenantId: input.tenantId,
+    workspaceId: input.workspaceId,
+    ownerUserId: input.ownerUserId,
+    visibility: input.visibility,
+    title: normalizeSessionTitle(input.title ?? DEFAULT_SESSION_TITLE),
     preview: DEFAULT_SESSION_PREVIEW,
-    runtimeMode,
+    runtimeMode: input.runtimeMode,
     syncState: "local_only",
     contextUsage: 0,
     compactionCount: 0,
@@ -2104,6 +2668,76 @@ function createSession(id: string, runtimeMode: RuntimeMode, title = DEFAULT_SES
 
 function createSessionId(): string {
   return `s_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function resolveSessionScope(params: Record<string, unknown>, state: ConnectionState): {
+  tenantId: string;
+  workspaceId: string;
+  ownerUserId?: string;
+} {
+  const tenantId = requireString(params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+  const workspaceId = requireString(params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
+  if (!state.principal) {
+    const userId = requireString(params, "userId");
+    return {
+      tenantId,
+      workspaceId,
+      ...(userId ? { ownerUserId: userId } : {})
+    };
+  }
+  if (canReadCrossUserSessions(state.principal)) {
+    const requestedUserId = requireString(params, "userId");
+    return {
+      tenantId,
+      workspaceId,
+      ...(requestedUserId ? { ownerUserId: requestedUserId } : {})
+    };
+  }
+  const principalUserId = resolvePrincipalUserId(state.principal);
+  return {
+    tenantId,
+    workspaceId,
+    ownerUserId: principalUserId
+  };
+}
+
+function resolveSessionOwnerUserId(params: Record<string, unknown>, state: ConnectionState): string {
+  const requested = requireString(params, "userId");
+  if (!state.principal) {
+    return requested ?? "u_legacy";
+  }
+  if (canReadCrossUserSessions(state.principal) && requested) {
+    return requested;
+  }
+  return resolvePrincipalUserId(state.principal);
+}
+
+function resolveSessionVisibility(params: Record<string, unknown>, state: ConnectionState): "private" | "workspace" {
+  const requested = params.visibility === "workspace" ? "workspace" : params.visibility === "private" ? "private" : undefined;
+  if (!state.principal) {
+    return requested ?? "workspace";
+  }
+  if (canReadCrossUserSessions(state.principal)) {
+    return requested ?? "workspace";
+  }
+  return requested ?? "private";
+}
+
+function canReadCrossUserSessions(principal: Principal | undefined): boolean {
+  if (!principal) {
+    return false;
+  }
+  return principal.roles.includes("tenant_admin") || principal.roles.includes("workspace_admin");
+}
+
+function resolvePrincipalUserId(principal: Principal | undefined): string {
+  if (!principal) {
+    return "u_legacy";
+  }
+  if (typeof principal.userId === "string" && principal.userId.trim().length > 0) {
+    return principal.userId;
+  }
+  return principal.subject;
 }
 
 function withSessionInput(session: SessionRecord, input: string): SessionRecord {
@@ -2410,6 +3044,137 @@ function toAuditQuery(params: Record<string, unknown>): AuditQuery {
   };
 }
 
+function resolveMemoryToolArgs(
+  params: Record<string, unknown>,
+  state: ConnectionState,
+  mode: "read" | "write"
+): {
+  ok: true;
+  args: Record<string, unknown>;
+  ctx: {
+    tenantId?: string;
+    workspaceId?: string;
+    userId?: string;
+  };
+} | {
+  ok: false;
+  message: string;
+} {
+  if (!state.principal) {
+    return {
+      ok: true,
+      args: { ...params },
+      ctx: {}
+    };
+  }
+  const namespace = params.namespace === "workspace" ? "workspace" : "user";
+  if (namespace === "workspace" && mode === "write" && !canReadCrossUserSessions(state.principal)) {
+    return {
+      ok: false,
+      message: "member 不允许写入 workspace 共享记忆"
+    };
+  }
+  const tenantId = requireString(params, "tenantId") ?? state.principal.tenantId;
+  const workspaceId = requireString(params, "workspaceId") ?? state.principal.workspaceIds[0] ?? "w_default";
+  const principalUserId = resolvePrincipalUserId(state.principal);
+  const resolvedUserId =
+    canReadCrossUserSessions(state.principal) && requireString(params, "userId")
+      ? requireString(params, "userId")
+      : principalUserId;
+  const args: Record<string, unknown> = {
+    ...params,
+    namespace,
+    resourceType: "memory",
+    tenantId,
+    workspaceId,
+    userId: resolvedUserId
+  };
+  return {
+    ok: true,
+    args,
+    ctx: {
+      tenantId,
+      workspaceId,
+      userId: resolvedUserId
+    }
+  };
+}
+
+function resolveContextAccess(
+  params: Record<string, unknown>,
+  state: ConnectionState,
+  mode: "read" | "write"
+): {
+  ok: true;
+  root: string;
+  layer: "tenant" | "workspace" | "user";
+  fileName: string;
+} | {
+  ok: false;
+  message: string;
+} {
+  const fileName = normalizeContextFileName(params.file);
+  if (!fileName) {
+    return {
+      ok: false,
+      message: "context 仅允许 AGENTS.md/SOUL.md/TOOLS.md/USER.md"
+    };
+  }
+  if (!state.principal) {
+    return {
+      ok: true,
+      root: process.cwd(),
+      layer: "user",
+      fileName
+    };
+  }
+  const layer = params.layer === "tenant" || params.layer === "workspace" ? params.layer : "user";
+  const isTenantAdmin = state.principal.roles.includes("tenant_admin");
+  const isWorkspaceAdmin = state.principal.roles.includes("workspace_admin");
+  if (layer === "tenant" && !isTenantAdmin) {
+    return {
+      ok: false,
+      message: "仅 tenant_admin 可访问 tenant 级 context"
+    };
+  }
+  if (layer === "workspace" && !(isTenantAdmin || isWorkspaceAdmin)) {
+    return {
+      ok: false,
+      message: "仅管理员可访问 workspace 级 context"
+    };
+  }
+  if (mode === "write" && layer === "user" && !canReadCrossUserSessions(state.principal)) {
+    const targetUserId = requireString(params, "userId");
+    const principalUserId = resolvePrincipalUserId(state.principal);
+    if (targetUserId && targetUserId !== principalUserId) {
+      return {
+        ok: false,
+        message: "member 不允许写入其他用户 context"
+      };
+    }
+  }
+  const tenantId = sanitizeScopePathSegment(requireString(params, "tenantId") ?? state.principal.tenantId);
+  const workspaceId = sanitizeScopePathSegment(requireString(params, "workspaceId") ?? state.principal.workspaceIds[0] ?? "w_default");
+  const targetUserId = sanitizeScopePathSegment(
+    canReadCrossUserSessions(state.principal) && requireString(params, "userId")
+      ? requireString(params, "userId")!
+      : resolvePrincipalUserId(state.principal)
+  );
+  const storageRoot = sanitizeStorageRoot(process.env.OPENFOAL_ENTERPRISE_STORAGE_ROOT ?? "/data/openfoal");
+  const root =
+    layer === "tenant"
+      ? joinPath(storageRoot, "tenants", tenantId, "workspaces", workspaceId, "skills", "tenant")
+      : layer === "workspace"
+        ? joinPath(storageRoot, "tenants", tenantId, "workspaces", workspaceId, "skills", "workspace")
+        : joinPath(storageRoot, "tenants", tenantId, "workspaces", workspaceId, "users", targetUserId, "skills");
+  return {
+    ok: true,
+    root,
+    layer,
+    fileName
+  };
+}
+
 function normalizeUserStatus(value: unknown): "active" | "disabled" | undefined {
   if (value === "active" || value === "disabled") {
     return value;
@@ -2654,7 +3419,11 @@ function createPolicyAwareToolExecutor(input: {
 }): ToolExecutor {
   return {
     async execute(call, ctx, hooks): Promise<ToolResult> {
-      const policy = await input.policyRepo.get("default");
+      const policy = await input.policyRepo.get({
+        tenantId: ctx.tenantId ?? "t_default",
+        workspaceId: ctx.workspaceId ?? "w_default",
+        scopeKey: "default"
+      });
       const decision = resolveToolDecision(policy, call.name);
 
       if (decision === "deny") {
@@ -2676,17 +3445,30 @@ function createExecutionTargetToolExecutor(input: {
   local: ToolExecutor;
   dockerRunnerInvoker: DockerRunnerInvoker;
   getExecutionTarget: (sessionId: string) => ExecutionTargetRecord | undefined;
+  getToolScope?: (sessionId: string) => { tenantId: string; workspaceId: string; userId: string; workspaceRoot?: string } | undefined;
 }): ToolExecutor {
   return {
     async execute(call: ToolCall, ctx: ToolContext, hooks?: ToolExecutionHooks): Promise<ToolResult> {
+      const toolScope = input.getToolScope?.(ctx.sessionId);
+      const scopedCtx: ToolContext = {
+        ...ctx,
+        ...(toolScope
+          ? {
+              tenantId: toolScope.tenantId,
+              workspaceId: toolScope.workspaceId,
+              userId: toolScope.userId,
+              ...(toolScope.workspaceRoot ? { workspaceRoot: toolScope.workspaceRoot } : {})
+            }
+          : {})
+      };
       const target = input.getExecutionTarget(ctx.sessionId);
       if (!target || target.kind === "local-host") {
-        return await input.local.execute(call, ctx, hooks);
+        return await input.local.execute(call, scopedCtx, hooks);
       }
       return await input.dockerRunnerInvoker({
         target,
         call,
-        ctx,
+        ctx: scopedCtx,
         hooks
       });
     }
@@ -3048,10 +3830,78 @@ function maskSecret(value: string): string {
   return `${raw.slice(0, 2)}***${raw.slice(-4)}`;
 }
 
+function normalizeContextFileName(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return "AGENTS.md";
+  }
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "AGENTS" || normalized === "AGENTS.MD") {
+    return "AGENTS.md";
+  }
+  if (normalized === "SOUL" || normalized === "SOUL.MD") {
+    return "SOUL.md";
+  }
+  if (normalized === "TOOLS" || normalized === "TOOLS.MD") {
+    return "TOOLS.md";
+  }
+  if (normalized === "USER" || normalized === "USER.MD") {
+    return "USER.md";
+  }
+  return undefined;
+}
+
+function sanitizeScopePathSegment(value: string): string {
+  return value.trim().replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+function sanitizeStorageRoot(value: string): string {
+  return resolvePath(value.trim().length > 0 ? value : "/data/openfoal");
+}
+
+function resolveGatewayStorageBackend(value: unknown): "sqlite" | "postgres" {
+  if (typeof value !== "string") {
+    return "sqlite";
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === "postgres" || normalized === "pg" ? "postgres" : "sqlite";
+}
+
+function resolveBlobBackend(value: unknown): "fs" | "minio" {
+  if (typeof value !== "string") {
+    return "fs";
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === "minio" ? "minio" : "fs";
+}
+
+function resolveIdempotencyBackend(value: unknown, storageBackend: "sqlite" | "postgres"): "redis" | "storage" {
+  if (typeof value === "string" && value.trim().toLowerCase() === "redis") {
+    return "redis";
+  }
+  if (storageBackend === "postgres") {
+    return "redis";
+  }
+  return "storage";
+}
+
+function joinPath(...segments: string[]): string {
+  return resolvePath(...segments.map((item) => item.trim()).filter((item) => item.length > 0));
+}
+
 async function prepareSessionForRun(input: {
   sessionRepo: SessionRepository;
   toolExecutor: ToolExecutor;
   session: SessionRecord;
+  scope: {
+    tenantId: string;
+    workspaceId: string;
+    ownerUserId?: string;
+  };
+  toolContext: {
+    tenantId: string;
+    workspaceId: string;
+    userId: string;
+  };
   input: string;
   now: () => Date;
 }): Promise<SessionRecord> {
@@ -3060,7 +3910,7 @@ async function prepareSessionForRun(input: {
   const initialMeta = await input.sessionRepo.updateMeta(current.id, {
     contextUsage: projectedUsage,
     memoryFlushState: projectedUsage >= PRE_COMPACTION_THRESHOLD ? "pending" : "idle"
-  });
+  }, input.scope);
   if (initialMeta) {
     current = initialMeta;
   }
@@ -3076,13 +3926,20 @@ async function prepareSessionForRun(input: {
         name: "memory.appendDaily",
         args: {
           content: `[NO_REPLY] pre-compaction session=${current.id} ${summarizeForMemory(input.input)}`,
-          includeLongTerm: false
+          includeLongTerm: false,
+          namespace: "user",
+          tenantId: input.toolContext.tenantId,
+          workspaceId: input.toolContext.workspaceId,
+          userId: input.toolContext.userId
         }
       },
       {
         runId: `flush_${Date.now().toString(36)}`,
         sessionId: current.id,
-        runtimeMode: current.runtimeMode
+        runtimeMode: current.runtimeMode,
+        tenantId: input.toolContext.tenantId,
+        workspaceId: input.toolContext.workspaceId,
+        userId: input.toolContext.userId
       }
     );
     flushState = flush.ok ? "flushed" : "skipped";
@@ -3099,7 +3956,7 @@ async function prepareSessionForRun(input: {
           contextUsage: Math.max(0.35, projectedUsage - 0.45)
         }
       : {})
-  });
+  }, input.scope);
   if (flushedMeta) {
     current = flushedMeta;
   }
@@ -3129,9 +3986,10 @@ function getIdempotencyKey(req: ReqFrame): string | undefined {
 }
 
 function buildIdempotencyCacheKey(req: ReqFrame, idempotencyKey: string): string {
-  const scope =
-    requireString(req.params, "sessionId") ?? requireString(req.params, "runId") ?? "global";
-  return `${req.method}:${scope}:${idempotencyKey}`;
+  const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+  const workspaceId = requireString(req.params, "workspaceId") ?? "w_default";
+  const scope = requireString(req.params, "sessionId") ?? requireString(req.params, "runId") ?? "global";
+  return `${tenantId}:${workspaceId}:${req.method}:${scope}:${idempotencyKey}`;
 }
 
 function stableStringify(value: unknown): string {
@@ -3183,8 +4041,31 @@ function normalizeMemoryDate(value: unknown): string | undefined {
   return undefined;
 }
 
+function resolveDailyMemoryPath(args: Record<string, unknown>, date: string): string {
+  const namespace = args.namespace === "workspace" || args.namespace === "user" ? args.namespace : undefined;
+  if (namespace) {
+    return `daily/${date}.md`;
+  }
+  return `memory/${date}.md`;
+}
+
 function byteLen(text: string): number {
   return Buffer.byteLength(text ?? "");
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
 }
 
 function extractRequestId(input: unknown): string {

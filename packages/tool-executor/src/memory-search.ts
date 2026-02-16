@@ -577,28 +577,34 @@ function listMemoryFiles(workspaceRoot: string): IndexedFile[] {
     });
   }
 
-  const memoryDir = resolve(workspaceRoot, "memory");
-  if (existsSync(memoryDir) && statSync(memoryDir).isDirectory()) {
-    const entries = readdirSync(memoryDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile()) {
-        continue;
-      }
-      if (!/^[A-Za-z0-9._-]+\.md$/.test(entry.name)) {
-        continue;
-      }
-      const relPath = `memory/${entry.name}`;
-      const absPath = join(memoryDir, entry.name);
-      const text = readFileSync(absPath, "utf8");
-      files.push({
-        relPath,
-        text,
-        hash: sha256(text)
-      });
-    }
-  }
+  collectMarkdownFiles(files, workspaceRoot, "memory");
+  collectMarkdownFiles(files, workspaceRoot, "daily");
 
   return files.sort((a, b) => a.relPath.localeCompare(b.relPath));
+}
+
+function collectMarkdownFiles(out: IndexedFile[], workspaceRoot: string, dirName: "memory" | "daily"): void {
+  const dir = resolve(workspaceRoot, dirName);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+    return;
+  }
+  const entries = readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    if (!/^[A-Za-z0-9._-]+\.md$/.test(entry.name)) {
+      continue;
+    }
+    const relPath = `${dirName}/${entry.name}`;
+    const absPath = join(dir, entry.name);
+    const text = readFileSync(absPath, "utf8");
+    out.push({
+      relPath,
+      text,
+      hash: sha256(text)
+    });
+  }
 }
 
 function buildChunks(relPath: string, text: string): ChunkRecord[] {

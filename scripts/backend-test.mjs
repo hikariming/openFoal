@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 run(["scripts/backend-build.mjs"]);
 run([
   "--test",
+  "--test-concurrency=1",
   "tests/backend/core.config.test.mjs",
   "tests/backend/core.runtime.test.mjs",
   "tests/backend/tool-executor.driver.test.mjs",

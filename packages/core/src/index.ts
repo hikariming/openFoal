@@ -597,7 +597,8 @@ function resolveEngine(engine: RuntimeCoreOptions["engine"]): "pi" | "legacy" | 
   if (!Number.isFinite(nodeMajor) || nodeMajor < 20) {
     return "legacy";
   }
-  return "pi";
+  // Keep local/personal default behavior stable when no explicit engine is configured.
+  return "legacy";
 }
 
 function ensurePiProviders(): void {

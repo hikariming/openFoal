@@ -21,6 +21,7 @@ export type PrincipalRole = MembershipRole;
 
 export interface Principal {
   subject: string;
+  userId: string;
   tenantId: string;
   workspaceIds: string[];
   roles: PrincipalRole[];
@@ -124,6 +125,10 @@ type JwkSetCache = {
 };
 
 const WORKSPACE_SCOPE_METHODS = new Set<MethodName>([
+  "sessions.create",
+  "sessions.list",
+  "sessions.get",
+  "sessions.history",
   "agents.list",
   "agents.upsert",
   "executionTargets.list",
@@ -134,7 +139,15 @@ const WORKSPACE_SCOPE_METHODS = new Set<MethodName>([
   "policy.update",
   "audit.query",
   "metrics.summary",
-  "agent.run"
+  "agent.run",
+  "agent.abort",
+  "runtime.setMode",
+  "memory.get",
+  "memory.search",
+  "memory.appendDaily",
+  "memory.archive",
+  "context.get",
+  "context.upsert"
 ]);
 
 const TENANT_SCOPE_METHODS = new Set<MethodName>([
@@ -144,7 +157,9 @@ const TENANT_SCOPE_METHODS = new Set<MethodName>([
   "users.resetPassword",
   "users.updateMemberships",
   "secrets.upsertModelKey",
-  "secrets.getModelKeyMeta"
+  "secrets.getModelKeyMeta",
+  "infra.health",
+  "infra.storage.reconcile"
 ]);
 
 const ENTERPRISE_WRITE_METHODS = new Set<MethodName>([
@@ -156,7 +171,8 @@ const ENTERPRISE_WRITE_METHODS = new Set<MethodName>([
   "secrets.upsertModelKey",
   "executionTargets.upsert",
   "budget.update",
-  "policy.update"
+  "policy.update",
+  "infra.storage.reconcile"
 ]);
 
 const WORKSPACE_ADMIN_ALLOWED_WRITES = new Set<MethodName>([
@@ -172,7 +188,9 @@ const WORKSPACE_ADMIN_RESTRICTED_METHODS = new Set<MethodName>([
   "secrets.getModelKeyMeta",
   "users.create",
   "users.updateStatus",
-  "users.resetPassword"
+  "users.resetPassword",
+  "infra.health",
+  "infra.storage.reconcile"
 ]);
 
 const MEMBER_RESTRICTED_METHODS = new Set<MethodName>([
@@ -182,7 +200,9 @@ const MEMBER_RESTRICTED_METHODS = new Set<MethodName>([
   "users.resetPassword",
   "users.updateMemberships",
   "secrets.upsertModelKey",
-  "secrets.getModelKeyMeta"
+  "secrets.getModelKeyMeta",
+  "infra.health",
+  "infra.storage.reconcile"
 ]);
 
 export function resolveAuthRuntimeConfig(): AuthRuntimeConfig {
@@ -338,6 +358,7 @@ export function createGatewayAuthRuntime(input: {
     }
 
     const effective = { ...params };
+    const principalUserId = resolvePrincipalUserId(principal);
     if (WORKSPACE_SCOPE_METHODS.has(method)) {
       const tenantIdParam = readString(effective, "tenantId");
       if (tenantIdParam && tenantIdParam !== principal.tenantId) {
@@ -360,6 +381,19 @@ export function createGatewayAuthRuntime(input: {
 
       effective.tenantId = principal.tenantId;
       effective.workspaceId = targetWorkspaceId;
+
+      const requestedUserId = readString(effective, "userId");
+      const canCrossUser = hasRole(principal, "tenant_admin") || hasRole(principal, "workspace_admin");
+      if (requestedUserId && requestedUserId !== principalUserId && !canCrossUser) {
+        return {
+          ok: false,
+          code: "FORBIDDEN",
+          message: "member 不允许访问其他用户作用域"
+        };
+      }
+      if (!requestedUserId || !canCrossUser) {
+        effective.userId = principalUserId;
+      }
     }
 
     if (TENANT_SCOPE_METHODS.has(method)) {
@@ -423,6 +457,7 @@ export function createGatewayAuthRuntime(input: {
     const roles = dedupRoles(input.memberships.map((item) => item.role));
     const payload: Record<string, unknown> = {
       sub: input.user.id,
+      userId: input.user.id,
       username: input.user.username,
       tenantId: input.tenantId,
       workspaceIds,
@@ -644,6 +679,7 @@ async function verifyLocalToken(
   ]);
   return {
     subject,
+    userId: subject,
     tenantId,
     workspaceIds: workspaceIds.length > 0 ? workspaceIds : ["w_default"],
     roles: dedupRoles(roleCandidates.length > 0 ? roleCandidates : ["member"]),
@@ -729,6 +765,7 @@ async function verifyExternalToken(
   ]);
   return {
     subject: user.id,
+    userId: user.id,
     tenantId,
     workspaceIds: workspaceIds.length > 0 ? workspaceIds : ["w_default"],
     roles: roles.length > 0 ? roles : ["member"],
@@ -806,9 +843,18 @@ function hasRole(principal: Principal, role: PrincipalRole): boolean {
   return principal.roles.includes(role);
 }
 
+function resolvePrincipalUserId(principal: Principal): string {
+  if (typeof principal.userId === "string" && principal.userId.trim().length > 0) {
+    return principal.userId;
+  }
+  return principal.subject;
+}
+
 function principalSnapshot(principal: Principal): Record<string, unknown> {
+  const userId = resolvePrincipalUserId(principal);
   return {
     subject: principal.subject,
+    userId,
     tenantId: principal.tenantId,
     workspaceIds: [...principal.workspaceIds],
     roles: [...principal.roles],

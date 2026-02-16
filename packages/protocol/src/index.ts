@@ -27,7 +27,11 @@ export const METHODS = [
   "memory.get",
   "memory.search",
   "memory.appendDaily",
-  "memory.archive"
+  "memory.archive",
+  "context.get",
+  "context.upsert",
+  "infra.health",
+  "infra.storage.reconcile"
 ] as const;
 
 export const EVENTS = [
@@ -76,7 +80,9 @@ export const SIDE_EFFECT_METHODS = new Set<MethodName>([
   "budget.update",
   "policy.update",
   "memory.appendDaily",
-  "memory.archive"
+  "memory.archive",
+  "context.upsert",
+  "infra.storage.reconcile"
 ]);
 
 export type MethodName = (typeof METHODS)[number];
@@ -100,6 +106,10 @@ export type SyncState = "local_only" | "syncing" | "synced" | "conflict";
 export interface Session {
   id: string;
   sessionKey: string;
+  tenantId: string;
+  workspaceId: string;
+  ownerUserId: string;
+  visibility: "private" | "workspace";
   title: string;
   preview: string;
   runtimeMode: RuntimeMode;

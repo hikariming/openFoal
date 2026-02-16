@@ -28,6 +28,10 @@ export interface ToolContext {
   runId: string;
   sessionId: string;
   runtimeMode: "local" | "cloud";
+  tenantId?: string;
+  workspaceId?: string;
+  userId?: string;
+  workspaceRoot?: string;
   toolCallId?: string;
 }
 
@@ -61,28 +65,29 @@ export function createLocalToolExecutor(options: LocalToolExecutorOptions = {}):
   const defaultTimeoutMs = toPositiveInt(options.defaultTimeoutMs) ?? 15_000;
 
   return {
-    async execute(call: ToolCall, _ctx: ToolContext, hooks?: ToolExecutionHooks): Promise<ToolResult> {
+    async execute(call: ToolCall, ctx: ToolContext, hooks?: ToolExecutionHooks): Promise<ToolResult> {
+      const effectiveWorkspaceRoot = resolveEffectiveWorkspaceRoot(workspaceRoot, call, ctx);
       switch (call.name) {
         case "bash.exec":
           return await executeBash(call.args, {
-            workspaceRoot,
+            workspaceRoot: effectiveWorkspaceRoot,
             bashShell,
             defaultTimeoutMs
           }, hooks);
         case "file.read":
-          return executeFileRead(call.args, workspaceRoot);
+          return executeFileRead(call.args, effectiveWorkspaceRoot);
         case "file.write":
-          return executeFileWrite(call.args, workspaceRoot);
+          return executeFileWrite(call.args, effectiveWorkspaceRoot);
         case "file.list":
-          return executeFileList(call.args, workspaceRoot);
+          return executeFileList(call.args, effectiveWorkspaceRoot);
         case "http.request":
           return await executeHttpRequest(call.args, defaultTimeoutMs, hooks);
         case "memory.get":
-          return executeMemoryGet(call.args, workspaceRoot);
+          return executeMemoryGet(call.args, effectiveWorkspaceRoot);
         case "memory.search":
-          return executeMemorySearch(call.args, workspaceRoot);
+          return executeMemorySearch(call.args, effectiveWorkspaceRoot);
         case "memory.appendDaily":
-          return executeMemoryAppendDaily(call.args, workspaceRoot);
+          return executeMemoryAppendDaily(call.args, effectiveWorkspaceRoot);
         case "math.add":
           return executeMathAdd(call.args);
         case "text.upper":
@@ -435,7 +440,7 @@ function executeTextUpper(args: Record<string, unknown>): ToolResult {
 function executeMemoryGet(args: Record<string, unknown>, workspaceRoot: string): ToolResult {
   const path = resolveMemoryPathArg(args.path);
   if (!path) {
-    return fail("memory.get 仅允许 MEMORY.md 或 memory/*.md");
+    return fail("memory.get 仅允许 MEMORY.md 或 memory/*.md 或 daily/*.md");
   }
 
   const safePath = resolveSafePath(workspaceRoot, path);
@@ -463,6 +468,18 @@ function executeMemoryGet(args: Record<string, unknown>, workspaceRoot: string):
       })
     };
   } catch (error) {
+    if (readErrorCode(error) === "ENOENT") {
+      return {
+        ok: true,
+        output: JSON.stringify({
+          path,
+          from,
+          lines: lines ?? null,
+          totalLines: 0,
+          text: ""
+        })
+      };
+    }
     return fail(`memory.get 失败: ${toErrorMessage(error)}`);
   }
 }
@@ -483,7 +500,7 @@ function executeMemoryAppendDaily(args: Record<string, unknown>, workspaceRoot: 
     return fail("memory.appendDaily 的 date 必须为 YYYY-MM-DD");
   }
 
-  const dailyPath = `memory/${date}.md`;
+  const dailyPath = resolveDailyMemoryPath(args, date);
   const safeDailyPath = resolveSafePath(workspaceRoot, dailyPath);
   if (!safeDailyPath.ok) {
     return fail(safeDailyPath.message);
@@ -609,7 +626,10 @@ function resolveMemoryPathArg(input: unknown): string | undefined {
   if (path === "MEMORY.md") {
     return path;
   }
-  if (/^memory\/[A-Za-z0-9._-]+\.md$/.test(path)) {
+  if (/^memory\/[A-Za-z0-9._/-]+\.md$/.test(path)) {
+    return path;
+  }
+  if (/^daily\/[A-Za-z0-9._/-]+\.md$/.test(path)) {
     return path;
   }
   return undefined;
@@ -623,6 +643,84 @@ function normalizeDate(value: unknown): string | undefined {
     return nowIso().slice(0, 10);
   }
   return undefined;
+}
+
+function resolveEffectiveWorkspaceRoot(baseWorkspaceRoot: string, call: ToolCall, ctx: ToolContext): string {
+  const explicitWorkspaceRoot = readNonEmptyString(ctx.workspaceRoot);
+  if (explicitWorkspaceRoot) {
+    return normalizePath(resolve(explicitWorkspaceRoot));
+  }
+  const namespaceRoot = resolveEnterpriseNamespaceRoot(baseWorkspaceRoot, call, ctx);
+  return namespaceRoot ?? baseWorkspaceRoot;
+}
+
+function resolveEnterpriseNamespaceRoot(
+  baseWorkspaceRoot: string,
+  call: ToolCall,
+  ctx: ToolContext
+): string | undefined {
+  const args = call.args;
+  const namespace = readNamespace(args.namespace) ?? (isScopedNamespaceTool(call.name) ? "user" : undefined);
+  if (!namespace) {
+    return undefined;
+  }
+  const tenantId = sanitizeScopeSegment(readNonEmptyString(args.tenantId) ?? ctx.tenantId);
+  const workspaceId = sanitizeScopeSegment(readNonEmptyString(args.workspaceId) ?? ctx.workspaceId);
+  const userId = sanitizeScopeSegment(readNonEmptyString(args.userId) ?? ctx.userId);
+  if (!tenantId || !workspaceId) {
+    return undefined;
+  }
+  if (namespace === "user" && !userId) {
+    return undefined;
+  }
+  const storageRoot = normalizePath(
+    resolve(readNonEmptyString(process.env?.OPENFOAL_ENTERPRISE_STORAGE_ROOT) ?? baseWorkspaceRoot)
+  );
+  const resourceType = readResourceType(args.resourceType, call.name);
+  const resourceSegment = resourceType === "memory" ? "memory" : "files";
+  const scopedRoot =
+    namespace === "workspace"
+      ? resolve(storageRoot, "tenants", tenantId, "workspaces", workspaceId, "shared", resourceSegment)
+      : resolve(storageRoot, "tenants", tenantId, "workspaces", workspaceId, "users", userId!, resourceSegment);
+  return normalizePath(scopedRoot);
+}
+
+function isScopedNamespaceTool(toolName: string): boolean {
+  return toolName.startsWith("memory.") || toolName.startsWith("file.");
+}
+
+function readNamespace(value: unknown): "user" | "workspace" | undefined {
+  if (value === "user" || value === "workspace") {
+    return value;
+  }
+  return undefined;
+}
+
+function readResourceType(value: unknown, toolName: string): "memory" | "files" {
+  if (value === "memory" || value === "files") {
+    return value;
+  }
+  return toolName.startsWith("memory.") ? "memory" : "files";
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function sanitizeScopeSegment(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const sanitized = value.replace(/[^A-Za-z0-9._-]/g, "_");
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function resolveDailyMemoryPath(args: Record<string, unknown>, date: string): string {
+  const namespace = readNamespace(args.namespace);
+  if (namespace) {
+    return `daily/${date}.md`;
+  }
+  return `memory/${date}.md`;
 }
 
 function resolveSafePath(workspaceRoot: string, inputPath: string): { ok: true; value: string } | { ok: false; message: string } {
@@ -672,4 +770,12 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function readErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || !("code" in error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && code.length > 0 ? code : undefined;
 }

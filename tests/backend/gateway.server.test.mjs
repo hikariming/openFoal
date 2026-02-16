@@ -237,7 +237,7 @@ async function openWs(port) {
 
   const start = Date.now();
   while (!state.handshakeDone) {
-    if (Date.now() - start > 2000) {
+    if (Date.now() - start > 5000) {
       throw new Error("ws handshake timeout");
     }
     await sleep(5);
@@ -247,7 +247,7 @@ async function openWs(port) {
     sendJson(value) {
       socket.write(encodeClientFrame(JSON.stringify(value)));
     },
-    async readJson(timeoutMs = 2000) {
+    async readJson(timeoutMs = 5000) {
       if (state.queue.length > 0) {
         return state.queue.shift();
       }

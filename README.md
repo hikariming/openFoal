@@ -199,6 +199,14 @@ npm run up:personal
 
 ```bash
 cd /Users/rqq/openFoal
+npm run up:enterprise:all
+```
+
+该命令会一键拉起并验活企业全栈：`gateway + web-console + docker-runner + postgres + redis + minio + bootstrap-enterprise`。
+
+仅启动（不跑 smoke）可用：
+
+```bash
 npm run up:enterprise
 ```
 
@@ -212,14 +220,20 @@ npm run up:enterprise
 
 1. 企业控制台：`http://127.0.0.1:5173`
 2. 网关健康：`http://127.0.0.1:8787/health`
+3. PostgreSQL：`127.0.0.1:15432`（可通过 `OPENFOAL_PG_HOST_PORT` 改）
+4. Redis：`127.0.0.1:16379`（可通过 `OPENFOAL_REDIS_HOST_PORT` 改）
+5. MinIO S3 API：`http://127.0.0.1:19000`（可通过 `OPENFOAL_MINIO_HOST_PORT` 改）
+6. MinIO Console：`http://127.0.0.1:19001`（可通过 `OPENFOAL_MINIO_CONSOLE_PORT` 改）
 
 常用运维命令：
 
 ```bash
+npm run up:enterprise:all
 npm run logs:personal
 npm run logs:enterprise
 npm run ps:docker
 npm run down:personal
+npm run down:enterprise:all
 npm run down:enterprise
 ```
 

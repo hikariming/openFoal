@@ -21,9 +21,9 @@ await rpc("r_connect", "connect", {
       }
     : {})
 });
-const run = await rpc("r_run", "agent.run", {
+const run = await rpc("r_run_1", "agent.run", {
   idempotencyKey: "idem_p2_docker_smoke_1",
-  sessionId: "s_p2_docker_smoke",
+  sessionId: "s_p2_docker_smoke_1",
   input: "run [[tool:bash.exec {\"cmd\":\"printf docker-smoke\"}]]",
   runtimeMode: "local",
   tenantId: "t_default",
@@ -37,6 +37,24 @@ const hasToolResult = Array.isArray(run.events)
   : false;
 if (!hasToolResult) {
   throw new Error("agent.run missing agent.tool_result event");
+}
+
+const run2 = await rpc("r_run_2", "agent.run", {
+  idempotencyKey: "idem_p2_docker_smoke_2",
+  sessionId: "s_p2_docker_smoke_2",
+  input: "run [[tool:bash.exec {\"cmd\":\"printf docker-smoke-2\"}]]",
+  runtimeMode: "local",
+  tenantId: "t_default",
+  workspaceId: "w_default",
+  agentId: "a_default",
+  actor: "docker-smoke"
+});
+
+const hasToolResult2 = Array.isArray(run2.events)
+  ? run2.events.some((event) => event?.event === "agent.tool_result")
+  : false;
+if (!hasToolResult2) {
+  throw new Error("second agent.run missing agent.tool_result event");
 }
 
 const auditPage1 = await rpc("r_audit_1", "audit.query", {
