@@ -190,6 +190,11 @@ test("agent.run forwards llm modelRef/provider/modelId", async () => {
   assert.equal(capturedInput?.llm?.modelRef, "openai-fast");
   assert.equal(capturedInput?.llm?.provider, "openai");
   assert.equal(capturedInput?.llm?.modelId, "gpt-4o-mini");
+  const accepted = run.events.find((event) => event.event === "agent.accepted");
+  assert.equal(accepted?.payload?.llm?.modelRef, "openai-fast");
+  assert.equal(accepted?.payload?.llm?.provider, "openai");
+  assert.equal(accepted?.payload?.llm?.modelId, "gpt-4o-mini");
+  assert.equal(accepted?.payload?.llm?.apiKey, undefined);
 });
 
 test("agent.run over HTTP keeps compatibility event set", async () => {
@@ -722,6 +727,22 @@ test("users and secrets management APIs are available", async () => {
     assert.equal(secret.response.payload.secret?.keyLast4, "1234");
   }
 
+  const secretDefaultWorkspace = await router.handle(
+    req("r_secret_upsert_default_workspace", "secrets.upsertModelKey", {
+      idempotencyKey: "idem_secret_upsert_default_workspace_1",
+      tenantId: "t_default",
+      provider: "kimi",
+      apiKey: "sk-test-openfoal-secret-5678",
+      modelId: "kimi-k2.5"
+    }),
+    state
+  );
+  assert.equal(secretDefaultWorkspace.response.ok, true);
+  if (secretDefaultWorkspace.response.ok) {
+    assert.equal(secretDefaultWorkspace.response.payload.secret?.workspaceId, "w_default");
+    assert.equal(secretDefaultWorkspace.response.payload.secret?.keyLast4, "5678");
+  }
+
   const secretMeta = await router.handle(
     req("r_secret_meta", "secrets.getModelKeyMeta", {
       tenantId: "t_default"
@@ -799,6 +820,47 @@ test("agent.run resolves llm apiKey from secrets repository", async () => {
   assert.equal(run.response.ok, true);
   assert.equal(capturedInput?.llm?.provider, "openai");
   assert.equal(capturedInput?.llm?.apiKey, "sk-enterprise-from-secret-7788");
+  const accepted = run.events.find((event) => event.event === "agent.accepted");
+  assert.equal(accepted?.payload?.llm?.provider, "openai");
+  assert.equal(accepted?.payload?.llm?.modelId, "gpt-4o-mini");
+  assert.equal(accepted?.payload?.llm?.apiKey, undefined);
+
+  const secretAlias = await router.handle(
+    req("r_secret_upsert_alias", "secrets.upsertModelKey", {
+      idempotencyKey: "idem_secret_upsert_alias_1",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      provider: "kimi-k2.5",
+      apiKey: "sk-enterprise-kimi-5566",
+      modelId: "kimi-k2.5",
+      baseUrl: "https://api.moonshot.cn/v1"
+    }),
+    state
+  );
+  assert.equal(secretAlias.response.ok, true);
+
+  const runAlias = await router.handle(
+    req("r_run_secret_alias", "agent.run", {
+      idempotencyKey: "idem_run_secret_alias_1",
+      sessionId: "s_default_alias",
+      input: "hello alias",
+      runtimeMode: "local",
+      llm: {
+        provider: "kimi-k2.5",
+        modelId: "k2p5"
+      }
+    }),
+    state
+  );
+  assert.equal(runAlias.response.ok, true);
+  assert.equal(capturedInput?.llm?.provider, "kimi");
+  assert.equal(capturedInput?.llm?.modelId, "kimi-k2.5");
+  assert.equal(capturedInput?.llm?.apiKey, "sk-enterprise-kimi-5566");
+  const acceptedAlias = runAlias.events.find((event) => event.event === "agent.accepted");
+  assert.equal(acceptedAlias?.payload?.llm?.provider, "kimi");
+  assert.equal(acceptedAlias?.payload?.llm?.modelId, "kimi-k2.5");
+  assert.equal(acceptedAlias?.payload?.llm?.baseUrl, "https://api.moonshot.cn/v1");
+  assert.equal(acceptedAlias?.payload?.llm?.apiKey, undefined);
 });
 
 test("high-risk tools run directly", async () => {

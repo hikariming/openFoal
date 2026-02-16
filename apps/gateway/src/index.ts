@@ -896,15 +896,18 @@ async function route(
 
     case "secrets.upsertModelKey": {
       const tenantId = requireString(req.params, "tenantId") ?? "t_default";
-      const provider = requireString(req.params, "provider");
+      const providerRaw = requireString(req.params, "provider");
+      const provider = providerRaw ? normalizeLlmProvider(providerRaw) : undefined;
       const apiKey = requireString(req.params, "apiKey");
       if (!provider || !apiKey) {
         return invalidParams(req.id, "secrets.upsertModelKey 需要 provider 和 apiKey");
       }
-      const workspaceId = requireString(req.params, "workspaceId");
+      const workspaceId =
+        requireString(req.params, "workspaceId") ??
+        (state.principal?.workspaceIds[0] ? state.principal.workspaceIds[0] : "w_default");
       const updated = await modelSecretRepo.upsert({
         tenantId,
-        ...(workspaceId ? { workspaceId } : {}),
+        workspaceId,
         provider,
         ...(requireString(req.params, "modelId") ? { modelId: requireString(req.params, "modelId") } : {}),
         ...(requireString(req.params, "baseUrl") ? { baseUrl: requireString(req.params, "baseUrl") } : {}),
@@ -1304,6 +1307,7 @@ async function route(
       const llm = await resolveRunLlmOptions({
         requested: requestedLlm,
         principal: state.principal,
+        preferSecretConfig: Boolean(state.principal),
         tenantId,
         workspaceId,
         modelSecretRepo
@@ -1387,6 +1391,13 @@ async function route(
         })) {
           const mapped = mapCoreEvent(coreEvent);
           if (mapped.event === "agent.accepted") {
+            const acceptedLlm = toAcceptedLlmPayload(llm);
+            if (acceptedLlm) {
+              mapped.payload = {
+                ...mapped.payload,
+                llm: acceptedLlm
+              };
+            }
             const runId = mapped.payload.runId;
             if (typeof runId === "string") {
               acceptedRunId = runId;
@@ -2948,9 +2959,28 @@ function asLlmOptions(value: unknown): GatewayLlmOptions | undefined {
 
   return {
     ...(modelRef ? { modelRef } : {}),
-    ...(provider ? { provider } : {}),
+    ...(provider ? { provider: normalizeLlmProvider(provider) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(apiKey ? { apiKey } : {}),
+    ...(baseUrl ? { baseUrl } : {})
+  };
+}
+
+function toAcceptedLlmPayload(value: GatewayLlmOptions | undefined): Record<string, unknown> | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const modelRef = typeof value.modelRef === "string" && value.modelRef.trim().length > 0 ? value.modelRef.trim() : undefined;
+  const provider = typeof value.provider === "string" && value.provider.trim().length > 0 ? value.provider.trim() : undefined;
+  const modelId = typeof value.modelId === "string" && value.modelId.trim().length > 0 ? value.modelId.trim() : undefined;
+  const baseUrl = typeof value.baseUrl === "string" && value.baseUrl.trim().length > 0 ? value.baseUrl.trim() : undefined;
+  if (!modelRef && !provider && !modelId && !baseUrl) {
+    return undefined;
+  }
+  return {
+    ...(modelRef ? { modelRef } : {}),
+    ...(provider ? { provider } : {}),
+    ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl } : {})
   };
 }
@@ -3285,33 +3315,99 @@ function toModelSecretMetaPayload(input: ModelSecretRecord | ModelSecretMetaReco
 async function resolveRunLlmOptions(input: {
   requested?: GatewayLlmOptions;
   principal?: Principal;
+  preferSecretConfig?: boolean;
   tenantId: string;
   workspaceId: string;
   modelSecretRepo: ModelSecretRepository;
 }): Promise<GatewayLlmOptions | undefined> {
   const requested: GatewayLlmOptions = input.requested ? { ...input.requested } : {};
+  if (requested.provider) {
+    requested.provider = normalizeLlmProvider(requested.provider);
+  }
   if (input.principal) {
     delete requested.apiKey;
   }
 
   const providerHint = requested.provider;
-  const secret = await input.modelSecretRepo.getForRun({
-    tenantId: input.tenantId,
-    workspaceId: input.workspaceId,
-    ...(providerHint ? { provider: providerHint } : {})
-  });
+  const providerCandidates = providerHint ? resolveProviderCandidates(providerHint) : [];
+  let secret: ModelSecretRecord | undefined;
+  if (providerCandidates.length > 0) {
+    for (const candidate of providerCandidates) {
+      secret = await input.modelSecretRepo.getForRun({
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        provider: candidate
+      });
+      if (secret) {
+        break;
+      }
+    }
+  } else {
+    secret = await input.modelSecretRepo.getForRun({
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId
+    });
+  }
+  if (!secret && providerCandidates.length > 0) {
+    secret = await input.modelSecretRepo.getForRun({
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId
+    });
+  }
   if (!secret) {
     return Object.keys(requested).length > 0 ? requested : undefined;
   }
 
+  const preferSecretConfig = input.preferSecretConfig === true;
   const merged: GatewayLlmOptions = {
     ...(Object.keys(requested).length > 0 ? requested : {}),
-    provider: requested.provider ?? secret.provider,
-    modelId: requested.modelId ?? secret.modelId,
-    baseUrl: requested.baseUrl ?? secret.baseUrl,
+    provider: preferSecretConfig ? secret.provider ?? requested.provider : requested.provider ?? secret.provider,
+    modelId: preferSecretConfig ? secret.modelId ?? requested.modelId : requested.modelId ?? secret.modelId,
+    baseUrl: preferSecretConfig ? secret.baseUrl ?? requested.baseUrl : requested.baseUrl ?? secret.baseUrl,
     apiKey: secret.apiKey
   };
   return merged;
+}
+
+const PROVIDER_CANONICALS = ["openai", "anthropic", "gemini", "deepseek", "qwen", "doubao", "openrouter", "ollama"] as const;
+const KIMI_PROVIDER_ALIASES = ["moonshot", "moonshotai", "kimi-k2.5", "kimi-k2p5", "kimi-k2", "k2.5", "k2p5"] as const;
+
+function normalizeLlmProvider(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (normalized.length === 0) {
+    return "openai";
+  }
+  if (
+    normalized === "kimi" ||
+    normalized.startsWith("kimi-") ||
+    normalized.startsWith("kimi/") ||
+    normalized.includes("moonshot") ||
+    KIMI_PROVIDER_ALIASES.includes(normalized as (typeof KIMI_PROVIDER_ALIASES)[number])
+  ) {
+    return "kimi";
+  }
+  for (const provider of PROVIDER_CANONICALS) {
+    if (normalized === provider || normalized.startsWith(`${provider}-`) || normalized.startsWith(`${provider}/`)) {
+      return provider;
+    }
+  }
+  return normalized;
+}
+
+function resolveProviderCandidates(provider: string): string[] {
+  const raw = provider.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  const canonical = normalizeLlmProvider(provider);
+  const out = new Set<string>();
+  if (raw.length > 0) {
+    out.add(raw);
+  }
+  out.add(canonical);
+  if (canonical === "kimi") {
+    for (const alias of KIMI_PROVIDER_ALIASES) {
+      out.add(alias);
+    }
+  }
+  return Array.from(out);
 }
 
 async function resolveExecutionTarget(input: {

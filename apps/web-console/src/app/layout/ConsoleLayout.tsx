@@ -94,11 +94,6 @@ export function ConsoleLayout(): JSX.Element {
     return hit?.key ?? "dashboard";
   }, [location.pathname, visibleNav]);
 
-  const currentTitle = useMemo(() => {
-    const hit = navItems.find((item) => item.key === selectedKey);
-    return hit?.text ?? t("app.brand");
-  }, [navItems, selectedKey, t]);
-
   const isChat = selectedKey === "chat";
 
   return (
@@ -124,12 +119,6 @@ export function ConsoleLayout(): JSX.Element {
 
       <Layout>
         <Layout.Header className="console-header">
-          <Space>
-            <Typography.Title heading={4} style={{ margin: 0 }}>
-              {currentTitle}
-            </Typography.Title>
-          </Space>
-
           <Space>
             <Input
               size="small"

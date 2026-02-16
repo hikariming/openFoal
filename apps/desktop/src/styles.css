@@ -647,6 +647,21 @@ body {
   font-weight: 700;
 }
 
+.chat-runtime-model-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 420px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid #d6d3d1;
+  background: #fffdfa;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .chat-top-header .semi-button {
   border-radius: 10px;
 }
@@ -1388,5 +1403,9 @@ body {
 
   .runtime-mode-grid {
     grid-template-columns: 1fr;
+  }
+
+  .chat-runtime-model-pill {
+    max-width: 200px;
   }
 }

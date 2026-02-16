@@ -24,6 +24,8 @@ type ProviderPreset = {
   baseUrls: PresetOption[];
 };
 
+const TENANT_SCOPE_OPTION_VALUE = "__tenant_scope__";
+
 const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     provider: "kimi",
@@ -89,12 +91,17 @@ type SecretForm = {
   apiKey: string;
 };
 
+function normalizeText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 export function SecretsPage(): JSX.Element {
   const { t } = useTranslation();
   const client = useMemo(() => getGatewayClient(), []);
   const principal = useAuthStore((state) => state.principal);
   const permissions = resolveConsolePermissions(principal);
   const tenantId = useScopeStore((state) => state.tenantId);
+  const currentWorkspaceId = useScopeStore((state) => state.workspaceId);
 
   const [loading, setLoading] = useState(false);
   const [sheetLoading, setSheetLoading] = useState(false);
@@ -143,13 +150,48 @@ export function SecretsPage(): JSX.Element {
     }
   });
 
+  const workspaceQuickOptions = useMemo(() => {
+    const workspaceIds = new Set<string>();
+    const activeWorkspace = normalizeText(currentWorkspaceId);
+    if (activeWorkspace) {
+      workspaceIds.add(activeWorkspace);
+    }
+    for (const id of principal?.workspaceIds ?? []) {
+      const value = normalizeText(id);
+      if (value) {
+        workspaceIds.add(value);
+      }
+    }
+    return [
+      { label: t("secrets.workspaceTenantOption"), value: TENANT_SCOPE_OPTION_VALUE },
+      ...Array.from(workspaceIds)
+        .sort((left, right) => left.localeCompare(right))
+        .map((item) => ({ label: item, value: item }))
+    ];
+  }, [currentWorkspaceId, principal?.workspaceIds, t]);
+
+  const baseUrlQuickOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const preset of PROVIDER_PRESETS) {
+      for (const baseUrl of preset.baseUrls) {
+        if (!map.has(baseUrl.value)) {
+          map.set(baseUrl.value, `${preset.label} · ${baseUrl.label}`);
+        }
+      }
+    }
+    return Array.from(map.entries()).map(([value, label]) => ({ value, label }));
+  }, []);
+
   const saveSecret = useCallback(
     async (values: SecretForm) => {
       if (!permissions.canWriteSecrets) {
         return;
       }
-      const provider = values.provider.trim().toLowerCase();
-      const apiKey = values.apiKey.trim();
+      const provider = normalizeText(values.provider).toLowerCase();
+      const apiKey = normalizeText(values.apiKey);
+      const workspaceId = normalizeText(values.workspaceId);
+      const modelId = normalizeText(values.modelId);
+      const baseUrl = normalizeText(values.baseUrl);
       if (!provider || !apiKey) {
         setError(t("secrets.providerApiKeyRequired"));
         return;
@@ -157,12 +199,13 @@ export function SecretsPage(): JSX.Element {
       setSheetLoading(true);
       setError(undefined);
       try {
+        const resolvedWorkspaceId = workspaceId || currentWorkspaceId || "w_default";
         await client.upsertModelKey({
           tenantId,
           provider,
-          workspaceId: values.workspaceId.trim() || undefined,
-          modelId: values.modelId.trim() || undefined,
-          baseUrl: values.baseUrl.trim() || undefined,
+          workspaceId: resolvedWorkspaceId,
+          modelId: modelId || undefined,
+          baseUrl: baseUrl || undefined,
           apiKey
         });
         setSheetVisible(false);
@@ -174,7 +217,7 @@ export function SecretsPage(): JSX.Element {
         setSheetLoading(false);
       }
     },
-    [client, load, permissions.canWriteSecrets, t, tenantId]
+    [client, currentWorkspaceId, load, permissions.canWriteSecrets, t, tenantId]
   );
 
   const columns = useMemo<Array<Record<string, unknown>>>(
@@ -357,9 +400,36 @@ export function SecretsPage(): JSX.Element {
               ))}
             </Space>
             <Form.Input field="provider" label={t("secrets.provider")} />
-            <Form.Input field="workspaceId" label={t("common.workspaceId")} />
+            <Typography.Text type="tertiary" size="small">
+              {t("secrets.workspaceHint")}
+            </Typography.Text>
+            <Select
+              style={{ width: "100%" }}
+              placeholder={t("secrets.workspaceQuickPick")}
+              optionList={workspaceQuickOptions}
+              onChange={(value) => {
+                const normalized = (value as string) ?? "";
+                formApi?.setValues?.({
+                  workspaceId: normalized === TENANT_SCOPE_OPTION_VALUE ? "" : normalized
+                });
+              }}
+            />
+            <Form.Input field="workspaceId" label={t("common.workspaceId")} placeholder={t("secrets.workspaceInputPlaceholder")} />
             <Form.Input field="modelId" label={t("secrets.modelId")} />
-            <Form.Input field="baseUrl" label={t("secrets.baseUrl")} />
+            <Typography.Text type="tertiary" size="small">
+              {t("secrets.baseUrlHint")}
+            </Typography.Text>
+            <Select
+              style={{ width: "100%" }}
+              placeholder={t("secrets.baseUrlQuickPick")}
+              optionList={baseUrlQuickOptions}
+              onChange={(value) => {
+                formApi?.setValues?.({
+                  baseUrl: ((value as string) ?? "").trim()
+                });
+              }}
+            />
+            <Form.Input field="baseUrl" label={t("secrets.baseUrl")} placeholder={t("secrets.baseUrlInputPlaceholder")} />
             <Form.Input field="apiKey" type="password" label={t("secrets.apiKey")} />
           </>
         )}
@@ -367,4 +437,3 @@ export function SecretsPage(): JSX.Element {
     </Space>
   );
 }
-

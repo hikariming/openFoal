@@ -93,6 +93,7 @@ export const enUS = {
     gatewayOnline: "Connected",
     gatewayOffline: "Disconnected",
     runtimeMode: "Runtime",
+    runtimeModelUsed: "Model",
     runtimeLocal: "Local",
     runtimeCloud: "Cloud",
     contextUsage: "Context",

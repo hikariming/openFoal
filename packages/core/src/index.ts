@@ -4,7 +4,7 @@ import {
   type ToolResult
 } from "../../../packages/tool-executor/dist/index.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { Agent, type AgentEvent, type AgentTool, type StreamFn } from "@mariozechner/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from "@mariozechner/pi-agent-core";
 import {
   Type,
   getEnvApiKey,
@@ -173,6 +173,7 @@ const TOOL_DIRECTIVE_PATTERN = /\[\[tool:([a-zA-Z0-9._-]+)(?:\s+([\s\S]*?))?\]\]
 const DEFAULT_SYSTEM_PROMPT = "You are OpenFoal assistant.";
 const DEFAULT_BOOTSTRAP_MAX_CHARS = 8_000;
 const DEFAULT_BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "TOOLS.md", "USER.md"] as const;
+const MAX_SESSION_CONTEXT_MESSAGES = 120;
 const PUBLIC_TOOL_NAMES = [
   "bash.exec",
   "file.read",
@@ -208,6 +209,7 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
   const toolExecutor = options.toolExecutor ?? createBuiltinToolExecutor();
   const piOptions = options.pi ?? {};
   const running = new Map<string, ActiveRun>();
+  const sessionMessageHistory = new Map<string, AgentMessage[]>();
   let runCounter = 0;
 
   ensurePiProviders();
@@ -274,12 +276,16 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
           sessionId: input.sessionId,
           runtimeMode: input.runtimeMode
         });
+        const previousMessages = sessionMessageHistory.get(input.sessionId);
 
         const agent = new Agent({
           initialState: {
             ...(runtimeSettings.model ? { model: runtimeSettings.model as Model<any> } : {}),
             systemPrompt,
-            tools
+            tools,
+            ...(previousMessages && previousMessages.length > 0
+              ? { messages: cloneAgentMessages(previousMessages) }
+              : {})
           },
           streamFn,
           getApiKey: (provider) => resolveApiKey(provider, runtimeSettings, piOptions),
@@ -322,6 +328,10 @@ export function createPiCoreService(options: RuntimeCoreOptions = {}): CoreServi
             }
           } finally {
             completed = true;
+            sessionMessageHistory.set(
+              input.sessionId,
+              trimSessionMessages(cloneAgentMessages(agent.state.messages))
+            );
             unsubscribe();
             running.delete(runId);
             queue.close();
@@ -503,7 +513,16 @@ function buildSystemPromptWithWorkspace(options: PiCoreOptions): string {
     "Follow workspace guidance files. Security/policy/system constraints always take precedence over style/persona rules."
   );
   lines.push(
-    "Memory recall rule: before answering questions about prior work, decisions, dates, preferences, or todos, run memory.search first, then use memory.get for exact lines."
+    "Memory recall rule: only when the question is about prior work, decisions, dates, preferences, or todos not already present in this chat, run memory.search first, then use memory.get for exact lines."
+  );
+  lines.push(
+    "URL follow-up rule: when the user gives a URL or asks to continue/check/load a just-mentioned URL, prefer http.request on that URL first."
+  );
+  lines.push(
+    "Do not call file.list/file.read or memory.search for website questions unless the user explicitly asks about local files or memory notes."
+  );
+  lines.push(
+    "Current chat history is primary context. For questions like '我刚刚问了什么' or '总结一下刚才内容', answer from this session history directly instead of memory.search."
   );
   lines.push("");
   for (const file of files) {
@@ -1065,6 +1084,21 @@ function mapPiEvent(event: AgentEvent, runId: string): CoreEvent[] {
     default:
       return [];
   }
+}
+
+function cloneAgentMessages(messages: AgentMessage[]): AgentMessage[] {
+  try {
+    return JSON.parse(JSON.stringify(messages)) as AgentMessage[];
+  } catch {
+    return [...messages];
+  }
+}
+
+function trimSessionMessages(messages: AgentMessage[]): AgentMessage[] {
+  if (messages.length <= MAX_SESSION_CONTEXT_MESSAGES) {
+    return messages;
+  }
+  return messages.slice(-MAX_SESSION_CONTEXT_MESSAGES);
 }
 
 function extractToolCallFromPartial(

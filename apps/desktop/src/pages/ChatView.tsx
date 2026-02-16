@@ -44,6 +44,13 @@ type ReplayRunState = {
   toolMessageIds: Record<string, string>;
 };
 
+type AcceptedLlmInfo = {
+  modelRef?: string;
+  provider?: string;
+  modelId?: string;
+  baseUrl?: string;
+};
+
 const MAX_MESSAGES_PER_SESSION = 120;
 
 export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessionTitle: string }) {
@@ -54,8 +61,10 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   const activeLlmProfile = useMemo(() => getActiveLlmProfile(llmConfig), [llmConfig]);
   const gatewayClient = useMemo(() => getGatewayClient(), []);
   const historyCache = useRef<Record<string, ChatMessage[]>>({});
+  const acceptedLlmCache = useRef<Record<string, AcceptedLlmInfo | undefined>>({});
   const runRenderRef = useRef<RunRenderState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [acceptedLlm, setAcceptedLlm] = useState<AcceptedLlmInfo | undefined>(undefined);
   const [inputValue, setInputValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
@@ -95,6 +104,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
     runRenderRef.current = null;
     setRuntimeError("");
     setMessages(historyCache.current[sessionId] ?? []);
+    setAcceptedLlm(acceptedLlmCache.current[sessionId]);
     let cancelled = false;
     void (async () => {
       try {
@@ -106,8 +116,10 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
           return;
         }
         const rebuilt = buildMessagesFromTranscript(transcript);
-        historyCache.current[sessionId] = rebuilt;
-        setMessages(rebuilt);
+        historyCache.current[sessionId] = rebuilt.messages;
+        acceptedLlmCache.current[sessionId] = rebuilt.latestAcceptedLlm;
+        setMessages(rebuilt.messages);
+        setAcceptedLlm(rebuilt.latestAcceptedLlm);
       } catch (error) {
         if (!cancelled) {
           setRuntimeError(error instanceof Error ? error.message : String(error));
@@ -254,6 +266,15 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   };
 
   const applyRunEvent = (event: RpcEvent): void => {
+    if (event.event === "agent.accepted") {
+      const resolved = readAcceptedLlm(event.payload);
+      if (resolved) {
+        acceptedLlmCache.current[sessionId] = resolved;
+        setAcceptedLlm(resolved);
+      }
+      return;
+    }
+
     if (event.event === "agent.delta") {
       const delta = asString(event.payload.delta) ?? "";
       if (delta.length === 0) {
@@ -336,7 +357,6 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
       });
       return;
     }
-
   };
 
   const handleSend = async (rawInput?: string): Promise<void> => {
@@ -412,13 +432,22 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
     }
   };
 
+  const runtimeModelLabel = formatAcceptedLlmLabel(acceptedLlm, {
+    modelRef: activeLlmProfile.modelRef,
+    provider: activeLlmProfile.provider,
+    modelId: activeLlmProfile.modelId
+  });
+
   return (
     <Card className="workspace-panel workspace-panel-chat" bodyStyle={{ padding: 0 }}>
       <div className="workspace-header chat-top-header">
-        <Space>
+        <Space spacing={8} align="center">
           <Typography.Title heading={3} className="workspace-title">
             {sessionTitle}
           </Typography.Title>
+          <Typography.Text type="tertiary" className="chat-runtime-model-pill">
+            {t("chat.runtimeModelUsed")}: {runtimeModelLabel}
+          </Typography.Text>
         </Space>
         <Button icon={<IconShareStroked />} theme="light" type="primary">
           {t("chat.share")}
@@ -550,9 +579,13 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
   );
 }
 
-function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): ChatMessage[] {
+function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): {
+  messages: ChatMessage[];
+  latestAcceptedLlm?: AcceptedLlmInfo;
+} {
   const messages: ChatMessage[] = [];
   const runState = new Map<string, ReplayRunState>();
+  let latestAcceptedLlm: AcceptedLlmInfo | undefined;
 
   const getState = (runId: string): ReplayRunState => {
     const existing = runState.get(runId);
@@ -628,6 +661,14 @@ function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): ChatMessag
           role: "user",
           text: inputText
         });
+      }
+      continue;
+    }
+
+    if (item.event === "agent.accepted") {
+      const accepted = readAcceptedLlm(item.payload);
+      if (accepted) {
+        latestAcceptedLlm = accepted;
       }
       continue;
     }
@@ -734,7 +775,10 @@ function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): ChatMessag
 
   }
 
-  return messages.slice(-MAX_MESSAGES_PER_SESSION);
+  return {
+    messages: messages.slice(-MAX_MESSAGES_PER_SESSION),
+    ...(latestAcceptedLlm ? { latestAcceptedLlm } : {})
+  };
 }
 
 function renderRole(role: ChatRole, t: (key: string) => string): string {
@@ -752,6 +796,63 @@ function renderRole(role: ChatRole, t: (key: string) => string): string {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function readAcceptedLlm(payload: Record<string, unknown>): AcceptedLlmInfo | undefined {
+  const nested = asRecord(payload.llm);
+  const source = nested ?? payload;
+  const modelRef = asString(source.modelRef)?.trim();
+  const provider = asString(source.provider)?.trim();
+  const modelId = asString(source.modelId)?.trim();
+  const baseUrl = asString(source.baseUrl)?.trim();
+  if (!modelRef && !provider && !modelId && !baseUrl) {
+    return undefined;
+  }
+  return {
+    ...(modelRef ? { modelRef } : {}),
+    ...(provider ? { provider } : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(baseUrl ? { baseUrl } : {})
+  };
+}
+
+function formatAcceptedLlmLabel(
+  accepted: AcceptedLlmInfo | undefined,
+  fallback: { modelRef: string; provider: string; modelId: string }
+): string {
+  const modelRef = accepted?.modelRef?.trim();
+  if (modelRef) {
+    return modelRef;
+  }
+  const provider = accepted?.provider?.trim();
+  const modelId = accepted?.modelId?.trim();
+  if (provider && modelId) {
+    return `${provider} · ${modelId}`;
+  }
+  if (modelId) {
+    return modelId;
+  }
+  if (provider) {
+    return provider;
+  }
+
+  const fallbackRef = fallback.modelRef.trim();
+  if (fallbackRef) {
+    return fallbackRef;
+  }
+  const fallbackProvider = fallback.provider.trim();
+  const fallbackModelId = fallback.modelId.trim();
+  if (fallbackProvider && fallbackModelId) {
+    return `${fallbackProvider} · ${fallbackModelId}`;
+  }
+  return fallbackProvider || fallbackModelId || "-";
 }
 
 function safeJson(value: unknown): string {
