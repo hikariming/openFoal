@@ -1,1 +1,1 @@
-export { App } from "../../desktop/src/App";
+export { WorkbenchApp as App } from "@openfoal/personal-app/workbench";

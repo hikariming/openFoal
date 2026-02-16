@@ -39,6 +39,39 @@ test("connect then sessions.list works", async () => {
   }
 });
 
+test("context.get returns default template when scoped file is missing", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+  state.principal = {
+    subject: "u_ctx_missing",
+    userId: "u_ctx_missing",
+    tenantId: "t_ctx_missing",
+    workspaceIds: ["w_ctx_missing"],
+    roles: ["tenant_admin"],
+    authSource: "local"
+  };
+
+  const result = await router.handle(
+    req("r_context_missing", "context.get", {
+      layer: "tenant",
+      file: "TOOLS.md",
+      tenantId: "t_ctx_missing",
+      workspaceId: "w_ctx_missing"
+    }),
+    state
+  );
+
+  assert.equal(result.response.ok, true);
+  if (result.response.ok) {
+    const context = result.response.payload.context;
+    assert.equal(context.layer, "tenant");
+    assert.equal(context.file, "TOOLS.md");
+    assert.equal(typeof context.text, "string");
+    assert.equal(context.text.includes("Prefer workspace-safe tools."), true);
+  }
+});
+
 test("sessions.create creates a session and sessions.list returns it", async () => {
   const router = createGatewayRouter();
   const state = createConnectionState();

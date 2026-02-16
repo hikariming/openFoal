@@ -225,6 +225,39 @@ test("sqlite policy/metrics repositories persist across instances", async () => 
   }
 });
 
+test("sqlite policy repository initializes scoped policy before first update", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openfoal-policy-scope-"));
+  const dbPath = join(dir, "storage.sqlite");
+
+  try {
+    const repo = new SqlitePolicyRepository(dbPath);
+    const updated = await repo.update(
+      {
+        toolDefault: "allow"
+      },
+      {
+        tenantId: "t_e2e",
+        workspaceId: "w_e2e",
+        scopeKey: "default"
+      }
+    );
+    assert.equal(updated.tenantId, "t_e2e");
+    assert.equal(updated.workspaceId, "w_e2e");
+    assert.equal(updated.scopeKey, "default");
+    assert.equal(updated.toolDefault, "allow");
+    assert.equal(updated.version >= 2, true);
+
+    const persisted = await repo.get({
+      tenantId: "t_e2e",
+      workspaceId: "w_e2e",
+      scopeKey: "default"
+    });
+    assert.equal(persisted.toolDefault, "allow");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("sqlite p2 repositories persist agents/targets/budget/audit", async () => {
   const dir = mkdtempSync(join(tmpdir(), "openfoal-storage-p2-"));
   const dbPath = join(dir, "storage.sqlite");

@@ -2,7 +2,7 @@ import { Button, Layout, Space, Tag, Typography } from "@douyinfe/semi-ui";
 import { useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Outlet, useNavigate } from "react-router-dom";
-import { AppSidebar } from "../../../../desktop/src/components/AppSidebar";
+import { AppSidebar } from "@openfoal/personal-app/workbench";
 import i18n from "../../i18n";
 import { resolveConsolePermissions } from "../permissions";
 import { getGatewayClient } from "../../lib/gateway-client";

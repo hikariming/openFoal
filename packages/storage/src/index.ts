@@ -847,12 +847,55 @@ export class SqlitePolicyRepository implements PolicyRepository {
         workspaceId: resolved.workspaceId,
         scopeKey
       });
-      await this.update(created, {
-        tenantId: resolved.tenantId,
-        workspaceId: resolved.workspaceId,
-        scopeKey
-      });
-      return await this.get(resolved);
+      execSql(
+        this.dbPath,
+        `
+          INSERT OR IGNORE INTO policy (tenant_id, workspace_id, scope_key, policy_json, version, updated_at)
+          VALUES (
+            ${sqlString(created.tenantId)},
+            ${sqlString(created.workspaceId)},
+            ${sqlString(created.scopeKey)},
+            ${sqlString(
+              JSON.stringify({
+                toolDefault: created.toolDefault,
+                highRisk: created.highRisk,
+                bashMode: created.bashMode,
+                tools: created.tools
+              })
+            )},
+            ${sqlInt(created.version)},
+            ${sqlString(created.updatedAt)}
+          );
+        `
+      );
+      const seededRows = queryJson<{
+        tenantId: string;
+        workspaceId: string;
+        scopeKey: string;
+        policyJson: string;
+        version: number;
+        updatedAt: string;
+      }>(
+        this.dbPath,
+        `
+          SELECT
+            tenant_id AS tenantId,
+            workspace_id AS workspaceId,
+            scope_key AS scopeKey,
+            policy_json AS policyJson,
+            version AS version,
+            updated_at AS updatedAt
+          FROM policy
+          WHERE tenant_id = ${sqlString(resolved.tenantId)}
+            AND workspace_id = ${sqlString(resolved.workspaceId)}
+            AND scope_key = ${sqlString(scopeKey)}
+          LIMIT 1;
+        `
+      );
+      if (seededRows.length === 0) {
+        return created;
+      }
+      return parsePolicyRow(seededRows[0]);
     }
 
     return parsePolicyRow(rows[0]);

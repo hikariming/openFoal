@@ -1,8 +1,7 @@
 import { Card, Space, Typography } from "@douyinfe/semi-ui";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { ChatView } from "../../../desktop/src/pages/ChatView";
-import { getActiveSession, useAppStore } from "../../../desktop/src/store/app-store";
+import { ChatView, getActiveSession, useAppStore } from "@openfoal/personal-app/workbench";
 
 export function ChatPage(): JSX.Element {
   const { t } = useTranslation();

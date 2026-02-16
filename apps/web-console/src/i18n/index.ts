@@ -3,15 +3,14 @@ import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 import enUS from "./locales/en-US";
 import zhCN from "./locales/zh-CN";
-import { enUS as desktopEnUS } from "../../../desktop/src/locales/en-US";
-import { zhCN as desktopZhCN } from "../../../desktop/src/locales/zh-CN";
+import { workbenchEnUS, workbenchZhCN } from "@openfoal/personal-app/workbench";
 
 const resources = {
   "zh-CN": {
-    translation: mergeLocale(desktopZhCN, zhCN)
+    translation: mergeLocale(workbenchZhCN, zhCN)
   },
   "en-US": {
-    translation: mergeLocale(desktopEnUS, enUS)
+    translation: mergeLocale(workbenchEnUS, enUS)
   }
 };
 

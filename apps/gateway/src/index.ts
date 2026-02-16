@@ -1690,6 +1690,18 @@ async function route(
         }
       );
       if (!readResult.ok) {
+        if (isFileNotFoundError(readResult.error?.message)) {
+          return {
+            response: makeSuccessRes(req.id, {
+              context: {
+                layer: contextRead.layer,
+                file: contextRead.fileName,
+                text: defaultContextFileContent(contextRead.fileName)
+              }
+            }),
+            events: []
+          };
+        }
         return {
           response: makeErrorRes(
             req.id,
@@ -3605,6 +3617,25 @@ function normalizeContextFileName(value: unknown): string | undefined {
     return "USER.md";
   }
   return undefined;
+}
+
+function defaultContextFileContent(fileName: string): string {
+  switch (fileName) {
+    case "AGENTS.md":
+      return "# AGENTS.md\n\n- Follow project coding and safety policies.\n- Keep responses concise and executable.\n";
+    case "SOUL.md":
+      return "# SOUL.md\n\nPragmatic, direct engineering assistant persona.\n";
+    case "TOOLS.md":
+      return "# TOOLS.md\n\n- Prefer workspace-safe tools.\n- Explain side effects before destructive actions.\n";
+    case "USER.md":
+      return "# USER.md\n\n- Preferred language: zh-CN\n- Style: concise and practical\n";
+    default:
+      return "";
+  }
+}
+
+function isFileNotFoundError(message: unknown): boolean {
+  return typeof message === "string" && message.includes("ENOENT");
 }
 
 function sanitizeScopePathSegment(value: string): string {

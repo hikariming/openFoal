@@ -6,11 +6,20 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./gateway-client": "./src/gateway-client.ts",
+    "./workbench": "./src/workbench/index.ts",
+    "./workbench/styles.css": "./src/workbench/styles.css"
   },
   "dependencies": {
+    "@douyinfe/semi-icons": "^2.82.0",
+    "@douyinfe/semi-ui": "^2.82.0",
+    "i18next": "^25.8.6",
+    "react-i18next": "^16.5.4",
+    "react-router-dom": "^6.30.3",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.11"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

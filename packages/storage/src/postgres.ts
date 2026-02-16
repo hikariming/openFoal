@@ -422,16 +422,57 @@ export class PostgresPolicyRepository extends PostgresRepoBase implements Policy
 
     if (result.rows.length === 0) {
       const created = defaultPolicy(resolved.tenantId, resolved.workspaceId, resolved.scopeKey);
-      await this.update(
-        {
-          toolDefault: created.toolDefault,
-          highRisk: created.highRisk,
-          bashMode: created.bashMode,
-          tools: created.tools
-        },
-        resolved
+      await this.pool.query(
+        `
+          INSERT INTO policy (
+            tenant_id,
+            workspace_id,
+            scope_key,
+            policy_json,
+            version,
+            updated_at
+          )
+          VALUES ($1,$2,$3,$4::jsonb,$5,$6)
+          ON CONFLICT(tenant_id, workspace_id, scope_key) DO NOTHING
+        `,
+        [
+          created.tenantId,
+          created.workspaceId,
+          created.scopeKey,
+          JSON.stringify({
+            toolDefault: created.toolDefault,
+            highRisk: created.highRisk,
+            bashMode: created.bashMode,
+            tools: created.tools
+          }),
+          created.version,
+          created.updatedAt
+        ]
       );
-      return await this.get(resolved);
+      const seeded = await this.pool.query(
+        `
+          SELECT
+            tenant_id AS "tenantId",
+            workspace_id AS "workspaceId",
+            scope_key AS "scopeKey",
+            policy_json AS "policyJson",
+            version,
+            updated_at AS "updatedAt"
+          FROM policy
+          WHERE tenant_id = $1
+            AND workspace_id = $2
+            AND scope_key = $3
+          LIMIT 1
+        `,
+        [resolved.tenantId, resolved.workspaceId, resolved.scopeKey]
+      );
+      if (seeded.rows.length === 0) {
+        return {
+          ...created,
+          storageBackend: "postgres"
+        };
+      }
+      return normalizePolicyRow(seeded.rows[0]);
     }
 
     return normalizePolicyRow(result.rows[0]);
