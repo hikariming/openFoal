@@ -25,6 +25,7 @@ export const METHODS = [
   "audit.query",
   "metrics.summary",
   "memory.get",
+  "memory.search",
   "memory.appendDaily",
   "memory.archive"
 ] as const;

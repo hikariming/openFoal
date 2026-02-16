@@ -68,6 +68,22 @@ test("memory.appendDaily requires idempotencyKey", () => {
   }
 });
 
+test("memory.search does not require idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_memory_search_1",
+    method: "memory.search",
+    params: {
+      query: "remember this"
+    }
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.data.method, "memory.search");
+  }
+});
+
 test("memory.archive requires idempotencyKey", () => {
   const result = validateReqFrame({
     type: "req",

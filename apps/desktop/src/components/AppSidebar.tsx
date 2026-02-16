@@ -24,7 +24,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { getGatewayClient, type GatewaySession } from "../lib/gateway-client";
+import { getGatewayClient, type GatewayMemorySearchHit, type GatewaySession } from "../lib/gateway-client";
 import {
   createLlmProfile,
   getSessionRuntimeMode,
@@ -61,6 +61,10 @@ export function AppSidebar() {
   const [memoryPending, setMemoryPending] = useState(false);
   const [memoryError, setMemoryError] = useState("");
   const [memoryNotice, setMemoryNotice] = useState("");
+  const [memorySearchQuery, setMemorySearchQuery] = useState("");
+  const [memorySearchPending, setMemorySearchPending] = useState(false);
+  const [memorySearchHits, setMemorySearchHits] = useState<GatewayMemorySearchHit[]>([]);
+  const [memorySearchMeta, setMemorySearchMeta] = useState("");
   const [llmSavedNotice, setLlmSavedNotice] = useState("");
   const { sessions, activeSessionId, setSessions, upsertSession, setActiveSession, setRuntimeMode, llmConfig, setLlmConfig } =
     useAppStore();
@@ -235,6 +239,64 @@ export function AppSidebar() {
     } catch (error) {
       setMemoryText("");
       setMemoryInfo("");
+      setMemoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemoryPending(false);
+    }
+  };
+
+  const searchMemory = async (): Promise<void> => {
+    const query = memorySearchQuery.trim();
+    if (!query || memorySearchPending) {
+      return;
+    }
+    setMemorySearchPending(true);
+    setMemoryError("");
+    setMemoryNotice("");
+    try {
+      const client = getGatewayClient();
+      const result = await client.memorySearch({
+        query,
+        maxResults: 6
+      });
+      setMemorySearchHits(result.results);
+      setMemorySearchMeta(
+        `${result.mode} · ${result.results.length} hits · files ${result.indexStats.files} · chunks ${result.indexStats.chunks}`
+      );
+    } catch (error) {
+      setMemorySearchHits([]);
+      setMemorySearchMeta("");
+      setMemoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemorySearchPending(false);
+    }
+  };
+
+  const openMemorySearchHit = async (hit: GatewayMemorySearchHit): Promise<void> => {
+    setMemoryPending(true);
+    setMemoryError("");
+    setMemoryNotice("");
+    try {
+      const client = getGatewayClient();
+      const lines = Math.max(1, hit.endLine - hit.startLine + 1);
+      const result = await client.memoryGet({
+        path: hit.path,
+        from: hit.startLine,
+        lines
+      });
+      if (hit.path === "MEMORY.md") {
+        setMemoryTarget("global");
+      } else {
+        const matched = /^memory\/(.+)\.md$/.exec(hit.path);
+        setMemoryTarget("daily");
+        if (matched?.[1]) {
+          setMemoryDate(matched[1]);
+        }
+      }
+      setMemoryText(result.text);
+      setMemoryInfo(`${result.path} · lines ${result.from}-${result.from + Math.max(0, (result.lines ?? lines) - 1)}`);
+      setMemoryNotice(`${t("sidebar.memorySearchOpened")} ${hit.path}:${hit.startLine}`);
+    } catch (error) {
       setMemoryError(error instanceof Error ? error.message : String(error));
     } finally {
       setMemoryPending(false);
@@ -880,6 +942,39 @@ export function AppSidebar() {
                     className="memory-readonly"
                     placeholder={t("sidebar.memoryEmpty")}
                   />
+
+                  <Typography.Text className="settings-label">{t("sidebar.memorySearchTitle")}</Typography.Text>
+                  <Space spacing={8} align="start" className="memory-search-row">
+                    <Input
+                      value={memorySearchQuery}
+                      className="memory-search-input"
+                      onChange={(value) => setMemorySearchQuery(value)}
+                      placeholder={t("sidebar.memorySearchPlaceholder")}
+                    />
+                    <Button theme="solid" loading={memorySearchPending} onClick={() => void searchMemory()}>
+                      {t("sidebar.memorySearchAction")}
+                    </Button>
+                  </Space>
+                  {memorySearchMeta ? <Typography.Text type="tertiary">{memorySearchMeta}</Typography.Text> : null}
+                  <div className="memory-search-results">
+                    {memorySearchHits.length === 0 ? (
+                      <Typography.Text type="tertiary">{t("sidebar.memorySearchEmpty")}</Typography.Text>
+                    ) : (
+                      memorySearchHits.map((item) => (
+                        <div key={`${item.path}:${item.startLine}:${item.endLine}`} className="memory-search-result-item">
+                          <div className="memory-search-result-head">
+                            <Typography.Text type="tertiary">
+                              {item.path}:{item.startLine}-{item.endLine} · score {item.score.toFixed(3)}
+                            </Typography.Text>
+                            <Button size="small" theme="light" onClick={() => void openMemorySearchHit(item)}>
+                              {t("sidebar.memorySearchOpen")}
+                            </Button>
+                          </div>
+                          <Typography.Paragraph className="memory-search-snippet">{item.snippet}</Typography.Paragraph>
+                        </div>
+                      ))
+                    )}
+                  </div>
 
                   <Typography.Text className="settings-label">{t("sidebar.memoryAppendTitle")}</Typography.Text>
                   <TextArea

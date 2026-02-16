@@ -1439,6 +1439,36 @@ async function route(
       };
     }
 
+    case "memory.search": {
+      const toolResult = await internalToolExecutor.execute(
+        {
+          name: "memory.search",
+          args: req.params
+        },
+        {
+          runId: `memory_search_${Date.now().toString(36)}`,
+          sessionId: "session_memory_api",
+          runtimeMode: "local"
+        }
+      );
+      if (!toolResult.ok) {
+        return {
+          response: makeErrorRes(
+            req.id,
+            toolResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+            toolResult.error?.message ?? "memory.search 失败"
+          ),
+          events: []
+        };
+      }
+      return {
+        response: makeSuccessRes(req.id, {
+          search: parseToolJsonOutput(toolResult.output)
+        }),
+        events: []
+      };
+    }
+
     case "memory.appendDaily": {
       const toolResult = await internalToolExecutor.execute(
         {

@@ -180,6 +180,7 @@ const PUBLIC_TOOL_NAMES = [
   "file.list",
   "http.request",
   "memory.get",
+  "memory.search",
   "memory.appendDaily",
   "math.add",
   "text.upper",
@@ -500,6 +501,9 @@ function buildSystemPromptWithWorkspace(options: PiCoreOptions): string {
   const lines: string[] = [basePrompt, "", "## Project Context"];
   lines.push(
     "Follow workspace guidance files. Security/policy/system constraints always take precedence over style/persona rules."
+  );
+  lines.push(
+    "Memory recall rule: before answering questions about prior work, decisions, dates, preferences, or todos, run memory.search first, then use memory.get for exact lines."
   );
   lines.push("");
   for (const file of files) {

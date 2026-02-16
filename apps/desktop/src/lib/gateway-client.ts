@@ -14,6 +14,7 @@ type GatewayMethod =
   | "audit.query"
   | "metrics.summary"
   | "memory.get"
+  | "memory.search"
   | "memory.appendDaily"
   | "memory.archive";
 
@@ -166,6 +167,27 @@ export type GatewayMemoryAppendResult = {
   append: boolean;
   bytes: number;
   includeLongTerm: boolean;
+};
+
+export type GatewayMemorySearchHit = {
+  path: string;
+  startLine: number;
+  endLine: number;
+  snippet: string;
+  score: number;
+  source: "memory";
+};
+
+export type GatewayMemorySearchResult = {
+  results: GatewayMemorySearchHit[];
+  mode: "hybrid" | "keyword" | "contains";
+  provider?: "openai" | "gemini" | "voyage";
+  model?: string;
+  indexStats: {
+    files: number;
+    chunks: number;
+    lastSyncAt?: string;
+  };
 };
 
 export type GatewayMemoryArchiveResult = {
@@ -376,6 +398,24 @@ export class GatewayHttpClient {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid memory.get payload");
     }
     return memory;
+  }
+
+  async memorySearch(params: {
+    query: string;
+    maxResults?: number;
+    minScore?: number;
+  }): Promise<GatewayMemorySearchResult> {
+    await this.ensureConnected();
+    const result = await this.request("memory.search", {
+      query: params.query,
+      ...(typeof params.maxResults === "number" ? { maxResults: params.maxResults } : {}),
+      ...(typeof params.minScore === "number" ? { minScore: params.minScore } : {})
+    });
+    const search = result.response.payload.search;
+    if (!isGatewayMemorySearchResult(search)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid memory.search payload");
+    }
+    return search;
   }
 
   async memoryAppendDaily(params: {
@@ -909,6 +949,49 @@ function isGatewayMemoryAppendResult(value: unknown): value is GatewayMemoryAppe
     typeof item.bytes === "number" &&
     typeof item.includeLongTerm === "boolean"
   );
+}
+
+function isGatewayMemorySearchResult(value: unknown): value is GatewayMemorySearchResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  if (!(item.mode === "hybrid" || item.mode === "keyword" || item.mode === "contains")) {
+    return false;
+  }
+  if (!item.indexStats || typeof item.indexStats !== "object" || Array.isArray(item.indexStats)) {
+    return false;
+  }
+  const stats = item.indexStats as Record<string, unknown>;
+  if (typeof stats.files !== "number" || typeof stats.chunks !== "number") {
+    return false;
+  }
+  if (stats.lastSyncAt !== undefined && typeof stats.lastSyncAt !== "string") {
+    return false;
+  }
+  if (item.provider !== undefined && item.provider !== "openai" && item.provider !== "gemini" && item.provider !== "voyage") {
+    return false;
+  }
+  if (item.model !== undefined && typeof item.model !== "string") {
+    return false;
+  }
+  if (!Array.isArray(item.results)) {
+    return false;
+  }
+  return item.results.every((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return false;
+    }
+    const hit = entry as Record<string, unknown>;
+    return (
+      typeof hit.path === "string" &&
+      typeof hit.startLine === "number" &&
+      typeof hit.endLine === "number" &&
+      typeof hit.snippet === "string" &&
+      typeof hit.score === "number" &&
+      hit.source === "memory"
+    );
+  });
 }
 
 function isGatewayMemoryArchiveResult(value: unknown): value is GatewayMemoryArchiveResult {

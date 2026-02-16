@@ -140,6 +140,51 @@ test("tool executor supports memory.get/memory.appendDaily", async () => {
   }
 });
 
+test("tool executor supports memory.search without embedding keys", async () => {
+  const root = mkdtempSync(join(tmpdir(), "openfoal-tool-memory-search-"));
+  const executor = createLocalToolExecutor({
+    workspaceRoot: root
+  });
+
+  try {
+    const append = await executor.execute(
+      {
+        name: "memory.appendDaily",
+        args: {
+          date: "2026-02-13",
+          content: "project alpha decision log",
+          includeLongTerm: true
+        }
+      },
+      TOOL_CTX
+    );
+    assert.equal(append.ok, true);
+
+    const search = await executor.execute(
+      {
+        name: "memory.search",
+        args: {
+          query: "alpha decision",
+          maxResults: 5
+        }
+      },
+      TOOL_CTX
+    );
+    assert.equal(search.ok, true);
+    if (search.ok) {
+      const payload = JSON.parse(search.output ?? "{}");
+      assert.equal(Array.isArray(payload.results), true);
+      assert.equal(payload.mode === "keyword" || payload.mode === "contains" || payload.mode === "hybrid", true);
+      assert.equal((payload.results?.length ?? 0) > 0, true);
+      assert.equal(typeof payload.results?.[0]?.path, "string");
+      assert.equal(typeof payload.results?.[0]?.startLine, "number");
+      assert.equal(typeof payload.results?.[0]?.score, "number");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("tool executor memory.get rejects non-whitelisted path", async () => {
   const root = mkdtempSync(join(tmpdir(), "openfoal-tool-memory-safe-"));
   const executor = createLocalToolExecutor({

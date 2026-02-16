@@ -931,6 +931,21 @@ test("memory.get and memory.appendDaily are available via gateway route", async 
     const text = getDaily.response.payload.memory?.text ?? "";
     assert.match(String(text), /memory api smoke test/);
   }
+
+  const search = await router.handle(
+    req("r_memory_search", "memory.search", {
+      query: "smoke test",
+      maxResults: 5
+    }),
+    state
+  );
+  assert.equal(search.response.ok, true);
+  if (search.response.ok) {
+    const results = search.response.payload.search?.results;
+    assert.equal(Array.isArray(results), true);
+    assert.equal((results?.length ?? 0) > 0, true);
+    assert.equal(typeof results?.[0]?.path, "string");
+  }
 });
 
 test("memory.archive moves daily content and clears daily file", async () => {

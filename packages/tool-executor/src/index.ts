@@ -8,6 +8,7 @@ import { dirname, resolve, sep } from "node:path";
 import { request as httpRequest } from "node:http";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { request as httpsRequest } from "node:https";
+import { executeMemorySearch } from "./memory-search.js";
 
 declare const process: any;
 declare const Buffer: any;
@@ -78,6 +79,8 @@ export function createLocalToolExecutor(options: LocalToolExecutorOptions = {}):
           return await executeHttpRequest(call.args, defaultTimeoutMs, hooks);
         case "memory.get":
           return executeMemoryGet(call.args, workspaceRoot);
+        case "memory.search":
+          return executeMemorySearch(call.args, workspaceRoot);
         case "memory.appendDaily":
           return executeMemoryAppendDaily(call.args, workspaceRoot);
         case "math.add":

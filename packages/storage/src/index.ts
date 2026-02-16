@@ -883,7 +883,8 @@ function defaultPolicy(): PolicyRecord {
       echo: "allow",
       "file.read": "allow",
       "file.list": "allow",
-      "memory.get": "allow"
+      "memory.get": "allow",
+      "memory.search": "allow"
     },
     version: 1,
     updatedAt: nowIso()

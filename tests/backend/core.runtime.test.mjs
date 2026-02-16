@@ -57,6 +57,24 @@ test("core runtime executes tool loop directives", async () => {
   assert.match(completed.output, /5/);
 });
 
+test("core runtime exposes memory.search tool", async () => {
+  const core = createRuntimeCoreService();
+  const events = [];
+
+  for await (const event of core.run({
+    sessionId: "s_default",
+    input: "[[tool:memory.search {\"query\":\"memory\"}]]",
+    runtimeMode: "local"
+  })) {
+    events.push(event);
+  }
+
+  const toolCall = events.find((event) => event.type === "tool_call");
+  assert.equal(toolCall?.toolName, "memory.search");
+  const toolResult = events.find((event) => event.type === "tool_result");
+  assert.equal(typeof toolResult?.output, "string");
+});
+
 test("core runtime streams tool result deltas when tool updates", async () => {
   const core = createRuntimeCoreService({
     toolExecutor: {
