@@ -8,6 +8,8 @@ import {
   type PiCoreOptions
 } from "./shared.js";
 
+const CONTEXT_DIR = ".openfoal/context";
+
 export function buildSystemPromptWithWorkspace(options: PiCoreOptions): string {
   const basePrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const workspaceRoot = resolveWorkspaceRoot(options.workspaceRoot);
@@ -51,9 +53,10 @@ export function buildSystemPromptWithWorkspace(options: PiCoreOptions): string {
 }
 
 function ensureWorkspaceBootstrapFiles(workspaceRoot: string): void {
-  mkdirSync(workspaceRoot, { recursive: true });
+  const contextRoot = join(workspaceRoot, CONTEXT_DIR);
+  mkdirSync(contextRoot, { recursive: true });
   for (const fileName of DEFAULT_BOOTSTRAP_FILES) {
-    const filePath = join(workspaceRoot, fileName);
+    const filePath = join(contextRoot, fileName);
     if (existsSync(filePath)) {
       continue;
     }
@@ -70,8 +73,14 @@ function loadWorkspaceBootstrapFiles(
 ): Array<{ name: string; content: string }> {
   const items: Array<{ name: string; content: string }> = [];
   for (const fileName of DEFAULT_BOOTSTRAP_FILES) {
-    const filePath = join(workspaceRoot, fileName);
-    if (!existsSync(filePath)) {
+    const scopedFilePath = join(workspaceRoot, CONTEXT_DIR, fileName);
+    const legacyFilePath = join(workspaceRoot, fileName);
+    const filePath = existsSync(scopedFilePath)
+      ? scopedFilePath
+      : existsSync(legacyFilePath)
+        ? legacyFilePath
+        : undefined;
+    if (!filePath) {
       continue;
     }
     try {

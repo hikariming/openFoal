@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 declare const process: any;
 
@@ -566,24 +566,25 @@ function querySingleNumber(dbPath: string, sql: string): number {
 }
 
 function listMemoryFiles(workspaceRoot: string): IndexedFile[] {
-  const files: IndexedFile[] = [];
-  const globalPath = resolve(workspaceRoot, "MEMORY.md");
-  if (existsSync(globalPath) && statSync(globalPath).isFile()) {
-    const text = readFileSync(globalPath, "utf8");
-    files.push({
-      relPath: "MEMORY.md",
-      text,
-      hash: sha256(text)
-    });
-  }
+  const selected = new Map<string, { file: IndexedFile; priority: number }>();
 
-  collectMarkdownFiles(files, workspaceRoot, "memory");
-  collectMarkdownFiles(files, workspaceRoot, "daily");
+  addMemoryFileCandidate(selected, workspaceRoot, ".openfoal/memory/MEMORY.md", 3);
+  addMemoryFileCandidate(selected, workspaceRoot, "MEMORY.md", 2);
+  collectMarkdownFiles(selected, workspaceRoot, ".openfoal/memory/daily", 3);
+  collectMarkdownFiles(selected, workspaceRoot, "memory", 2);
+  collectMarkdownFiles(selected, workspaceRoot, "daily", 1);
 
-  return files.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  return Array.from(selected.values())
+    .map((entry) => entry.file)
+    .sort((a, b) => a.relPath.localeCompare(b.relPath));
 }
 
-function collectMarkdownFiles(out: IndexedFile[], workspaceRoot: string, dirName: "memory" | "daily"): void {
+function collectMarkdownFiles(
+  out: Map<string, { file: IndexedFile; priority: number }>,
+  workspaceRoot: string,
+  dirName: string,
+  priority: number
+): void {
   const dir = resolve(workspaceRoot, dirName);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) {
     return;
@@ -596,15 +597,52 @@ function collectMarkdownFiles(out: IndexedFile[], workspaceRoot: string, dirName
     if (!/^[A-Za-z0-9._-]+\.md$/.test(entry.name)) {
       continue;
     }
-    const relPath = `${dirName}/${entry.name}`;
-    const absPath = join(dir, entry.name);
-    const text = readFileSync(absPath, "utf8");
-    out.push({
-      relPath,
+    addMemoryFileCandidate(out, workspaceRoot, `${dirName}/${entry.name}`, priority);
+  }
+}
+
+function addMemoryFileCandidate(
+  out: Map<string, { file: IndexedFile; priority: number }>,
+  workspaceRoot: string,
+  relPath: string,
+  priority: number
+): void {
+  const canonicalPath = canonicalizeMemoryPath(relPath);
+  if (!canonicalPath) {
+    return;
+  }
+  const absPath = resolve(workspaceRoot, relPath);
+  if (!existsSync(absPath) || !statSync(absPath).isFile()) {
+    return;
+  }
+  const existing = out.get(canonicalPath);
+  if (existing && existing.priority > priority) {
+    return;
+  }
+  const text = readFileSync(absPath, "utf8");
+  out.set(canonicalPath, {
+    file: {
+      relPath: canonicalPath,
       text,
       hash: sha256(text)
-    });
+    },
+    priority
+  });
+}
+
+function canonicalizeMemoryPath(relPath: string): string | undefined {
+  if (relPath === ".openfoal/memory/MEMORY.md" || relPath === "MEMORY.md") {
+    return ".openfoal/memory/MEMORY.md";
   }
+  const dailyNew = /^\.openfoal\/memory\/daily\/([A-Za-z0-9._/-]+\.md)$/.exec(relPath);
+  if (dailyNew?.[1]) {
+    return `.openfoal/memory/daily/${dailyNew[1]}`;
+  }
+  const dailyLegacy = /^(?:memory|daily)\/([A-Za-z0-9._/-]+\.md)$/.exec(relPath);
+  if (dailyLegacy?.[1]) {
+    return `.openfoal/memory/daily/${dailyLegacy[1]}`;
+  }
+  return undefined;
 }
 
 function buildChunks(relPath: string, text: string): ChunkRecord[] {

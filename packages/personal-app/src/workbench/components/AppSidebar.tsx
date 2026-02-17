@@ -293,9 +293,9 @@ export function AppSidebar(props: AppSidebarProps = {}) {
 
   const buildMemoryPath = (): string => {
     if (memoryTarget === "daily") {
-      return `memory/${memoryDate || new Date().toISOString().slice(0, 10)}.md`;
+      return `.openfoal/memory/daily/${memoryDate || new Date().toISOString().slice(0, 10)}.md`;
     }
-    return "MEMORY.md";
+    return ".openfoal/memory/MEMORY.md";
   };
 
   const refreshMemory = async (): Promise<void> => {
@@ -360,10 +360,13 @@ export function AppSidebar(props: AppSidebarProps = {}) {
         from: hit.startLine,
         lines
       });
-      if (hit.path === "MEMORY.md") {
+      if (hit.path === ".openfoal/memory/MEMORY.md" || hit.path === "MEMORY.md") {
         setMemoryTarget("global");
       } else {
-        const matched = /^memory\/(.+)\.md$/.exec(hit.path);
+        const matched =
+          /^\.openfoal\/memory\/daily\/(.+)\.md$/.exec(hit.path) ??
+          /^memory\/(.+)\.md$/.exec(hit.path) ??
+          /^daily\/(.+)\.md$/.exec(hit.path);
         setMemoryTarget("daily");
         if (matched?.[1]) {
           setMemoryDate(matched[1]);
@@ -996,7 +999,7 @@ export function AppSidebar(props: AppSidebarProps = {}) {
                       theme={memoryTarget === "global" ? "solid" : "light"}
                       onClick={() => setMemoryTarget("global")}
                     >
-                      MEMORY.md
+                      .openfoal/memory/MEMORY.md
                     </Button>
                     <Button
                       size="small"

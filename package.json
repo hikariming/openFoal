@@ -17,6 +17,7 @@
     "test:p2:e2e": "node scripts/p2-e2e-test.mjs",
     "test:p2:e2e:docker": "node scripts/p2-e2e-docker-smoke.mjs",
     "smoke:enterprise:full": "node scripts/smoke-enterprise-full.mjs",
+    "migrate:layout": "node scripts/migrate-openfoal-layout.mjs",
     "migrate:enterprise:pg": "node scripts/migrate-enterprise-sqlite-to-pg.mjs",
     "migrate:enterprise:minio": "node scripts/migrate-enterprise-storage-to-minio.mjs",
     "up:personal": "OPENFOAL_AUTH_MODE=none OPENFOAL_ENTERPRISE_REQUIRE_AUTH=false OPENFOAL_GATEWAY_STORAGE_BACKEND=sqlite OPENFOAL_GATEWAY_HOST_PORT=8787 docker compose --profile personal up -d --build",

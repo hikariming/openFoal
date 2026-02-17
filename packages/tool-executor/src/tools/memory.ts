@@ -3,7 +3,12 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { dirname } from "node:path";
 import { executeMemorySearch } from "../memory-search.js";
-import { resolveDailyMemoryPath, resolveSafePath } from "../scope.js";
+import {
+  resolveDailyMemoryPath,
+  resolveLegacyLongTermMemoryPath,
+  resolveLongTermMemoryPath,
+  resolveSafePath
+} from "../scope.js";
 import type { ToolResult } from "../types.js";
 import { fail, nowIso, readErrorCode, toErrorMessage, toPositiveInt } from "../utils.js";
 
@@ -14,50 +19,53 @@ export function executeMemorySearchTool(args: Record<string, unknown>, workspace
 }
 
 export function executeMemoryGet(args: Record<string, unknown>, workspaceRoot: string): ToolResult {
-  const path = resolveMemoryPathArg(args.path);
-  if (!path) {
-    return fail("memory.get 仅允许 MEMORY.md 或 memory/*.md 或 daily/*.md");
-  }
-
-  const safePath = resolveSafePath(workspaceRoot, path);
-  if (!safePath.ok) {
-    return fail(safePath.message);
+  const resolvedPath = resolveMemoryPathArg(args.path);
+  if (!resolvedPath) {
+    return fail("memory.get 仅允许 .openfoal/memory/MEMORY.md 或 .openfoal/memory/daily/*.md（兼容 MEMORY.md、memory/*.md、daily/*.md）");
   }
 
   const from = toPositiveInt(args.from) ?? 1;
   const lines = toPositiveInt(args.lines);
 
-  try {
-    const text = readFileSync(safePath.value, "utf8");
-    const parts = text.split(/\r?\n/);
-    const start = Math.max(0, from - 1);
-    const end = lines ? Math.min(parts.length, start + lines) : parts.length;
-    const sliced = parts.slice(start, end).join("\n");
-    return {
-      ok: true,
-      output: JSON.stringify({
-        path,
-        from,
-        lines: lines ?? null,
-        totalLines: parts.length,
-        text: sliced
-      })
-    };
-  } catch (error) {
-    if (readErrorCode(error) === "ENOENT") {
+  for (const candidatePath of resolvedPath.candidates) {
+    const safePath = resolveSafePath(workspaceRoot, candidatePath);
+    if (!safePath.ok) {
+      return fail(safePath.message);
+    }
+    try {
+      const text = readFileSync(safePath.value, "utf8");
+      const parts = text.split(/\r?\n/);
+      const start = Math.max(0, from - 1);
+      const end = lines ? Math.min(parts.length, start + lines) : parts.length;
+      const sliced = parts.slice(start, end).join("\n");
       return {
         ok: true,
         output: JSON.stringify({
-          path,
+          path: resolvedPath.canonicalPath,
           from,
           lines: lines ?? null,
-          totalLines: 0,
-          text: ""
+          totalLines: parts.length,
+          text: sliced
         })
       };
+    } catch (error) {
+      if (readErrorCode(error) === "ENOENT") {
+        continue;
+      }
+      return fail(`memory.get 失败: ${toErrorMessage(error)}`);
     }
-    return fail(`memory.get 失败: ${toErrorMessage(error)}`);
   }
+
+  return {
+    ok: true,
+    output: JSON.stringify({
+      path: resolvedPath.canonicalPath,
+      from,
+      lines: lines ?? null,
+      totalLines: 0,
+      text: ""
+    })
+  };
 }
 
 export function executeMemoryAppendDaily(args: Record<string, unknown>, workspaceRoot: string): ToolResult {
@@ -83,7 +91,7 @@ export function executeMemoryAppendDaily(args: Record<string, unknown>, workspac
   }
 
   const includeLongTerm = args.includeLongTerm === true;
-  const safeLongTermPath = includeLongTerm ? resolveSafePath(workspaceRoot, "MEMORY.md") : null;
+  const safeLongTermPath = includeLongTerm ? resolveSafePath(workspaceRoot, resolveLongTermMemoryPath()) : null;
   if (includeLongTerm && safeLongTermPath && !safeLongTermPath.ok) {
     return fail(safeLongTermPath.message);
   }
@@ -111,16 +119,34 @@ export function executeMemoryAppendDaily(args: Record<string, unknown>, workspac
   }
 }
 
-function resolveMemoryPathArg(input: unknown): string | undefined {
-  const path = typeof input === "string" && input.trim().length > 0 ? input.trim() : "MEMORY.md";
-  if (path === "MEMORY.md") {
-    return path;
+function resolveMemoryPathArg(input: unknown): { canonicalPath: string; candidates: string[] } | undefined {
+  const rawPath = typeof input === "string" && input.trim().length > 0 ? input.trim() : resolveLongTermMemoryPath();
+  if (rawPath === resolveLongTermMemoryPath() || rawPath === resolveLegacyLongTermMemoryPath()) {
+    return {
+      canonicalPath: resolveLongTermMemoryPath(),
+      candidates: [resolveLongTermMemoryPath(), resolveLegacyLongTermMemoryPath()]
+    };
   }
-  if (/^memory\/[A-Za-z0-9._/-]+\.md$/.test(path)) {
-    return path;
+  if (/^\.openfoal\/memory\/daily\/[A-Za-z0-9._/-]+\.md$/.test(rawPath)) {
+    const suffix = rawPath.slice(".openfoal/memory/daily/".length);
+    return {
+      canonicalPath: rawPath,
+      candidates: [rawPath, `daily/${suffix}`, `memory/${suffix}`]
+    };
   }
-  if (/^daily\/[A-Za-z0-9._/-]+\.md$/.test(path)) {
-    return path;
+  if (/^memory\/[A-Za-z0-9._/-]+\.md$/.test(rawPath)) {
+    const suffix = rawPath.slice("memory/".length);
+    return {
+      canonicalPath: `.openfoal/memory/daily/${suffix}`,
+      candidates: [`.openfoal/memory/daily/${suffix}`, rawPath, `daily/${suffix}`]
+    };
+  }
+  if (/^daily\/[A-Za-z0-9._/-]+\.md$/.test(rawPath)) {
+    const suffix = rawPath.slice("daily/".length);
+    return {
+      canonicalPath: `.openfoal/memory/daily/${suffix}`,
+      candidates: [`.openfoal/memory/daily/${suffix}`, rawPath, `memory/${suffix}`]
+    };
   }
   return undefined;
 }

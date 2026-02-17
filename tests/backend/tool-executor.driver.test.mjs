@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -110,7 +110,7 @@ test("tool executor supports memory.get/memory.appendDaily", async () => {
       {
         name: "memory.get",
         args: {
-          path: "memory/2026-02-13.md"
+          path: ".openfoal/memory/daily/2026-02-13.md"
         }
       },
       TOOL_CTX
@@ -125,7 +125,7 @@ test("tool executor supports memory.get/memory.appendDaily", async () => {
       {
         name: "memory.get",
         args: {
-          path: "MEMORY.md"
+          path: ".openfoal/memory/MEMORY.md"
         }
       },
       TOOL_CTX
@@ -134,6 +134,35 @@ test("tool executor supports memory.get/memory.appendDaily", async () => {
     if (getLongTerm.ok) {
       const payload = JSON.parse(getLongTerm.output ?? "{}");
       assert.match(payload.text ?? "", /remember this item/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tool executor memory.get falls back to legacy memory paths", async () => {
+  const root = mkdtempSync(join(tmpdir(), "openfoal-tool-memory-legacy-"));
+  const executor = createLocalToolExecutor({
+    workspaceRoot: root
+  });
+  try {
+    mkdirSync(join(root, "memory"), { recursive: true });
+    writeFileSync(join(root, "memory", "2026-02-20.md"), "- legacy memory entry\n", "utf8");
+
+    const readResult = await executor.execute(
+      {
+        name: "memory.get",
+        args: {
+          path: ".openfoal/memory/daily/2026-02-20.md"
+        }
+      },
+      TOOL_CTX
+    );
+    assert.equal(readResult.ok, true);
+    if (readResult.ok) {
+      const payload = JSON.parse(readResult.output ?? "{}");
+      assert.equal(payload.path, ".openfoal/memory/daily/2026-02-20.md");
+      assert.match(String(payload.text ?? ""), /legacy memory entry/);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

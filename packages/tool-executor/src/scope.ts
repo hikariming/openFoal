@@ -72,11 +72,24 @@ function sanitizeScopeSegment(value: string | undefined): string | undefined {
 }
 
 export function resolveDailyMemoryPath(args: Record<string, unknown>, date: string): string {
+  void args;
+  return `.openfoal/memory/daily/${date}.md`;
+}
+
+export function resolveLegacyDailyMemoryPath(args: Record<string, unknown>, date: string): string {
   const namespace = readNamespace(args.namespace);
   if (namespace) {
     return `daily/${date}.md`;
   }
   return `memory/${date}.md`;
+}
+
+export function resolveLongTermMemoryPath(): string {
+  return ".openfoal/memory/MEMORY.md";
+}
+
+export function resolveLegacyLongTermMemoryPath(): string {
+  return "MEMORY.md";
 }
 
 export function resolveSafePath(

@@ -744,11 +744,11 @@ export class GatewayClient {
 
   async getPolicy(params: { tenantId?: string; workspaceId?: string; scopeKey?: string } = {}): Promise<GatewayPolicy> {
     await this.ensureConnected();
-    const result = await this.request("policy.get", {
+    const result = await this.request("policy.get", this.withScope({
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
       ...(params.scopeKey ? { scopeKey: params.scopeKey } : {})
-    });
+    }));
     const policy = result.response.payload.policy;
     if (!isGatewayPolicy(policy)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid policy.get payload");
@@ -763,13 +763,13 @@ export class GatewayClient {
     scopeKey?: string;
   }): Promise<GatewayPolicy> {
     await this.ensureConnected();
-    const result = await this.request("policy.update", {
+    const result = await this.request("policy.update", this.withScope({
       idempotencyKey: createIdempotencyKey("policy_update"),
       patch: input.patch,
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
       ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
-    });
+    }));
     const policy = result.response.payload.policy;
     if (!isGatewayPolicy(policy)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid policy.update payload");
@@ -779,7 +779,7 @@ export class GatewayClient {
 
   async queryAudit(params: GatewayAuditQueryParams = {}): Promise<GatewayAuditQueryResult> {
     await this.ensureConnected();
-    const result = await this.request("audit.query", {
+    const result = await this.request("audit.query", this.withScope({
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
       ...(params.action ? { action: params.action } : {}),
@@ -787,7 +787,7 @@ export class GatewayClient {
       ...(params.to ? { to: params.to } : {}),
       ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       ...(typeof params.cursor === "number" ? { cursor: params.cursor } : {})
-    });
+    }));
     return {
       items: readArray(result.response.payload.items).filter(isGatewayAuditItem),
       ...(asPositiveInt(result.response.payload.nextCursor) ? { nextCursor: asPositiveInt(result.response.payload.nextCursor) } : {})
@@ -796,11 +796,11 @@ export class GatewayClient {
 
   async getMetricsSummary(params: { tenantId?: string; workspaceId?: string; agentId?: string } = {}): Promise<GatewayMetricsSummary> {
     await this.ensureConnected();
-    const result = await this.request("metrics.summary", {
+    const result = await this.request("metrics.summary", this.withScope({
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
       ...(params.agentId ? { agentId: params.agentId } : {})
-    });
+    }));
     const metrics = result.response.payload.metrics;
     if (!isGatewayMetricsSummary(metrics)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid metrics.summary payload");
@@ -810,10 +810,10 @@ export class GatewayClient {
 
   async listUsers(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewayTenantUser[]> {
     await this.ensureConnected();
-    const result = await this.request("users.list", {
+    const result = await this.request("users.list", this.withScope({
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
-    });
+    }));
     return readArray(result.response.payload.items).filter(isGatewayTenantUser);
   }
 
@@ -827,7 +827,7 @@ export class GatewayClient {
     memberships: GatewayUserMembership[];
   }): Promise<GatewayTenantUser | null> {
     await this.ensureConnected();
-    const result = await this.request("users.create", {
+    const result = await this.request("users.create", this.withScope({
       idempotencyKey: createIdempotencyKey("users_create"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       username: input.username,
@@ -836,28 +836,28 @@ export class GatewayClient {
       ...(input.email ? { email: input.email } : {}),
       ...(input.status ? { status: input.status } : {}),
       memberships: input.memberships.map((item) => ({ workspaceId: item.workspaceId, role: item.role }))
-    });
+    }));
     return isGatewayTenantUser(result.response.payload.user) ? result.response.payload.user : null;
   }
 
   async updateUserStatus(input: { tenantId?: string; userId: string; status: UserStatus }): Promise<void> {
     await this.ensureConnected();
-    await this.request("users.updateStatus", {
+    await this.request("users.updateStatus", this.withScope({
       idempotencyKey: createIdempotencyKey("users_update_status"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       userId: input.userId,
       status: input.status
-    });
+    }));
   }
 
   async resetUserPassword(input: { tenantId?: string; userId: string; newPassword: string }): Promise<void> {
     await this.ensureConnected();
-    await this.request("users.resetPassword", {
+    await this.request("users.resetPassword", this.withScope({
       idempotencyKey: createIdempotencyKey("users_reset_password"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       userId: input.userId,
       newPassword: input.newPassword
-    });
+    }));
   }
 
   async updateUserMemberships(input: {
@@ -866,12 +866,12 @@ export class GatewayClient {
     memberships: GatewayUserMembership[];
   }): Promise<GatewayUserMembership[]> {
     await this.ensureConnected();
-    const result = await this.request("users.updateMemberships", {
+    const result = await this.request("users.updateMemberships", this.withScope({
       idempotencyKey: createIdempotencyKey("users_update_memberships"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       userId: input.userId,
       memberships: input.memberships.map((item) => ({ workspaceId: item.workspaceId, role: item.role }))
-    });
+    }));
     return readArray(result.response.payload.memberships).filter(isGatewayUserMembership);
   }
 
@@ -908,10 +908,10 @@ export class GatewayClient {
 
   async listAgents(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewayAgent[]> {
     await this.ensureConnected();
-    const result = await this.request("agents.list", {
+    const result = await this.request("agents.list", this.withScope({
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
-    });
+    }));
     return readArray(result.response.payload.items).filter(isGatewayAgent);
   }
 
@@ -927,7 +927,7 @@ export class GatewayClient {
     config?: Record<string, unknown>;
   }): Promise<GatewayAgent | null> {
     await this.ensureConnected();
-    const result = await this.request("agents.upsert", {
+    const result = await this.request("agents.upsert", this.withScope({
       idempotencyKey: createIdempotencyKey("agents_upsert"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
@@ -938,16 +938,16 @@ export class GatewayClient {
       ...(input.policyScopeKey ? { policyScopeKey: input.policyScopeKey } : {}),
       ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : {}),
       ...(input.config ? { config: input.config } : {})
-    });
+    }));
     return isGatewayAgent(result.response.payload.agent) ? result.response.payload.agent : null;
   }
 
   async listExecutionTargets(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewayExecutionTarget[]> {
     await this.ensureConnected();
-    const result = await this.request("executionTargets.list", {
+    const result = await this.request("executionTargets.list", this.withScope({
       ...(params.tenantId ? { tenantId: params.tenantId } : {}),
       ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
-    });
+    }));
     return readArray(result.response.payload.items).filter(isGatewayExecutionTarget);
   }
 
@@ -963,7 +963,7 @@ export class GatewayClient {
     config?: Record<string, unknown>;
   }): Promise<GatewayExecutionTarget | null> {
     await this.ensureConnected();
-    const result = await this.request("executionTargets.upsert", {
+    const result = await this.request("executionTargets.upsert", this.withScope({
       idempotencyKey: createIdempotencyKey("targets_upsert"),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
@@ -974,16 +974,16 @@ export class GatewayClient {
       ...(typeof input.isDefault === "boolean" ? { isDefault: input.isDefault } : {}),
       ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : {}),
       ...(input.config ? { config: input.config } : {})
-    });
+    }));
     return isGatewayExecutionTarget(result.response.payload.target) ? result.response.payload.target : null;
   }
 
   async getBudget(params: { scopeKey?: string; date?: string } = {}): Promise<GatewayBudgetResult> {
     await this.ensureConnected();
-    const result = await this.request("budget.get", {
+    const result = await this.request("budget.get", this.withScope({
       ...(params.scopeKey ? { scopeKey: params.scopeKey } : {}),
       ...(params.date ? { date: params.date } : {})
-    });
+    }));
     const policy = result.response.payload.policy;
     const usage = result.response.payload.usage;
     if (!isGatewayBudgetPolicy(policy) || !isGatewayBudgetUsage(usage)) {
@@ -1006,13 +1006,13 @@ export class GatewayClient {
       ...(input.costMonthlyUsdLimit !== undefined ? { costMonthlyUsdLimit: input.costMonthlyUsdLimit } : {}),
       ...(input.hardLimit !== undefined ? { hardLimit: input.hardLimit } : {})
     };
-    const result = await this.request("budget.update", {
+    const result = await this.request("budget.update", this.withScope({
       idempotencyKey: createIdempotencyKey("budget_update"),
       ...(input.scopeKey ? { scopeKey: input.scopeKey } : {}),
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
       patch
-    });
+    }));
     const policy = result.response.payload.policy;
     const usage = result.response.payload.usage;
     if (!isGatewayBudgetPolicy(policy) || !isGatewayBudgetUsage(usage)) {
@@ -1029,13 +1029,13 @@ export class GatewayClient {
     userId?: string;
   }): Promise<GatewayContextResult> {
     await this.ensureConnected();
-    const result = await this.request("context.get", {
+    const result = await this.request("context.get", this.withScope({
       layer: input.layer,
       file: input.file,
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
       ...(input.userId ? { userId: input.userId } : {})
-    });
+    }));
     const context = result.response.payload.context;
     if (!isGatewayContextResult(context)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid context.get payload");
@@ -1052,7 +1052,7 @@ export class GatewayClient {
     userId?: string;
   }): Promise<GatewayContextResult> {
     await this.ensureConnected();
-    const result = await this.request("context.upsert", {
+    const result = await this.request("context.upsert", this.withScope({
       idempotencyKey: createIdempotencyKey("context_upsert"),
       layer: input.layer,
       file: input.file,
@@ -1060,7 +1060,7 @@ export class GatewayClient {
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
       ...(input.userId ? { userId: input.userId } : {})
-    });
+    }));
     const context = result.response.payload.context;
     if (!isRecord(context) || !isContextLayer(context.layer) || !isContextFile(context.file)) {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid context.upsert payload");

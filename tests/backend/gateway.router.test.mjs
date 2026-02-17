@@ -72,6 +72,126 @@ test("context.get returns default template when scoped file is missing", async (
   }
 });
 
+test("context.get falls back to legacy scoped root when new root is missing", async () => {
+  const reads = [];
+  const router = createGatewayRouter({
+    internalToolExecutor: {
+      async execute(call, ctx) {
+        if (call.name !== "file.read") {
+          return {
+            ok: false,
+            error: {
+              code: "TOOL_EXEC_FAILED",
+              message: "unsupported call"
+            }
+          };
+        }
+        reads.push(String(ctx.workspaceRoot ?? ""));
+        if (String(ctx.workspaceRoot ?? "").endsWith("/.openfoal/context")) {
+          return {
+            ok: false,
+            error: {
+              code: "TOOL_EXEC_FAILED",
+              message: "ENOENT: scoped context not found"
+            }
+          };
+        }
+        if (String(ctx.workspaceRoot ?? "").includes("/skills/tenant")) {
+          return {
+            ok: true,
+            output: "# TOOLS.md\n\nlegacy scoped context\n"
+          };
+        }
+        return {
+          ok: false,
+          error: {
+            code: "TOOL_EXEC_FAILED",
+            message: "ENOENT: unknown context root"
+          }
+        };
+      }
+    }
+  });
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+  state.principal = {
+    subject: "u_ctx_legacy",
+    userId: "u_ctx_legacy",
+    tenantId: "t_ctx_legacy",
+    workspaceIds: ["w_ctx_legacy"],
+    roles: ["tenant_admin"],
+    authSource: "local"
+  };
+
+  const result = await router.handle(
+    req("r_context_legacy_fallback", "context.get", {
+      layer: "tenant",
+      file: "TOOLS.md",
+      tenantId: "t_ctx_legacy",
+      workspaceId: "w_ctx_legacy"
+    }),
+    state
+  );
+
+  assert.equal(result.response.ok, true);
+  if (result.response.ok) {
+    const context = result.response.payload.context;
+    assert.equal(context.file, "TOOLS.md");
+    assert.match(String(context.text), /legacy scoped context/);
+  }
+  assert.equal(reads.some((item) => item.endsWith("/.openfoal/context")), true);
+  assert.equal(reads.some((item) => item.includes("/skills/tenant")), true);
+});
+
+test("context.upsert writes into .openfoal/context root", async () => {
+  let writeRoot = "";
+  const router = createGatewayRouter({
+    internalToolExecutor: {
+      async execute(call, ctx) {
+        if (call.name === "file.write") {
+          writeRoot = String(ctx.workspaceRoot ?? "");
+          return {
+            ok: true,
+            output: ""
+          };
+        }
+        return {
+          ok: false,
+          error: {
+            code: "TOOL_EXEC_FAILED",
+            message: "unsupported call"
+          }
+        };
+      }
+    }
+  });
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+  state.principal = {
+    subject: "u_ctx_write",
+    userId: "u_ctx_write",
+    tenantId: "t_ctx_write",
+    workspaceIds: ["w_ctx_write"],
+    roles: ["tenant_admin"],
+    authSource: "local"
+  };
+
+  const result = await router.handle(
+    req("r_context_upsert_scoped", "context.upsert", {
+      idempotencyKey: "idem_context_upsert_scoped_1",
+      layer: "tenant",
+      file: "TOOLS.md",
+      content: "# TOOLS.md\n\nnew scoped content",
+      tenantId: "t_ctx_write",
+      workspaceId: "w_ctx_write"
+    }),
+    state
+  );
+
+  assert.equal(result.response.ok, true);
+  assert.equal(writeRoot.endsWith("/.openfoal/context"), true);
+});
+
 test("sessions.create creates a session and sessions.list returns it", async () => {
   const router = createGatewayRouter();
   const state = createConnectionState();
@@ -103,6 +223,72 @@ test("sessions.create creates a session and sessions.list returns it", async () 
     const items = listed.response.payload.items;
     assert.equal(Array.isArray(items), true);
     assert.equal(items.some((item) => item.id === created.response.payload.session.id), true);
+  }
+});
+
+test("sessions.list recovers legacy default-scope sessions for principal and keeps history", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  state.principal = {
+    subject: "u_recover_scope",
+    tenantId: "t_enterprise_scope",
+    workspaceIds: ["w_enterprise_scope"],
+    roles: ["member"],
+    authSource: "local",
+    claims: {}
+  };
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const createdLegacy = await router.handle(
+    req("r_create_legacy_scope_session", "sessions.create", {
+      idempotencyKey: "idem_create_legacy_scope_session_1",
+      tenantId: "t_default",
+      workspaceId: "w_default",
+      title: "legacy scope session",
+      runtimeMode: "local"
+    }),
+    state
+  );
+  assert.equal(createdLegacy.response.ok, true);
+  const legacySessionId = createdLegacy.response.ok ? createdLegacy.response.payload.session?.id : undefined;
+  assert.equal(typeof legacySessionId, "string");
+
+  const legacyRun = await router.handle(
+    req("r_run_legacy_scope_session", "agent.run", {
+      idempotencyKey: "idem_run_legacy_scope_session_1",
+      sessionId: legacySessionId,
+      input: "legacy transcript survives",
+      runtimeMode: "local",
+      tenantId: "t_default",
+      workspaceId: "w_default"
+    }),
+    state
+  );
+  assert.equal(legacyRun.response.ok, true);
+
+  const listed = await router.handle(req("r_list_recovered_scope", "sessions.list", {}), state);
+  assert.equal(listed.response.ok, true);
+  if (listed.response.ok) {
+    const items = listed.response.payload.items;
+    assert.equal(Array.isArray(items), true);
+    const recovered = items.find((item) => item.id === legacySessionId);
+    assert.equal(Boolean(recovered), true);
+    assert.equal(recovered?.tenantId, "t_enterprise_scope");
+    assert.equal(recovered?.workspaceId, "w_enterprise_scope");
+  }
+
+  const history = await router.handle(
+    req("r_history_recovered_scope", "sessions.history", {
+      sessionId: legacySessionId,
+      limit: 200
+    }),
+    state
+  );
+  assert.equal(history.response.ok, true);
+  if (history.response.ok) {
+    const items = history.response.payload.items;
+    assert.equal(Array.isArray(items), true);
+    assert.equal(items.some((item) => item.event === "user.input"), true);
   }
 });
 
@@ -1068,10 +1254,13 @@ test("memory.get and memory.appendDaily are available via gateway route", async 
     state
   );
   assert.equal(append.response.ok, true);
+  if (append.response.ok) {
+    assert.equal(append.response.payload.result.path, ".openfoal/memory/daily/2026-02-13.md");
+  }
 
   const getDaily = await router.handle(
     req("r_memory_get", "memory.get", {
-      path: "memory/2026-02-13.md"
+      path: ".openfoal/memory/daily/2026-02-13.md"
     }),
     state
   );
@@ -1126,11 +1315,12 @@ test("memory.archive moves daily content and clears daily file", async () => {
   if (archive.response.ok) {
     assert.equal(archive.response.payload.result.date, "2026-02-14");
     assert.equal(archive.response.payload.result.clearDaily, true);
+    assert.equal(archive.response.payload.result.dailyPath, ".openfoal/memory/daily/2026-02-14.md");
   }
 
   const daily = await router.handle(
     req("r_memory_get_daily_cleared", "memory.get", {
-      path: "memory/2026-02-14.md"
+      path: ".openfoal/memory/daily/2026-02-14.md"
     }),
     state
   );
@@ -1141,7 +1331,7 @@ test("memory.archive moves daily content and clears daily file", async () => {
 
   const globalMemory = await router.handle(
     req("r_memory_get_global_archived", "memory.get", {
-      path: "MEMORY.md"
+      path: ".openfoal/memory/MEMORY.md"
     }),
     state
   );
@@ -1149,4 +1339,71 @@ test("memory.archive moves daily content and clears daily file", async () => {
   if (globalMemory.response.ok) {
     assert.match(String(globalMemory.response.payload.memory?.text ?? ""), /archive this memory/);
   }
+});
+
+test("memory.archive falls back to legacy daily path and returns new canonical path", async () => {
+  const writes = [];
+  const router = createGatewayRouter({
+    internalToolExecutor: {
+      async execute(call) {
+        if (call.name === "file.read") {
+          if (call.args.path === ".openfoal/memory/daily/2026-02-14.md") {
+            return {
+              ok: false,
+              error: {
+                code: "TOOL_EXEC_FAILED",
+                message: "ENOENT: new path missing"
+              }
+            };
+          }
+          if (call.args.path === "memory/2026-02-14.md") {
+            return {
+              ok: true,
+              output: "- legacy archived line\n"
+            };
+          }
+          return {
+            ok: false,
+            error: {
+              code: "TOOL_EXEC_FAILED",
+              message: "ENOENT: unexpected path"
+            }
+          };
+        }
+        if (call.name === "file.write") {
+          writes.push(String(call.args.path ?? ""));
+          return {
+            ok: true,
+            output: ""
+          };
+        }
+        return {
+          ok: false,
+          error: {
+            code: "TOOL_EXEC_FAILED",
+            message: "unsupported call"
+          }
+        };
+      }
+    }
+  });
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+
+  const archive = await router.handle(
+    req("r_memory_archive_legacy_fallback", "memory.archive", {
+      idempotencyKey: "idem_memory_archive_legacy_fallback_1",
+      date: "2026-02-14",
+      includeLongTerm: true,
+      clearDaily: true
+    }),
+    state
+  );
+  assert.equal(archive.response.ok, true);
+  if (archive.response.ok) {
+    assert.equal(archive.response.payload.result.dailyPath, ".openfoal/memory/daily/2026-02-14.md");
+  }
+  assert.equal(writes.includes(".openfoal/memory/MEMORY.md"), true);
+  assert.equal(writes.includes(".openfoal/memory/daily/2026-02-14.md"), true);
+  assert.equal(writes.includes("memory/2026-02-14.md"), true);
 });

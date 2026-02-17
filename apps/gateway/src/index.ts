@@ -578,7 +578,20 @@ async function route(
 
     case "sessions.list": {
       const scope = resolveSessionScope(req.params, state);
-      const items = await sessionRepo.list(scope);
+      let items = await sessionRepo.list(scope);
+      if (items.length === 0) {
+        const recovered = await recoverLegacyDefaultSessionsForPrincipal({
+          params: req.params,
+          state,
+          targetScope: scope,
+          sessionRepo,
+          transcriptRepo,
+          now
+        });
+        if (recovered > 0) {
+          items = await sessionRepo.list(scope);
+        }
+      }
       return {
         response: makeSuccessRes(req.id, { items }),
         events: []
@@ -591,7 +604,21 @@ async function route(
         return invalidParams(req.id, "sessions.get 需要 sessionId");
       }
       const scope = resolveSessionScope(req.params, state);
-      const session = await sessionRepo.get(sessionId, scope);
+      let session = await sessionRepo.get(sessionId, scope);
+      if (!session) {
+        const recovered = await recoverLegacyDefaultSessionsForPrincipal({
+          params: req.params,
+          state,
+          targetScope: scope,
+          sessionRepo,
+          transcriptRepo,
+          now,
+          sessionId
+        });
+        if (recovered > 0) {
+          session = await sessionRepo.get(sessionId, scope);
+        }
+      }
       return {
         response: makeSuccessRes(req.id, { session: session ?? null }),
         events: []
@@ -605,7 +632,21 @@ async function route(
       }
 
       const scope = resolveSessionScope(req.params, state);
-      const session = await sessionRepo.get(sessionId, scope);
+      let session = await sessionRepo.get(sessionId, scope);
+      if (!session) {
+        const recovered = await recoverLegacyDefaultSessionsForPrincipal({
+          params: req.params,
+          state,
+          targetScope: scope,
+          sessionRepo,
+          transcriptRepo,
+          now,
+          sessionId
+        });
+        if (recovered > 0) {
+          session = await sessionRepo.get(sessionId, scope);
+        }
+      }
       if (!session) {
         return {
           response: makeErrorRes(req.id, "INVALID_REQUEST", `未知会话: ${sessionId}`),
@@ -634,7 +675,7 @@ async function route(
     }
 
     case "agents.list": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const workspaceId = requireString(req.params, "workspaceId");
       const items = await agentRepo.list({
         tenantId,
@@ -647,8 +688,8 @@ async function route(
     }
 
     case "agents.upsert": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
-      const workspaceId = requireString(req.params, "workspaceId") ?? "w_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+      const workspaceId = requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
       const agentId = requireString(req.params, "agentId");
       if (!agentId) {
         return invalidParams(req.id, "agents.upsert 需要 agentId");
@@ -687,7 +728,7 @@ async function route(
     }
 
     case "users.list": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const workspaceId = requireString(req.params, "workspaceId");
       const items = await authStore.listTenantUsers(tenantId);
       const filtered = workspaceId
@@ -702,7 +743,7 @@ async function route(
     }
 
     case "users.create": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const username = requireString(req.params, "username");
       const password = requireString(req.params, "password");
       if (!username || !password) {
@@ -717,7 +758,7 @@ async function route(
       }
       const membershipsInput = readMembershipPatch(
         req.params,
-        requireString(req.params, "workspaceId") ?? "w_default",
+        requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default",
         normalizeMembershipRole(req.params.role)
       );
       const primary = membershipsInput[0];
@@ -772,7 +813,7 @@ async function route(
     }
 
     case "users.updateStatus": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const userId = requireString(req.params, "userId");
       const status = normalizeUserStatus(req.params.status);
       if (!userId || !status) {
@@ -812,7 +853,7 @@ async function route(
     }
 
     case "users.resetPassword": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const userId = requireString(req.params, "userId");
       const nextPassword = requireString(req.params, "newPassword");
       if (!userId || !nextPassword) {
@@ -851,7 +892,7 @@ async function route(
     }
 
     case "users.updateMemberships": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const userId = requireString(req.params, "userId");
       if (!userId) {
         return invalidParams(req.id, "users.updateMemberships 需要 userId");
@@ -859,7 +900,7 @@ async function route(
       if (!Array.isArray(req.params.memberships)) {
         return invalidParams(req.id, "users.updateMemberships 需要 memberships 数组");
       }
-      const membershipsInput = readMembershipPatch(req.params, "w_default", "member");
+      const membershipsInput = readMembershipPatch(req.params, state.principal?.workspaceIds[0] ?? "w_default", "member");
       const memberships = await authStore.replaceWorkspaceMemberships({
         tenantId,
         userId,
@@ -901,7 +942,7 @@ async function route(
     }
 
     case "secrets.upsertModelKey": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const providerRaw = requireString(req.params, "provider");
       const provider = providerRaw ? normalizeLlmProvider(providerRaw) : undefined;
       const apiKey = requireString(req.params, "apiKey");
@@ -960,7 +1001,7 @@ async function route(
     }
 
     case "executionTargets.list": {
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const workspaceId = requireString(req.params, "workspaceId");
       const items = await executionTargetRepo.list({
         tenantId,
@@ -977,7 +1018,7 @@ async function route(
       if (!targetId) {
         return invalidParams(req.id, "executionTargets.upsert 需要 targetId");
       }
-      const tenantId = requireString(req.params, "tenantId") ?? "t_default";
+      const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
       const workspaceId = requireString(req.params, "workspaceId");
       const kind = req.params.kind === "docker-runner" ? "docker-runner" : "local-host";
       const target = await executionTargetRepo.upsert({
@@ -1035,8 +1076,8 @@ async function route(
       const policy = await budgetRepo.update(patch, scopeKey);
       const usage = await budgetRepo.summary(scopeKey);
       await auditRepo.append({
-        tenantId: requireString(req.params, "tenantId") ?? "t_default",
-        workspaceId: requireString(req.params, "workspaceId") ?? "w_default",
+        tenantId: requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default",
+        workspaceId: requireString(req.params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default",
         action: "budget.update",
         actor: requireString(req.params, "actor") ?? "system",
         resourceType: "budget_policy",
@@ -1551,9 +1592,12 @@ async function route(
       const includeLongTerm = req.params.includeLongTerm !== false;
       const clearDaily = req.params.clearDaily !== false;
       const dailyPath = resolveDailyMemoryPath(memoryScope.args, date);
+      const legacyDailyPath = resolveLegacyDailyMemoryPath(memoryScope.args, date);
+      const longTermPath = resolveLongTermMemoryPath();
 
       let dailyText = "";
-      const readResult = await internalToolExecutor.execute(
+      let dailySourcePath = dailyPath;
+      let readResult = await internalToolExecutor.execute(
         {
           name: "file.read",
           args: {
@@ -1570,9 +1614,34 @@ async function route(
           ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
         }
       );
+      if (!readResult.ok && isFileNotFoundError(readResult.error?.message) && legacyDailyPath !== dailyPath) {
+        const legacyReadResult = await internalToolExecutor.execute(
+          {
+            name: "file.read",
+            args: {
+              ...memoryScope.args,
+              path: legacyDailyPath
+            }
+          },
+          {
+            runId: `memory_archive_read_legacy_${Date.now().toString(36)}`,
+            sessionId: "session_memory_api",
+            runtimeMode: "local",
+            ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+            ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+            ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
+          }
+        );
+        if (legacyReadResult.ok) {
+          readResult = legacyReadResult;
+          dailySourcePath = legacyDailyPath;
+        } else {
+          readResult = legacyReadResult;
+        }
+      }
       if (readResult.ok) {
         dailyText = readResult.output ?? "";
-      } else if (!String(readResult.error?.message ?? "").includes("ENOENT")) {
+      } else if (!isFileNotFoundError(readResult.error?.message)) {
         return {
           response: makeErrorRes(
             req.id,
@@ -1595,7 +1664,7 @@ async function route(
             name: "file.write",
             args: {
               ...memoryScope.args,
-              path: "MEMORY.md",
+              path: longTermPath,
               content: `${archivedContent}\n`,
               append: true
             }
@@ -1622,34 +1691,37 @@ async function route(
       }
 
       if (clearDaily) {
-        const clearResult = await internalToolExecutor.execute(
-          {
-            name: "file.write",
-            args: {
-              ...memoryScope.args,
-              path: dailyPath,
-              content: "",
-              append: false
+        const clearPaths = new Set([dailyPath, dailySourcePath]);
+        for (const clearPath of clearPaths) {
+          const clearResult = await internalToolExecutor.execute(
+            {
+              name: "file.write",
+              args: {
+                ...memoryScope.args,
+                path: clearPath,
+                content: "",
+                append: false
+              }
+            },
+            {
+              runId: `memory_archive_clear_${Date.now().toString(36)}`,
+              sessionId: "session_memory_api",
+              runtimeMode: "local",
+              ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
+              ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
+              ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
             }
-          },
-          {
-            runId: `memory_archive_clear_${Date.now().toString(36)}`,
-            sessionId: "session_memory_api",
-            runtimeMode: "local",
-            ...(memoryScope.ctx.tenantId ? { tenantId: memoryScope.ctx.tenantId } : {}),
-            ...(memoryScope.ctx.workspaceId ? { workspaceId: memoryScope.ctx.workspaceId } : {}),
-            ...(memoryScope.ctx.userId ? { userId: memoryScope.ctx.userId } : {})
+          );
+          if (!clearResult.ok) {
+            return {
+              response: makeErrorRes(
+                req.id,
+                clearResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
+                clearResult.error?.message ?? "memory.archive 清理失败"
+              ),
+              events: []
+            };
           }
-        );
-        if (!clearResult.ok) {
-          return {
-            response: makeErrorRes(
-              req.id,
-              clearResult.error?.code === "TOOL_EXEC_FAILED" ? "TOOL_EXEC_FAILED" : "INTERNAL_ERROR",
-              clearResult.error?.message ?? "memory.archive 清理失败"
-            ),
-            events: []
-          };
         }
       }
 
@@ -1676,7 +1748,7 @@ async function route(
           events: []
         };
       }
-      const readResult = await internalToolExecutor.execute(
+      let readResult = await internalToolExecutor.execute(
         {
           name: "file.read",
           args: {
@@ -1690,6 +1762,22 @@ async function route(
           workspaceRoot: contextRead.root
         }
       );
+      if (!readResult.ok && isFileNotFoundError(readResult.error?.message) && contextRead.legacyRoot) {
+        readResult = await internalToolExecutor.execute(
+          {
+            name: "file.read",
+            args: {
+              path: contextRead.fileName
+            }
+          },
+          {
+            runId: `context_get_legacy_${Date.now().toString(36)}`,
+            sessionId: "session_context_api",
+            runtimeMode: "local",
+            workspaceRoot: contextRead.legacyRoot
+          }
+        );
+      }
       if (!readResult.ok) {
         if (isFileNotFoundError(readResult.error?.message)) {
           return {
@@ -2386,6 +2474,121 @@ function resolveSessionScope(params: Record<string, unknown>, state: ConnectionS
   };
 }
 
+async function recoverLegacyDefaultSessionsForPrincipal(input: {
+  params: Record<string, unknown>;
+  state: ConnectionState;
+  targetScope: {
+    tenantId: string;
+    workspaceId: string;
+    ownerUserId?: string;
+  };
+  sessionRepo: SessionRepository;
+  transcriptRepo: TranscriptRepository;
+  now: () => Date;
+  sessionId?: string;
+}): Promise<number> {
+  if (!input.state.principal) {
+    return 0;
+  }
+  if (requireString(input.params, "tenantId") || requireString(input.params, "workspaceId") || requireString(input.params, "userId")) {
+    return 0;
+  }
+  if (input.targetScope.tenantId === "t_default" && input.targetScope.workspaceId === "w_default") {
+    return 0;
+  }
+
+  const principalUserId = resolvePrincipalUserId(input.state.principal);
+  const legacyScope = {
+    tenantId: "t_default",
+    workspaceId: "w_default",
+    ownerUserId: principalUserId
+  };
+  const legacySessions = input.sessionId
+    ? [await input.sessionRepo.get(input.sessionId, legacyScope)].filter((item): item is SessionRecord => Boolean(item))
+    : await input.sessionRepo.list(legacyScope);
+  if (legacySessions.length === 0) {
+    return 0;
+  }
+
+  let migrated = 0;
+  for (const session of legacySessions) {
+    const ownerUserId = input.targetScope.ownerUserId ?? session.ownerUserId ?? principalUserId;
+    await copyLegacyTranscriptIfNeeded({
+      sessionId: session.id,
+      from: legacyScope,
+      to: {
+        tenantId: input.targetScope.tenantId,
+        workspaceId: input.targetScope.workspaceId,
+        ownerUserId
+      },
+      transcriptRepo: input.transcriptRepo
+    });
+    await input.sessionRepo.upsert({
+      ...session,
+      tenantId: input.targetScope.tenantId,
+      workspaceId: input.targetScope.workspaceId,
+      ownerUserId,
+      sessionKey: buildSessionKey(input.targetScope.tenantId, input.targetScope.workspaceId, ownerUserId, session.id),
+      updatedAt: input.now().toISOString()
+    });
+    migrated += 1;
+  }
+  return migrated;
+}
+
+async function copyLegacyTranscriptIfNeeded(input: {
+  sessionId: string;
+  from: {
+    tenantId: string;
+    workspaceId: string;
+    ownerUserId?: string;
+  };
+  to: {
+    tenantId: string;
+    workspaceId: string;
+    ownerUserId: string;
+  };
+  transcriptRepo: TranscriptRepository;
+}): Promise<void> {
+  const existing = await input.transcriptRepo.list(input.sessionId, input.to, 1);
+  if (existing.length > 0) {
+    return;
+  }
+
+  let beforeId: number | undefined;
+  while (true) {
+    const batch = await input.transcriptRepo.list(input.sessionId, input.from, 500, beforeId);
+    if (batch.length === 0) {
+      return;
+    }
+
+    for (const item of batch) {
+      await input.transcriptRepo.append({
+        sessionId: item.sessionId,
+        tenantId: input.to.tenantId,
+        workspaceId: input.to.workspaceId,
+        ownerUserId: input.to.ownerUserId,
+        ...(item.runId ? { runId: item.runId } : {}),
+        event: item.event,
+        payload: item.payload,
+        createdAt: item.createdAt
+      });
+    }
+    if (batch.length < 500) {
+      return;
+    }
+    const nextBeforeId = batch[0]?.id;
+    if (!nextBeforeId) {
+      return;
+    }
+    beforeId = nextBeforeId;
+  }
+}
+
+function buildSessionKey(tenantId: string, workspaceId: string, ownerUserId: string, sessionId: string): string {
+  return `tenant:${tenantId}/workspace:${workspaceId}/owner:${ownerUserId}/thread:${sessionId}`;
+}
+
 function resolveSessionOwnerUserId(params: Record<string, unknown>, state: ConnectionState): string {
   const requested = requireString(params, "userId");
   if (!state.principal) {
@@ -2811,6 +3014,7 @@ function resolveContextAccess(
 ): {
   ok: true;
   root: string;
+  legacyRoot?: string;
   layer: "tenant" | "workspace" | "user";
   fileName: string;
 } | {
@@ -2825,9 +3029,11 @@ function resolveContextAccess(
     };
   }
   if (!state.principal) {
+    const legacyRoot = process.cwd();
     return {
       ok: true,
-      root: process.cwd(),
+      root: joinPath(legacyRoot, ".openfoal", "context"),
+      legacyRoot,
       layer: "user",
       fileName
     };
@@ -2865,7 +3071,7 @@ function resolveContextAccess(
       : resolvePrincipalUserId(state.principal)
   );
   const storageRoot = sanitizeStorageRoot(process.env.OPENFOAL_ENTERPRISE_STORAGE_ROOT ?? "/data/openfoal");
-  const root =
+  const legacyRoot =
     layer === "tenant"
       ? joinPath(storageRoot, "tenants", tenantId, "workspaces", workspaceId, "skills", "tenant")
       : layer === "workspace"
@@ -2873,7 +3079,8 @@ function resolveContextAccess(
         : joinPath(storageRoot, "tenants", tenantId, "workspaces", workspaceId, "users", targetUserId, "skills");
   return {
     ok: true,
-    root,
+    root: joinPath(legacyRoot, ".openfoal", "context"),
+    legacyRoot,
     layer,
     fileName
   };
@@ -3831,11 +4038,20 @@ function normalizeMemoryDate(value: unknown): string | undefined {
 }
 
 function resolveDailyMemoryPath(args: Record<string, unknown>, date: string): string {
+  void args;
+  return `.openfoal/memory/daily/${date}.md`;
+}
+
+function resolveLegacyDailyMemoryPath(args: Record<string, unknown>, date: string): string {
   const namespace = args.namespace === "workspace" || args.namespace === "user" ? args.namespace : undefined;
   if (namespace) {
     return `daily/${date}.md`;
   }
   return `memory/${date}.md`;
+}
+
+function resolveLongTermMemoryPath(): string {
+  return ".openfoal/memory/MEMORY.md";
 }
 
 function byteLen(text: string): number {
