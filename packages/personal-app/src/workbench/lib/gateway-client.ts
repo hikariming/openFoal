@@ -72,6 +72,7 @@ export class GatewayHttpClient {
       ...options,
       clientName: "desktop",
       clientVersion: "0.1.0",
+      getAccessToken: readAccessTokenFromStorage,
       useRuntimeConfig: true,
       useRuntimeToken: true,
       persistAccessToken: false,
@@ -293,6 +294,18 @@ export function getGatewayClient(): GatewayHttpClient {
   }
   singletonClient = new GatewayHttpClient();
   return singletonClient;
+}
+
+function readAccessTokenFromStorage(): string | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  const token = window.localStorage.getItem("openfoal_access_token");
+  if (typeof token !== "string") {
+    return undefined;
+  }
+  const trimmed = token.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 export { GatewayRpcError };

@@ -33,17 +33,11 @@ export function UserWorkbenchLayout(): JSX.Element {
   const permissions = resolveConsolePermissions(principal);
   const gatewayClient = useMemo(() => getGatewayClient(), []);
 
-  useEffect(() => {
-    void i18n.changeLanguage(language);
-  }, [language]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const current = (window as { __OPENFOAL_CONFIG__?: RuntimeConfig }).__OPENFOAL_CONFIG__ ?? {};
+  if (typeof window !== "undefined") {
+    const runtimeWindow = window as { __OPENFOAL_CONFIG__?: RuntimeConfig };
+    const current = runtimeWindow.__OPENFOAL_CONFIG__ ?? {};
     const accessToken = gatewayClient.getAccessToken();
-    (window as { __OPENFOAL_CONFIG__?: RuntimeConfig }).__OPENFOAL_CONFIG__ = {
+    runtimeWindow.__OPENFOAL_CONFIG__ = {
       ...current,
       gatewayUseWebSocket: false,
       gatewayAccessToken: accessToken,
@@ -53,7 +47,11 @@ export function UserWorkbenchLayout(): JSX.Element {
       agentId: "a_default",
       actor: principal?.displayName ?? principal?.subject ?? "enterprise-user"
     };
-  }, [gatewayClient, principal?.displayName, principal?.subject, principal?.userId, tenantId, workspaceId]);
+  }
+
+  useEffect(() => {
+    void i18n.changeLanguage(language);
+  }, [language]);
 
   return (
     <Layout className="enterprise-workbench-root">
