@@ -148,7 +148,16 @@ const WORKSPACE_SCOPE_METHODS = new Set<MethodName>([
   "memory.appendDaily",
   "memory.archive",
   "context.get",
-  "context.upsert"
+  "context.upsert",
+  "skills.catalog.list",
+  "skills.catalog.refresh",
+  "skills.installed.list",
+  "skills.install",
+  "skills.uninstall",
+  "skills.syncConfig.get",
+  "skills.syncConfig.upsert",
+  "skills.syncStatus.get",
+  "skills.sync.runNow"
 ]);
 
 const TENANT_SCOPE_METHODS = new Set<MethodName>([
@@ -159,6 +168,9 @@ const TENANT_SCOPE_METHODS = new Set<MethodName>([
   "users.updateMemberships",
   "secrets.upsertModelKey",
   "secrets.getModelKeyMeta",
+  "skills.bundle.import",
+  "skills.bundle.export",
+  "skills.bundle.list",
   "infra.health",
   "infra.storage.reconcile"
 ]);
@@ -187,6 +199,9 @@ const WORKSPACE_ADMIN_ALLOWED_WRITES = new Set<MethodName>([
 const WORKSPACE_ADMIN_RESTRICTED_METHODS = new Set<MethodName>([
   "secrets.upsertModelKey",
   "secrets.getModelKeyMeta",
+  "skills.bundle.import",
+  "skills.bundle.export",
+  "skills.bundle.list",
   "users.create",
   "users.updateStatus",
   "users.resetPassword",
@@ -195,6 +210,9 @@ const WORKSPACE_ADMIN_RESTRICTED_METHODS = new Set<MethodName>([
 ]);
 
 const MEMBER_RESTRICTED_METHODS = new Set<MethodName>([
+  "skills.bundle.import",
+  "skills.bundle.export",
+  "skills.bundle.list",
   "users.list",
   "users.create",
   "users.updateStatus",

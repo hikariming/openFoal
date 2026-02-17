@@ -20,6 +20,7 @@ import { BudgetPage } from "../pages/BudgetPage";
 import { ContextPage } from "../pages/ContextPage";
 import { InfraPage } from "../pages/InfraPage";
 import { LoginPage } from "../pages/LoginPage";
+import { SkillSyncPage } from "../pages/SkillSyncPage";
 
 export function AppRouter(): JSX.Element {
   const bootstrap = useAuthStore((state) => state.bootstrap);
@@ -52,6 +53,7 @@ export function AppRouter(): JSX.Element {
               <Route path="/admin/targets" element={<TargetsPage />} />
               <Route path="/admin/budget" element={<BudgetPage />} />
               <Route path="/admin/context" element={<ContextPage />} />
+              <Route path="/admin/skill-sync" element={<SkillSyncPage />} />
               <Route path="/admin/infra" element={<InfraPage />} />
             </Route>
 
@@ -65,6 +67,7 @@ export function AppRouter(): JSX.Element {
             <Route path="/targets" element={<Navigate to="/admin/targets" replace />} />
             <Route path="/budget" element={<Navigate to="/admin/budget" replace />} />
             <Route path="/context" element={<Navigate to="/admin/context" replace />} />
+            <Route path="/skill-sync" element={<Navigate to="/admin/skill-sync" replace />} />
             <Route path="/infra" element={<Navigate to="/admin/infra" replace />} />
           </Route>
           <Route path="*" element={<RoleHomeRedirect />} />

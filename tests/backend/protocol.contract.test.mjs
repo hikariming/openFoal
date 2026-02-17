@@ -134,6 +134,91 @@ test("users.create requires idempotencyKey", () => {
   }
 });
 
+test("skills.syncConfig.get does not require idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_skills_sync_get_1",
+    method: "skills.syncConfig.get",
+    params: {
+      scope: "user"
+    }
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.data.method, "skills.syncConfig.get");
+  }
+});
+
+test("skills.syncConfig.upsert requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_skills_sync_upsert_1",
+    method: "skills.syncConfig.upsert",
+    params: {
+      scope: "user",
+      config: {
+        autoSyncEnabled: true
+      }
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
+test("skills.bundle.import requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_skills_bundle_import_1",
+    method: "skills.bundle.import",
+    params: {
+      bundle: {
+        items: []
+      }
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
+test("skills.install requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_skills_install_1",
+    method: "skills.install",
+    params: {
+      skillId: "demo.skill"
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
+test("skills.uninstall requires idempotencyKey", () => {
+  const result = validateReqFrame({
+    type: "req",
+    id: "r_skills_uninstall_1",
+    method: "skills.uninstall",
+    params: {
+      skillId: "demo.skill"
+    }
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "INVALID_REQUEST");
+  }
+});
+
 test("unknown method returns METHOD_NOT_FOUND", () => {
   const result = validateReqFrame({
     type: "req",

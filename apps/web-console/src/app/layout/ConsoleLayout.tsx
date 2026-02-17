@@ -82,9 +82,10 @@ export function ConsoleLayout(): JSX.Element {
       { key: "targets", path: "/admin/targets", text: t("nav.targets"), icon: <IconSetting />, visible: permissions.canAccessAdmin },
       { key: "budget", path: "/admin/budget", text: t("nav.budget"), icon: <IconSetting />, visible: permissions.canAccessAdmin },
       { key: "context", path: "/admin/context", text: t("nav.context"), icon: <IconSetting />, visible: permissions.canAccessAdmin },
+      { key: "skill-sync", path: "/admin/skill-sync", text: t("nav.skillSync"), icon: <IconSetting />, visible: permissions.canReadSkillSync },
       { key: "infra", path: "/admin/infra", text: t("nav.infra"), icon: <IconServer />, visible: permissions.canReadInfra }
     ],
-    [permissions.canAccessAdmin, permissions.canAccessChat, permissions.canReadInfra, permissions.canReadSecrets, permissions.canReadUsers, t]
+    [permissions.canAccessAdmin, permissions.canAccessChat, permissions.canReadInfra, permissions.canReadSecrets, permissions.canReadSkillSync, permissions.canReadUsers, t]
   );
 
   const visibleNav = navItems.filter((item) => item.visible);

@@ -15,6 +15,11 @@ export type ConsolePermissions = {
   canWritePolicy: boolean;
   canWriteGovernance: boolean;
   canReadCrossUserContext: boolean;
+  canReadSkillSync: boolean;
+  canWriteTenantSkillSync: boolean;
+  canWriteWorkspaceSkillSync: boolean;
+  canWriteUserSkillSync: boolean;
+  canManageSkillBundles: boolean;
 };
 
 export function resolveConsolePermissions(principal?: GatewayPrincipal): ConsolePermissions {
@@ -37,7 +42,12 @@ export function resolveConsolePermissions(principal?: GatewayPrincipal): Console
     canWriteInfra: isTenantAdmin,
     canWritePolicy: canAccessAdmin,
     canWriteGovernance: canAccessAdmin,
-    canReadCrossUserContext: canAccessAdmin
+    canReadCrossUserContext: canAccessAdmin,
+    canReadSkillSync: canAccessAdmin,
+    canWriteTenantSkillSync: isTenantAdmin,
+    canWriteWorkspaceSkillSync: canAccessAdmin,
+    canWriteUserSkillSync: canAccessAdmin,
+    canManageSkillBundles: isTenantAdmin
   };
 }
 

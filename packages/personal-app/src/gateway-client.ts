@@ -267,6 +267,138 @@ export type GatewayReconcileResult = {
   [key: string]: unknown;
 };
 
+export type SkillSyncScope = "tenant" | "workspace" | "user";
+export type SkillSyncMode = "online" | "bundle_only";
+export type SkillSyncLicense = "allow" | "review" | "deny";
+
+export type GatewaySkillSyncConfig = {
+  autoSyncEnabled: boolean;
+  syncTime: string;
+  timezone: string;
+  syncMode: SkillSyncMode;
+  sourceFilters: string[];
+  licenseFilters: SkillSyncLicense[];
+  tagFilters: string[];
+  manualOnly: boolean;
+};
+
+export type GatewaySkillSyncConfigPatch = Partial<GatewaySkillSyncConfig>;
+
+export type GatewaySkillSyncRun = {
+  runId: string;
+  scope: SkillSyncScope;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  startedAt: string;
+  finishedAt: string;
+  status: "success" | "skipped_offline" | "skipped_manual_only" | "skipped_bundle_only" | "failed";
+  trigger: "scheduled" | "manual";
+  fetchedSources: number;
+  importedSkills: number;
+  error?: string;
+};
+
+export type GatewaySkillSyncStatus = {
+  lastRunAt?: string;
+  nextRunAt?: string;
+  lastOutcome?: GatewaySkillSyncRun["status"];
+  lastError?: string;
+};
+
+export type GatewaySkillSyncConfigResponse = {
+  scope: SkillSyncScope;
+  target: {
+    tenantId: string;
+    workspaceId?: string;
+    userId?: string;
+  };
+  config: GatewaySkillSyncConfigPatch;
+  effectiveConfig: GatewaySkillSyncConfig;
+  status: GatewaySkillSyncStatus;
+  recentRuns: GatewaySkillSyncRun[];
+  updatedAt?: string;
+  updatedBy?: string;
+};
+
+export type GatewaySkillSyncStatusResponse = {
+  scope: SkillSyncScope;
+  target: {
+    tenantId: string;
+    workspaceId?: string;
+    userId?: string;
+  };
+  effectiveConfig: GatewaySkillSyncConfig;
+  status: GatewaySkillSyncStatus;
+  recentRuns: GatewaySkillSyncRun[];
+};
+
+export type GatewaySkillBundleItem = {
+  skillId: string;
+  source?: string;
+  commit?: string;
+  path?: string;
+  checksum?: string;
+  license?: SkillSyncLicense;
+  tags: string[];
+};
+
+export type GatewaySkillBundle = {
+  bundleId: string;
+  name: string;
+  checksum: string;
+  signature?: string;
+  createdAt: string;
+  createdBy: string;
+  items: GatewaySkillBundleItem[];
+};
+
+export type GatewaySkillBundleSummary = {
+  bundleId: string;
+  name: string;
+  checksum: string;
+  signature?: string;
+  createdAt: string;
+  createdBy: string;
+  itemCount: number;
+};
+
+export type GatewaySkillCatalogItem = {
+  skillId: string;
+  source?: string;
+  commit?: string;
+  path?: string;
+  checksum?: string;
+  license?: SkillSyncLicense;
+  tags: string[];
+  availability: "online" | "cached" | "unavailable";
+};
+
+export type GatewaySkillCatalogResult = {
+  items: GatewaySkillCatalogItem[];
+  effectiveFilters: {
+    sourceFilters: string[];
+    licenseFilters: SkillSyncLicense[];
+    tagFilters: string[];
+  };
+  availability: "online" | "cached" | "unavailable";
+};
+
+export type GatewayInstalledSkill = {
+  skillId: string;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  installedAt: string;
+  installedBy: string;
+  source?: string;
+  commit?: string;
+  path?: string;
+  checksum?: string;
+  license?: SkillSyncLicense;
+  tags: string[];
+};
+
 type GatewayMethod =
   | "connect"
   | "agent.run"
@@ -300,6 +432,18 @@ type GatewayMethod =
   | "sandbox.usage"
   | "context.get"
   | "context.upsert"
+  | "skills.catalog.list"
+  | "skills.catalog.refresh"
+  | "skills.installed.list"
+  | "skills.install"
+  | "skills.uninstall"
+  | "skills.syncConfig.get"
+  | "skills.syncConfig.upsert"
+  | "skills.syncStatus.get"
+  | "skills.sync.runNow"
+  | "skills.bundle.import"
+  | "skills.bundle.export"
+  | "skills.bundle.list"
   | "infra.health"
   | "infra.storage.reconcile";
 
@@ -364,6 +508,13 @@ const SIDE_EFFECT_METHODS = new Set<GatewayMethod>([
   "budget.update",
   "policy.update",
   "context.upsert",
+  "skills.catalog.refresh",
+  "skills.install",
+  "skills.uninstall",
+  "skills.syncConfig.upsert",
+  "skills.sync.runNow",
+  "skills.bundle.import",
+  "skills.bundle.export",
   "infra.storage.reconcile"
 ]);
 
@@ -1098,6 +1249,257 @@ export class GatewayClient {
     };
   }
 
+  async listSkillCatalog(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    timezone?: string;
+  } = {}): Promise<GatewaySkillCatalogResult> {
+    await this.ensureConnected();
+    const result = await this.request("skills.catalog.list", this.withScope({
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.timezone ? { timezone: params.timezone } : {})
+    }));
+    if (!isGatewaySkillCatalogResult(result.response.payload)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.catalog.list payload");
+    }
+    return result.response.payload;
+  }
+
+  async listInstalledSkills(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+  } = {}): Promise<GatewayInstalledSkill[]> {
+    await this.ensureConnected();
+    const result = await this.request("skills.installed.list", this.withScope({
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
+    }));
+    return readArray(result.response.payload.items).filter(isGatewayInstalledSkill);
+  }
+
+  async installSkill(params: {
+    skillId: string;
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+  }): Promise<GatewayInstalledSkill> {
+    await this.ensureConnected();
+    const result = await this.request("skills.install", this.withScope({
+      idempotencyKey: createIdempotencyKey("skills_install"),
+      skillId: params.skillId,
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
+    }));
+    if (!isGatewayInstalledSkill(result.response.payload.item)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.install payload");
+    }
+    return result.response.payload.item;
+  }
+
+  async uninstallSkill(params: {
+    skillId: string;
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+  }): Promise<{ skillId: string; removed: boolean }> {
+    await this.ensureConnected();
+    const result = await this.request("skills.uninstall", this.withScope({
+      idempotencyKey: createIdempotencyKey("skills_uninstall"),
+      skillId: params.skillId,
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {})
+    }));
+    const skillId = asString(result.response.payload.skillId) ?? params.skillId;
+    const removed = result.response.payload.removed === true;
+    return {
+      skillId,
+      removed
+    };
+  }
+
+  async refreshSkillCatalog(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    timezone?: string;
+    offline?: boolean;
+  } = {}): Promise<{ run: GatewaySkillSyncRun; itemCount: number; availability: "online" | "cached" | "unavailable" }> {
+    await this.ensureConnected();
+    const result = await this.request("skills.catalog.refresh", this.withScope({
+      idempotencyKey: createIdempotencyKey("skills_catalog_refresh"),
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.timezone ? { timezone: params.timezone } : {}),
+      ...(typeof params.offline === "boolean" ? { offline: params.offline } : {})
+    }));
+    const run = result.response.payload.run;
+    if (!isGatewaySkillSyncRun(run)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.catalog.refresh payload");
+    }
+    return {
+      run,
+      itemCount: asNumber(result.response.payload.itemCount, 0),
+      availability: asCatalogAvailability(result.response.payload.availability) ?? "unavailable"
+    };
+  }
+
+  async getSkillSyncConfig(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    timezone?: string;
+  } = {}): Promise<GatewaySkillSyncConfigResponse> {
+    await this.ensureConnected();
+    const result = await this.request("skills.syncConfig.get", this.withScope({
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.timezone ? { timezone: params.timezone } : {})
+    }));
+    if (!isGatewaySkillSyncConfigResponse(result.response.payload)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.syncConfig.get payload");
+    }
+    return result.response.payload;
+  }
+
+  async upsertSkillSyncConfig(input: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    timezone?: string;
+    config: GatewaySkillSyncConfigPatch;
+  }): Promise<GatewaySkillSyncConfigResponse> {
+    await this.ensureConnected();
+    const result = await this.request("skills.syncConfig.upsert", this.withScope({
+      idempotencyKey: createIdempotencyKey("skills_sync_config_upsert"),
+      config: input.config,
+      ...(input.scope ? { scope: input.scope } : {}),
+      ...(input.userId ? { userId: input.userId } : {}),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      ...(input.timezone ? { timezone: input.timezone } : {})
+    }));
+    if (!isGatewaySkillSyncConfigResponse(result.response.payload)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.syncConfig.upsert payload");
+    }
+    return result.response.payload;
+  }
+
+  async getSkillSyncStatus(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    timezone?: string;
+  } = {}): Promise<GatewaySkillSyncStatusResponse> {
+    await this.ensureConnected();
+    const result = await this.request("skills.syncStatus.get", this.withScope({
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.timezone ? { timezone: params.timezone } : {})
+    }));
+    if (!isGatewaySkillSyncStatusResponse(result.response.payload)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.syncStatus.get payload");
+    }
+    return result.response.payload;
+  }
+
+  async runSkillSyncNow(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    timezone?: string;
+    offline?: boolean;
+  } = {}): Promise<{ run: GatewaySkillSyncRun; status: GatewaySkillSyncStatus }> {
+    await this.ensureConnected();
+    const result = await this.request("skills.sync.runNow", this.withScope({
+      idempotencyKey: createIdempotencyKey("skills_sync_run_now"),
+      ...(params.scope ? { scope: params.scope } : {}),
+      ...(params.userId ? { userId: params.userId } : {}),
+      ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+      ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),
+      ...(params.timezone ? { timezone: params.timezone } : {}),
+      ...(typeof params.offline === "boolean" ? { offline: params.offline } : {})
+    }));
+    const run = result.response.payload.run;
+    const status = result.response.payload.status;
+    if (!isGatewaySkillSyncRun(run) || !isGatewaySkillSyncStatus(status)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.sync.runNow payload");
+    }
+    return {
+      run,
+      status
+    };
+  }
+
+  async listSkillBundles(): Promise<GatewaySkillBundleSummary[]> {
+    await this.ensureConnected();
+    const result = await this.request("skills.bundle.list", this.withScope({}));
+    return readArray(result.response.payload.items).filter(isGatewaySkillBundleSummary);
+  }
+
+  async importSkillBundle(input: { bundle: GatewaySkillBundle }): Promise<{
+    bundle: GatewaySkillBundle;
+    importedCount: number;
+    catalogSize: number;
+  }> {
+    await this.ensureConnected();
+    const result = await this.request("skills.bundle.import", this.withScope({
+      idempotencyKey: createIdempotencyKey("skills_bundle_import"),
+      bundle: input.bundle
+    }));
+    if (!isGatewaySkillBundle(result.response.payload.bundle)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.bundle.import payload");
+    }
+    return {
+      bundle: result.response.payload.bundle,
+      importedCount: asNumber(result.response.payload.importedCount, 0),
+      catalogSize: asNumber(result.response.payload.catalogSize, 0)
+    };
+  }
+
+  async exportSkillBundle(input: {
+    bundleId?: string;
+    name?: string;
+    skillIds?: string[];
+  } = {}): Promise<GatewaySkillBundle> {
+    await this.ensureConnected();
+    const result = await this.request("skills.bundle.export", this.withScope({
+      idempotencyKey: createIdempotencyKey("skills_bundle_export"),
+      ...(input.bundleId ? { bundleId: input.bundleId } : {}),
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.skillIds ? { skillIds: input.skillIds } : {})
+    }));
+    if (!isGatewaySkillBundle(result.response.payload.bundle)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid skills.bundle.export payload");
+    }
+    return result.response.payload.bundle;
+  }
+
   async getInfraHealth(): Promise<GatewayInfraHealth> {
     await this.ensureConnected();
     const result = await this.request("infra.health", {});
@@ -1556,7 +1958,7 @@ function deriveTranscriptRoleText(event?: string, payload?: Record<string, unkno
     return { role: "system", text: "" };
   }
   if (event === "agent.delta") {
-    return { role: "assistant", text: asString(payload?.delta) ?? "" };
+    return { role: "assistant", text: asString(payload?.delta) ?? asString(payload?.text) ?? "" };
   }
   if (event === "agent.completed") {
     return { role: "assistant", text: asString(payload?.output) ?? "" };
@@ -1830,6 +2232,256 @@ function isGatewayMemorySearchResult(value: unknown): value is GatewayMemorySear
   });
 }
 
+function isGatewaySkillSyncConfig(value: unknown): value is GatewaySkillSyncConfig {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    typeof value.autoSyncEnabled !== "boolean" ||
+    typeof value.syncTime !== "string" ||
+    typeof value.timezone !== "string" ||
+    !isSkillSyncMode(value.syncMode) ||
+    !Array.isArray(value.sourceFilters) ||
+    !Array.isArray(value.licenseFilters) ||
+    !Array.isArray(value.tagFilters) ||
+    typeof value.manualOnly !== "boolean"
+  ) {
+    return false;
+  }
+  if (!value.sourceFilters.every((entry) => typeof entry === "string")) {
+    return false;
+  }
+  if (!value.licenseFilters.every((entry) => isSkillSyncLicense(entry))) {
+    return false;
+  }
+  if (!value.tagFilters.every((entry) => typeof entry === "string")) {
+    return false;
+  }
+  return true;
+}
+
+function isGatewaySkillSyncStatus(value: unknown): value is GatewaySkillSyncStatus {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (value.lastRunAt !== undefined && typeof value.lastRunAt !== "string") {
+    return false;
+  }
+  if (value.nextRunAt !== undefined && typeof value.nextRunAt !== "string") {
+    return false;
+  }
+  if (
+    value.lastOutcome !== undefined &&
+    value.lastOutcome !== "success" &&
+    value.lastOutcome !== "skipped_offline" &&
+    value.lastOutcome !== "skipped_manual_only" &&
+    value.lastOutcome !== "skipped_bundle_only" &&
+    value.lastOutcome !== "failed"
+  ) {
+    return false;
+  }
+  if (value.lastError !== undefined && typeof value.lastError !== "string") {
+    return false;
+  }
+  return true;
+}
+
+function isGatewaySkillSyncRun(value: unknown): value is GatewaySkillSyncRun {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.runId === "string" &&
+    isSkillSyncScope(value.scope) &&
+    typeof value.tenantId === "string" &&
+    typeof value.workspaceId === "string" &&
+    typeof value.userId === "string" &&
+    typeof value.startedAt === "string" &&
+    typeof value.finishedAt === "string" &&
+    (value.status === "success" ||
+      value.status === "skipped_offline" ||
+      value.status === "skipped_manual_only" ||
+      value.status === "skipped_bundle_only" ||
+      value.status === "failed") &&
+    (value.trigger === "scheduled" || value.trigger === "manual") &&
+    typeof value.fetchedSources === "number" &&
+    typeof value.importedSkills === "number" &&
+    (value.error === undefined || typeof value.error === "string")
+  );
+}
+
+function isGatewaySkillSyncConfigResponse(value: unknown): value is GatewaySkillSyncConfigResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (!isSkillSyncScope(value.scope) || !isGatewaySkillSyncConfig(value.effectiveConfig) || !isGatewaySkillSyncStatus(value.status)) {
+    return false;
+  }
+  if (!isRecord(value.target) || typeof value.target.tenantId !== "string") {
+    return false;
+  }
+  if (!isRecord(value.config)) {
+    return false;
+  }
+  const runs = readArray(value.recentRuns);
+  return runs.every(isGatewaySkillSyncRun);
+}
+
+function isGatewaySkillSyncStatusResponse(value: unknown): value is GatewaySkillSyncStatusResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (!isSkillSyncScope(value.scope) || !isGatewaySkillSyncConfig(value.effectiveConfig) || !isGatewaySkillSyncStatus(value.status)) {
+    return false;
+  }
+  if (!isRecord(value.target) || typeof value.target.tenantId !== "string") {
+    return false;
+  }
+  const runs = readArray(value.recentRuns);
+  return runs.every(isGatewaySkillSyncRun);
+}
+
+function isGatewaySkillBundleItem(value: unknown): value is GatewaySkillBundleItem {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (typeof value.skillId !== "string") {
+    return false;
+  }
+  if (value.source !== undefined && typeof value.source !== "string") {
+    return false;
+  }
+  if (value.commit !== undefined && typeof value.commit !== "string") {
+    return false;
+  }
+  if (value.path !== undefined && typeof value.path !== "string") {
+    return false;
+  }
+  if (value.checksum !== undefined && typeof value.checksum !== "string") {
+    return false;
+  }
+  if (value.license !== undefined && !isSkillSyncLicense(value.license)) {
+    return false;
+  }
+  if (!Array.isArray(value.tags) || !value.tags.every((entry) => typeof entry === "string")) {
+    return false;
+  }
+  return true;
+}
+
+function isGatewaySkillBundle(value: unknown): value is GatewaySkillBundle {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    typeof value.bundleId !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.checksum !== "string" ||
+    typeof value.createdAt !== "string" ||
+    typeof value.createdBy !== "string"
+  ) {
+    return false;
+  }
+  if (value.signature !== undefined && typeof value.signature !== "string") {
+    return false;
+  }
+  return readArray(value.items).every(isGatewaySkillBundleItem);
+}
+
+function isGatewaySkillBundleSummary(value: unknown): value is GatewaySkillBundleSummary {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.bundleId === "string" &&
+    typeof value.name === "string" &&
+    typeof value.checksum === "string" &&
+    typeof value.createdAt === "string" &&
+    typeof value.createdBy === "string" &&
+    typeof value.itemCount === "number" &&
+    (value.signature === undefined || typeof value.signature === "string")
+  );
+}
+
+function isGatewaySkillCatalogItem(value: unknown): value is GatewaySkillCatalogItem {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    typeof value.skillId !== "string" ||
+    (value.source !== undefined && typeof value.source !== "string") ||
+    (value.commit !== undefined && typeof value.commit !== "string") ||
+    (value.path !== undefined && typeof value.path !== "string") ||
+    (value.checksum !== undefined && typeof value.checksum !== "string") ||
+    (value.license !== undefined && !isSkillSyncLicense(value.license))
+  ) {
+    return false;
+  }
+  if (!Array.isArray(value.tags) || !value.tags.every((entry) => typeof entry === "string")) {
+    return false;
+  }
+  return asCatalogAvailability(value.availability) !== undefined;
+}
+
+function isGatewaySkillCatalogResult(value: unknown): value is GatewaySkillCatalogResult {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (!Array.isArray(value.items) || !value.items.every(isGatewaySkillCatalogItem)) {
+    return false;
+  }
+  if (!isRecord(value.effectiveFilters)) {
+    return false;
+  }
+  const filters = value.effectiveFilters;
+  if (
+    !Array.isArray(filters.sourceFilters) ||
+    !filters.sourceFilters.every((entry) => typeof entry === "string") ||
+    !Array.isArray(filters.licenseFilters) ||
+    !filters.licenseFilters.every((entry) => isSkillSyncLicense(entry)) ||
+    !Array.isArray(filters.tagFilters) ||
+    !filters.tagFilters.every((entry) => typeof entry === "string")
+  ) {
+    return false;
+  }
+  return asCatalogAvailability(value.availability) !== undefined;
+}
+
+function isGatewayInstalledSkill(value: unknown): value is GatewayInstalledSkill {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    typeof value.skillId !== "string" ||
+    typeof value.tenantId !== "string" ||
+    typeof value.workspaceId !== "string" ||
+    typeof value.userId !== "string" ||
+    typeof value.installedAt !== "string" ||
+    typeof value.installedBy !== "string"
+  ) {
+    return false;
+  }
+  if (value.source !== undefined && typeof value.source !== "string") {
+    return false;
+  }
+  if (value.commit !== undefined && typeof value.commit !== "string") {
+    return false;
+  }
+  if (value.path !== undefined && typeof value.path !== "string") {
+    return false;
+  }
+  if (value.checksum !== undefined && typeof value.checksum !== "string") {
+    return false;
+  }
+  if (value.license !== undefined && !isSkillSyncLicense(value.license)) {
+    return false;
+  }
+  if (!Array.isArray(value.tags) || !value.tags.every((entry) => typeof entry === "string")) {
+    return false;
+  }
+  return true;
+}
+
 function toGatewayPrincipal(value: unknown): GatewayPrincipal | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -1873,6 +2525,22 @@ function isContextLayer(value: unknown): value is ContextLayer {
 
 function isContextFile(value: unknown): value is ContextFile {
   return value === "AGENTS.md" || value === "SOUL.md" || value === "TOOLS.md" || value === "USER.md";
+}
+
+function isSkillSyncScope(value: unknown): value is SkillSyncScope {
+  return value === "tenant" || value === "workspace" || value === "user";
+}
+
+function isSkillSyncMode(value: unknown): value is SkillSyncMode {
+  return value === "online" || value === "bundle_only";
+}
+
+function isSkillSyncLicense(value: unknown): value is SkillSyncLicense {
+  return value === "allow" || value === "review" || value === "deny";
+}
+
+function asCatalogAvailability(value: unknown): "online" | "cached" | "unavailable" | undefined {
+  return value === "online" || value === "cached" || value === "unavailable" ? value : undefined;
 }
 
 function asExecutionMode(value: unknown): ExecutionMode | undefined {

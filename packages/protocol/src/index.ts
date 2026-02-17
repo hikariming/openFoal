@@ -31,6 +31,18 @@ export const METHODS = [
   "memory.archive",
   "context.get",
   "context.upsert",
+  "skills.catalog.list",
+  "skills.catalog.refresh",
+  "skills.installed.list",
+  "skills.install",
+  "skills.uninstall",
+  "skills.syncConfig.get",
+  "skills.syncConfig.upsert",
+  "skills.syncStatus.get",
+  "skills.sync.runNow",
+  "skills.bundle.import",
+  "skills.bundle.export",
+  "skills.bundle.list",
   "infra.health",
   "infra.storage.reconcile"
 ] as const;
@@ -83,6 +95,13 @@ export const SIDE_EFFECT_METHODS = new Set<MethodName>([
   "memory.appendDaily",
   "memory.archive",
   "context.upsert",
+  "skills.catalog.refresh",
+  "skills.install",
+  "skills.uninstall",
+  "skills.syncConfig.upsert",
+  "skills.sync.runNow",
+  "skills.bundle.import",
+  "skills.bundle.export",
   "infra.storage.reconcile"
 ]);
 

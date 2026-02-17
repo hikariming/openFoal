@@ -566,6 +566,37 @@ test("AUTH-UT-004 authorizer role matrix enforces member/workspace_admin/tenant_
   if (!memberUsersList.response.ok) {
     assert.equal(memberUsersList.response.error.code, "FORBIDDEN");
   }
+  const memberSkillSyncUpsert = await router.handle(
+    req("r_member_skill_sync_upsert", "skills.syncConfig.upsert", {
+      idempotencyKey: "idem_member_skill_sync_upsert_1",
+      scope: "user",
+      config: {
+        autoSyncEnabled: true,
+        syncTime: "03:00"
+      }
+    }),
+    memberState
+  );
+  assert.equal(memberSkillSyncUpsert.response.ok, true);
+  const memberSkillInstallAllowed = await router.handle(
+    req("r_member_skill_install", "skills.install", {
+      idempotencyKey: "idem_member_skill_install_1",
+      scope: "user",
+      skillId: "demo.skill"
+    }),
+    memberState
+  );
+  assert.equal(memberSkillInstallAllowed.response.ok, true);
+  const memberBundleListDenied = await router.handle(
+    req("r_member_bundle_list_denied", "skills.bundle.list", {
+      tenantId: "t_matrix"
+    }),
+    memberState
+  );
+  assert.equal(memberBundleListDenied.response.ok, false);
+  if (!memberBundleListDenied.response.ok) {
+    assert.equal(memberBundleListDenied.response.error.code, "FORBIDDEN");
+  }
 
   const workspaceAdminState = await connectLocalRole(router, {
     userId: "u_workspace_admin_matrix",
@@ -610,6 +641,16 @@ test("AUTH-UT-004 authorizer role matrix enforces member/workspace_admin/tenant_
     workspaceAdminState
   );
   assert.equal(workspaceAdminUsersList.response.ok, true);
+  const workspaceAdminBundleListDenied = await router.handle(
+    req("r_workspace_admin_bundle_list_denied", "skills.bundle.list", {
+      tenantId: "t_matrix"
+    }),
+    workspaceAdminState
+  );
+  assert.equal(workspaceAdminBundleListDenied.response.ok, false);
+  if (!workspaceAdminBundleListDenied.response.ok) {
+    assert.equal(workspaceAdminBundleListDenied.response.error.code, "FORBIDDEN");
+  }
   const workspaceAdminUsersCreateDenied = await router.handle(
     req("r_workspace_admin_users_create_denied", "users.create", {
       idempotencyKey: "idem_workspace_admin_users_create_1",

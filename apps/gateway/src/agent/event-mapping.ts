@@ -18,7 +18,7 @@ export function mapCoreEvent(coreEvent: CoreEvent): { event: EventFrame["event"]
         event: "agent.delta",
         payload: {
           runId: coreEvent.runId,
-          text: coreEvent.text
+          delta: coreEvent.text
         }
       };
     case "tool_call_start":

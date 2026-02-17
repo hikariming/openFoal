@@ -185,7 +185,7 @@ export function PersonalChatApp(props: PersonalChatAppProps) {
 
   const handleRunEvent = (event: RpcEvent) => {
     if (event.event === "agent.delta") {
-      const delta = asString(event.payload.delta) ?? "";
+      const delta = readDeltaPayload(event.payload);
       if (!delta) {
         return;
       }
@@ -409,7 +409,7 @@ function buildMessagesFromHistory(items: GatewayTranscriptItem[]): ChatMessage[]
     }
 
     if (item.event === "agent.delta") {
-      const delta = asString(item.payload.delta) ?? "";
+      const delta = readDeltaPayload(item.payload);
       if (!delta) {
         continue;
       }
@@ -470,6 +470,10 @@ function buildMessagesFromHistory(items: GatewayTranscriptItem[]): ChatMessage[]
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function readDeltaPayload(payload: Record<string, unknown>): string {
+  return asString(payload.delta) ?? asString(payload.text) ?? "";
 }
 
 function createId(): string {

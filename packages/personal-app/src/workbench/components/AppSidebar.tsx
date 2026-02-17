@@ -1,4 +1,4 @@
-import { Avatar, Button, Input, Layout, Modal, Nav, Popover, Select, Space, Tabs, Tag, TextArea, Typography } from "@douyinfe/semi-ui";
+import { Avatar, Button, Checkbox, Input, Layout, Modal, Nav, Popover, Select, Space, Tabs, Tag, TextArea, Typography } from "@douyinfe/semi-ui";
 import {
   IconBolt,
   IconChevronDown,
@@ -29,6 +29,9 @@ import {
   type GatewayMemorySearchHit,
   type GatewayModelKeyMeta,
   type GatewaySandboxUsage,
+  type GatewaySkillSyncConfigPatch,
+  type GatewaySkillSyncConfigResponse,
+  type GatewaySkillSyncStatusResponse,
   type GatewaySession,
   type GatewayTranscriptItem
 } from "../lib/gateway-client";
@@ -42,13 +45,23 @@ import {
 } from "../store/app-store";
 
 type SideMenu = "new" | "skills" | "automations";
-type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "memory" | "subscription" | "referral" | "experimental";
+type SettingsMenu = "account" | "capyMail" | "runtimeModel" | "memory" | "skillSync" | "subscription" | "referral" | "experimental";
 type RuntimeSettingsTab = "model" | "status";
 type RuntimeResolvedLlm = {
   modelRef?: string;
   provider?: string;
   modelId?: string;
   baseUrl?: string;
+};
+type SkillSyncDraft = {
+  autoSyncEnabled: boolean;
+  syncTime: string;
+  timezone: string;
+  syncMode: "online" | "bundle_only";
+  sourceFiltersText: string;
+  licenseFiltersText: string;
+  tagFiltersText: string;
+  manualOnly: boolean;
 };
 
 type AppSidebarProps = {
@@ -91,6 +104,14 @@ export function AppSidebar(props: AppSidebarProps = {}) {
   const [llmSavedNotice, setLlmSavedNotice] = useState("");
   const [runtimeResolvedLlm, setRuntimeResolvedLlm] = useState<RuntimeResolvedLlm | undefined>(undefined);
   const [sandboxUsage, setSandboxUsage] = useState<GatewaySandboxUsage | undefined>(undefined);
+  const [skillSyncLoading, setSkillSyncLoading] = useState(false);
+  const [skillSyncSaving, setSkillSyncSaving] = useState(false);
+  const [skillSyncRunning, setSkillSyncRunning] = useState(false);
+  const [skillSyncError, setSkillSyncError] = useState("");
+  const [skillSyncNotice, setSkillSyncNotice] = useState("");
+  const [skillSyncDraft, setSkillSyncDraft] = useState<SkillSyncDraft>(() => buildSkillSyncDraft());
+  const [skillSyncCurrent, setSkillSyncCurrent] = useState<GatewaySkillSyncConfigResponse | undefined>(undefined);
+  const [skillSyncStatus, setSkillSyncStatus] = useState<GatewaySkillSyncStatusResponse | undefined>(undefined);
   const { sessions, activeSessionId, setSessions, upsertSession, setActiveSession, setRuntimeMode, llmConfig, setLlmConfig } =
     useAppStore();
   const runtimeMode = useAppStore((state) => getSessionRuntimeMode(state.sessions, state.activeSessionId));
@@ -109,6 +130,7 @@ export function AppSidebar(props: AppSidebarProps = {}) {
     { key: "capyMail", label: t("sidebar.capyMail"), icon: <IconMailStroked /> },
     { key: "runtimeModel", label: t("sidebar.runtimeModel"), icon: <IconCloudStroked /> },
     { key: "memory", label: t("sidebar.memory"), icon: <IconBolt /> },
+    { key: "skillSync", label: t("sidebar.skillSync"), icon: <IconPuzzle /> },
     { key: "subscription", label: t("sidebar.subscription"), icon: <IconCreditCardStroked /> },
     { key: "referral", label: t("sidebar.referral"), icon: <IconLink /> },
     { key: "experimental", label: t("sidebar.experimental"), icon: <IconGiftStroked /> }
@@ -151,6 +173,13 @@ export function AppSidebar(props: AppSidebarProps = {}) {
     }
     void refreshMemory();
   }, [activeSettingsMenu, settingsModalVisible, memoryTarget, memoryDate]);
+
+  useEffect(() => {
+    if (!settingsModalVisible || activeSettingsMenu !== "skillSync") {
+      return;
+    }
+    void refreshSkillSync();
+  }, [activeSettingsMenu, settingsModalVisible]);
 
   useEffect(() => {
     let cancelled = false;
@@ -467,6 +496,81 @@ export function AppSidebar(props: AppSidebarProps = {}) {
       setMemoryError(error instanceof Error ? error.message : String(error));
     } finally {
       setMemoryPending(false);
+    }
+  };
+
+  const refreshSkillSync = async (): Promise<void> => {
+    setSkillSyncLoading(true);
+    setSkillSyncError("");
+    setSkillSyncNotice("");
+    try {
+      const client = getGatewayClient();
+      const [config, status] = await Promise.all([
+        client.getSkillSyncConfig({
+          scope: "user",
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        }),
+        client.getSkillSyncStatus({
+          scope: "user",
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        })
+      ]);
+      setSkillSyncCurrent(config);
+      setSkillSyncStatus(status);
+      setSkillSyncDraft(buildSkillSyncDraft(config));
+    } catch (error) {
+      setSkillSyncError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSkillSyncLoading(false);
+    }
+  };
+
+  const saveSkillSync = async (): Promise<void> => {
+    setSkillSyncSaving(true);
+    setSkillSyncError("");
+    setSkillSyncNotice("");
+    try {
+      const client = getGatewayClient();
+      const configPatch = buildSkillSyncPatchFromDraft(skillSyncDraft);
+      const saved = await client.upsertSkillSyncConfig({
+        scope: "user",
+        timezone: skillSyncDraft.timezone,
+        config: configPatch
+      });
+      const status = await client.getSkillSyncStatus({
+        scope: "user",
+        timezone: skillSyncDraft.timezone
+      });
+      setSkillSyncCurrent(saved);
+      setSkillSyncStatus(status);
+      setSkillSyncNotice(t("sidebar.skillSyncSaved"));
+    } catch (error) {
+      setSkillSyncError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSkillSyncSaving(false);
+    }
+  };
+
+  const runSkillSyncNow = async (): Promise<void> => {
+    setSkillSyncRunning(true);
+    setSkillSyncError("");
+    setSkillSyncNotice("");
+    try {
+      const client = getGatewayClient();
+      const result = await client.runSkillSyncNow({
+        scope: "user",
+        timezone: skillSyncDraft.timezone
+      });
+      const status = await client.getSkillSyncStatus({
+        scope: "user",
+        timezone: skillSyncDraft.timezone
+      });
+      setSkillSyncStatus(status);
+      setSkillSyncNotice(`${t("sidebar.skillSyncRunStatusPrefix")}${result.run.status}`);
+    } catch (error) {
+      setSkillSyncError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSkillSyncRunning(false);
     }
   };
 
@@ -1137,6 +1241,120 @@ export function AppSidebar(props: AppSidebarProps = {}) {
                     </Typography.Text>
                   ) : null}
                 </div>
+              ) : activeSettingsMenu === "skillSync" ? (
+                <div className="memory-settings-wrap">
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncAutoSync")}</Typography.Text>
+                  <Checkbox
+                    checked={skillSyncDraft.autoSyncEnabled}
+                    onChange={(event: any) =>
+                      setSkillSyncDraft((prev) => ({
+                        ...prev,
+                        autoSyncEnabled: Boolean(event?.target?.checked)
+                      }))
+                    }
+                  >
+                    {t("sidebar.skillSyncAutoSync")}
+                  </Checkbox>
+
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncManualOnly")}</Typography.Text>
+                  <Checkbox
+                    checked={skillSyncDraft.manualOnly}
+                    onChange={(event: any) =>
+                      setSkillSyncDraft((prev) => ({
+                        ...prev,
+                        manualOnly: Boolean(event?.target?.checked)
+                      }))
+                    }
+                  >
+                    {t("sidebar.skillSyncManualOnly")}
+                  </Checkbox>
+
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncTime")}</Typography.Text>
+                  <Input
+                    value={skillSyncDraft.syncTime}
+                    onChange={(value) => setSkillSyncDraft((prev) => ({ ...prev, syncTime: value }))}
+                    placeholder="03:00"
+                  />
+
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncTimezone")}</Typography.Text>
+                  <Input
+                    value={skillSyncDraft.timezone}
+                    onChange={(value) => setSkillSyncDraft((prev) => ({ ...prev, timezone: value }))}
+                    placeholder="Asia/Shanghai"
+                  />
+
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncMode")}</Typography.Text>
+                  <Select
+                    value={skillSyncDraft.syncMode}
+                    optionList={[
+                      { label: "online", value: "online" },
+                      { label: "bundle_only", value: "bundle_only" }
+                    ]}
+                    onChange={(value: unknown) => {
+                      if (value !== "online" && value !== "bundle_only") {
+                        return;
+                      }
+                      setSkillSyncDraft((prev) => ({ ...prev, syncMode: value }));
+                    }}
+                  />
+
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncSources")}</Typography.Text>
+                  <Input
+                    value={skillSyncDraft.sourceFiltersText}
+                    onChange={(value) => setSkillSyncDraft((prev) => ({ ...prev, sourceFiltersText: value }))}
+                    placeholder="anthropics/skills, affaan-m/everything-claude-code"
+                  />
+
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncLicenses")}</Typography.Text>
+                  <Input
+                    value={skillSyncDraft.licenseFiltersText}
+                    onChange={(value) => setSkillSyncDraft((prev) => ({ ...prev, licenseFiltersText: value }))}
+                    placeholder="allow,review"
+                  />
+
+                  <Typography.Text className="settings-label">{t("sidebar.skillSyncTags")}</Typography.Text>
+                  <Input
+                    value={skillSyncDraft.tagFiltersText}
+                    onChange={(value) => setSkillSyncDraft((prev) => ({ ...prev, tagFiltersText: value }))}
+                    placeholder="coding,ops"
+                  />
+
+                  <Space spacing={8}>
+                    <Button theme="solid" loading={skillSyncSaving} onClick={() => void saveSkillSync()}>
+                      {t("sidebar.skillSyncSave")}
+                    </Button>
+                    <Button theme="light" loading={skillSyncRunning} onClick={() => void runSkillSyncNow()}>
+                      {t("sidebar.skillSyncRunNow")}
+                    </Button>
+                    <Button theme="light" loading={skillSyncLoading} onClick={() => void refreshSkillSync()}>
+                      {t("sidebar.skillSyncRefresh")}
+                    </Button>
+                  </Space>
+
+                  {skillSyncNotice ? <Typography.Text type="success">{skillSyncNotice}</Typography.Text> : null}
+                  {skillSyncError ? <Typography.Text type="danger">{skillSyncError}</Typography.Text> : null}
+
+                  <Typography.Text type="tertiary">
+                    {t("sidebar.skillSyncEffective")}
+                    {": "}
+                    {formatSkillSyncConfig(skillSyncCurrent?.effectiveConfig)}
+                  </Typography.Text>
+                  <Typography.Text type="tertiary">
+                    {t("sidebar.skillSyncLastRun")}
+                    {": "}
+                    {skillSyncStatus?.status.lastRunAt ?? "-"}
+                  </Typography.Text>
+                  <Typography.Text type="tertiary">
+                    {t("sidebar.skillSyncNextRun")}
+                    {": "}
+                    {skillSyncStatus?.status.nextRunAt ?? "-"}
+                  </Typography.Text>
+                  <Typography.Text type="tertiary">
+                    {t("sidebar.skillSyncLastError")}
+                    {": "}
+                    {skillSyncStatus?.status.lastError ?? "-"}
+                  </Typography.Text>
+                </div>
               ) : (
                 <div className="settings-placeholder">{t("sidebar.comingSoon")}</div>
               )}
@@ -1146,6 +1364,69 @@ export function AppSidebar(props: AppSidebarProps = {}) {
       ) : null}
     </Layout.Sider>
   );
+}
+
+function buildSkillSyncDraft(config?: GatewaySkillSyncConfigResponse): SkillSyncDraft {
+  const effective = config?.effectiveConfig;
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  return {
+    autoSyncEnabled: effective?.autoSyncEnabled ?? true,
+    syncTime: effective?.syncTime ?? "03:00",
+    timezone: effective?.timezone ?? timezone,
+    syncMode: effective?.syncMode ?? "online",
+    sourceFiltersText: (effective?.sourceFilters ?? []).join(", "),
+    licenseFiltersText: (effective?.licenseFilters ?? ["allow", "review"]).join(","),
+    tagFiltersText: (effective?.tagFilters ?? []).join(", "),
+    manualOnly: effective?.manualOnly ?? false
+  };
+}
+
+function buildSkillSyncPatchFromDraft(draft: SkillSyncDraft): GatewaySkillSyncConfigPatch {
+  return {
+    autoSyncEnabled: draft.autoSyncEnabled,
+    syncTime: normalizeSkillSyncTime(draft.syncTime),
+    timezone: draft.timezone.trim() || "UTC",
+    syncMode: draft.syncMode,
+    sourceFilters: splitCsv(draft.sourceFiltersText),
+    licenseFilters: normalizeSkillSyncLicenses(splitCsv(draft.licenseFiltersText)),
+    tagFilters: splitCsv(draft.tagFiltersText),
+    manualOnly: draft.manualOnly
+  };
+}
+
+function normalizeSkillSyncTime(value: string): string {
+  const trimmed = value.trim();
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(trimmed) ? trimmed : "03:00";
+}
+
+function splitCsv(value: string): string[] {
+  const seen = new Set<string>();
+  for (const raw of value.split(",")) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      continue;
+    }
+    seen.add(trimmed);
+  }
+  return [...seen.values()];
+}
+
+function normalizeSkillSyncLicenses(value: string[]): Array<"allow" | "review" | "deny"> {
+  const valid: Array<"allow" | "review" | "deny"> = [];
+  for (const item of value) {
+    const normalized = item.toLowerCase();
+    if (normalized === "allow" || normalized === "review" || normalized === "deny") {
+      valid.push(normalized);
+    }
+  }
+  return valid.length > 0 ? valid : ["allow", "review"];
+}
+
+function formatSkillSyncConfig(config: GatewaySkillSyncConfigResponse["effectiveConfig"] | undefined): string {
+  if (!config) {
+    return "-";
+  }
+  return `${config.syncMode} @ ${config.syncTime} ${config.timezone} · source=${config.sourceFilters.length} · license=${config.licenseFilters.join(",")} · tags=${config.tagFilters.join(",") || "-"}`;
 }
 
 function sameLlmConfig(a: LlmConfig, b: LlmConfig): boolean {

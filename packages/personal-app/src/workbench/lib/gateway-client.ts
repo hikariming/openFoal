@@ -2,6 +2,16 @@ import {
   GatewayClient,
   GatewayRpcError,
   type GatewayAuditItem,
+  type GatewaySkillBundle,
+  type GatewaySkillBundleSummary,
+  type GatewaySkillCatalogItem,
+  type GatewaySkillCatalogResult,
+  type GatewayInstalledSkill,
+  type GatewaySkillSyncConfigPatch,
+  type GatewaySkillSyncConfigResponse,
+  type GatewaySkillSyncStatus,
+  type GatewaySkillSyncStatusResponse,
+  type GatewaySkillSyncRun,
   type GatewayMemoryAppendResult,
   type GatewayMemoryArchiveResult,
   type GatewayMemoryReadResult,
@@ -17,6 +27,7 @@ import {
   type RpcEvent,
   type RunAgentParams,
   type RunAgentStreamHandlers,
+  type SkillSyncScope,
   type RuntimeMode
 } from "../../gateway-client";
 
@@ -34,6 +45,17 @@ export type {
   GatewaySandboxUsage,
   GatewayModelKeyMeta,
   GatewayAuditItem,
+  GatewaySkillSyncConfigPatch,
+  GatewaySkillSyncConfigResponse,
+  GatewaySkillSyncStatusResponse,
+  GatewaySkillSyncStatus,
+  GatewaySkillSyncRun,
+  GatewaySkillCatalogResult,
+  GatewaySkillCatalogItem,
+  GatewayInstalledSkill,
+  GatewaySkillBundleSummary,
+  GatewaySkillBundle,
+  SkillSyncScope,
   GatewayMemoryReadResult,
   GatewayMemorySearchResult,
   GatewayMemoryArchiveResult,
@@ -155,6 +177,100 @@ export class GatewayHttpClient {
 
   async runAgent(params: RunAgentParams): Promise<{ runId?: string; events: RpcEvent[] }> {
     return await this.client.runAgent(params);
+  }
+
+  async listSkillCatalog(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    timezone?: string;
+  } = {}): Promise<GatewaySkillCatalogResult> {
+    return await this.client.listSkillCatalog(params);
+  }
+
+  async refreshSkillCatalog(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    timezone?: string;
+    offline?: boolean;
+  } = {}): Promise<{ run: GatewaySkillSyncRun; itemCount: number; availability: "online" | "cached" | "unavailable" }> {
+    return await this.client.refreshSkillCatalog(params);
+  }
+
+  async listInstalledSkills(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+  } = {}): Promise<GatewayInstalledSkill[]> {
+    return await this.client.listInstalledSkills(params);
+  }
+
+  async installSkill(params: {
+    skillId: string;
+    scope?: SkillSyncScope;
+    userId?: string;
+  }): Promise<GatewayInstalledSkill> {
+    return await this.client.installSkill(params);
+  }
+
+  async uninstallSkill(params: {
+    skillId: string;
+    scope?: SkillSyncScope;
+    userId?: string;
+  }): Promise<{ skillId: string; removed: boolean }> {
+    return await this.client.uninstallSkill(params);
+  }
+
+  async getSkillSyncConfig(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    timezone?: string;
+  } = {}): Promise<GatewaySkillSyncConfigResponse> {
+    return await this.client.getSkillSyncConfig(params);
+  }
+
+  async upsertSkillSyncConfig(input: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    timezone?: string;
+    config: GatewaySkillSyncConfigPatch;
+  }): Promise<GatewaySkillSyncConfigResponse> {
+    return await this.client.upsertSkillSyncConfig(input);
+  }
+
+  async getSkillSyncStatus(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    timezone?: string;
+  } = {}): Promise<GatewaySkillSyncStatusResponse> {
+    return await this.client.getSkillSyncStatus(params);
+  }
+
+  async runSkillSyncNow(params: {
+    scope?: SkillSyncScope;
+    userId?: string;
+    timezone?: string;
+    offline?: boolean;
+  } = {}): Promise<{ run: GatewaySkillSyncRun; status: GatewaySkillSyncStatus }> {
+    return await this.client.runSkillSyncNow(params);
+  }
+
+  async listSkillBundles(): Promise<GatewaySkillBundleSummary[]> {
+    return await this.client.listSkillBundles();
+  }
+
+  async importSkillBundle(input: { bundle: GatewaySkillBundle }): Promise<{
+    bundle: GatewaySkillBundle;
+    importedCount: number;
+    catalogSize: number;
+  }> {
+    return await this.client.importSkillBundle(input);
+  }
+
+  async exportSkillBundle(input: {
+    bundleId?: string;
+    name?: string;
+    skillIds?: string[];
+  } = {}): Promise<GatewaySkillBundle> {
+    return await this.client.exportSkillBundle(input);
   }
 
   async runAgentStream(

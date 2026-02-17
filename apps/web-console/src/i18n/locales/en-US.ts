@@ -15,6 +15,7 @@ const enUS = {
     targets: "Targets",
     budget: "Budget",
     context: "Context",
+    skillSync: "Skill Sync",
     infra: "Infrastructure"
   },
   common: {
@@ -178,6 +179,41 @@ const enUS = {
     title: "Infrastructure",
     health: "Health",
     reconcile: "Storage Reconcile"
+  },
+  skillSync: {
+    title: "Skill Sync Policies",
+    tenant: "Tenant Default Policy",
+    workspace: "Workspace Override Policy",
+    user: "User Override Policy",
+    autoSync: "Auto Sync",
+    manualOnly: "Manual Only",
+    runNow: "Run Now",
+    saved: "Policy saved.",
+    effective: "Effective Config",
+    lastRun: "Last Sync",
+    nextRun: "Next Schedule",
+    lastError: "Recent Error",
+    lastOutcome: "Latest Outcome",
+    bundle: "Offline Bundle",
+    export: "Export Bundle",
+    import: "Import Bundle",
+    bundleExported: "Bundle exported.",
+    bundleImported: "Bundle imported.",
+    bundleHistory: "Bundle History"
+  },
+  skillStore: {
+    getStarted: "GET STARTED",
+    introducing: "Skill Store",
+    subtitle: "Skills are the new software.",
+    promptsWeLove: "RECOMMENDED",
+    skillsWeLove: "RECOMMENDED SKILLS",
+    refresh: "Refresh skill list",
+    loading: "Loading skills...",
+    empty: "No skills yet. Click refresh to sync catalog.",
+    install: "Install skill",
+    uninstall: "Remove skill",
+    installSuccess: "Skill installed.",
+    uninstallSuccess: "Skill removed."
   }
 };
 

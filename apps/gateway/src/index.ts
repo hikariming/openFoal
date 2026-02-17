@@ -86,6 +86,20 @@ import {
   validateReqFrame
 } from "../../../packages/protocol/dist/index.js";
 import {
+  computeNextDailyRunAt,
+  defaultSkillSyncConfig,
+  defaultTimezone,
+  isSkillSyncScope,
+  normalizeSkillSyncPatch,
+  resolveEffectiveSkillSyncConfig,
+  validateSecurityBoundary,
+  type SkillSyncConfig,
+  type SkillSyncConfigPatch,
+  type SkillSyncLicense,
+  type SkillSyncMode,
+  type SkillSyncScope
+} from "../../../packages/skill-engine/dist/index.js";
+import {
   AuthHttpError,
   createGatewayAuthRuntime,
   hashPasswordForStorage,
@@ -132,6 +146,7 @@ export interface GatewayHandleOptions {
 
 export interface GatewayRouter {
   handle(input: unknown, state: ConnectionState, options?: GatewayHandleOptions): Promise<GatewayHandleResult>;
+  runSkillSyncSchedulerTick?: () => Promise<void>;
   auth?: {
     login(body: Record<string, unknown>): Promise<Record<string, unknown>>;
     refresh(body: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -157,6 +172,105 @@ export interface GatewayServerHandle {
   port: number;
   close(): Promise<void>;
 }
+
+type SkillSyncScopeRef = {
+  scope: SkillSyncScope;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  key: string;
+};
+
+type SkillSyncConfigRecord = {
+  scope: SkillSyncScope;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  config: SkillSyncConfigPatch;
+  updatedAt: string;
+  updatedBy: string;
+};
+
+type SkillSyncRunStatus =
+  | "success"
+  | "skipped_offline"
+  | "skipped_manual_only"
+  | "skipped_bundle_only"
+  | "failed";
+
+type SkillSyncRunRecord = {
+  runId: string;
+  scope: SkillSyncScope;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  startedAt: string;
+  finishedAt: string;
+  status: SkillSyncRunStatus;
+  trigger: "scheduled" | "manual";
+  fetchedSources: number;
+  importedSkills: number;
+  error?: string;
+};
+
+type SkillSyncStatusRecord = {
+  scope: SkillSyncScope;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  lastOutcome?: SkillSyncRunStatus;
+  lastError?: string;
+};
+
+type SkillBundleItemRecord = {
+  skillId: string;
+  source?: string;
+  commit?: string;
+  path?: string;
+  checksum?: string;
+  license?: SkillSyncLicense;
+  tags: string[];
+};
+
+type SkillBundleRecord = {
+  bundleId: string;
+  name: string;
+  checksum: string;
+  signature?: string;
+  createdAt: string;
+  createdBy: string;
+  items: SkillBundleItemRecord[];
+};
+
+type SkillCatalogAvailability = "online" | "cached" | "unavailable";
+
+type SkillCatalogItem = {
+  skillId: string;
+  source?: string;
+  commit?: string;
+  path?: string;
+  checksum?: string;
+  license?: SkillSyncLicense;
+  tags: string[];
+  availability: SkillCatalogAvailability;
+};
+
+type SkillInstalledRecord = {
+  skillId: string;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  installedAt: string;
+  installedBy: string;
+  source?: string;
+  commit?: string;
+  path?: string;
+  checksum?: string;
+  license?: SkillSyncLicense;
+  tags: string[];
+};
 
 type DockerRunnerInvokeInput = {
   target: ExecutionTargetRecord;
@@ -250,6 +364,23 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
     policyRepo
   });
   const coreService = deps.coreService ?? createRuntimeCoreService({ toolExecutor: policyAwareToolExecutor });
+  const skillSyncConfigs = new Map<string, SkillSyncConfigRecord>();
+  const skillSyncStatuses = new Map<string, SkillSyncStatusRecord>();
+  const skillSyncRuns: SkillSyncRunRecord[] = [];
+  const skillBundles = new Map<string, SkillBundleRecord>();
+  const skillCatalog = new Map<string, SkillCatalogItem>();
+  const installedSkills = new Map<string, SkillInstalledRecord>();
+  const knownSkillSources = new Set<string>(defaultSkillSyncConfig({}).sourceFilters);
+  const runSkillSyncSchedulerTick = async (): Promise<void> => {
+    await tickSkillSyncScheduler({
+      now,
+      configs: skillSyncConfigs,
+      statuses: skillSyncStatuses,
+      runs: skillSyncRuns,
+      catalog: skillCatalog,
+      knownSources: knownSkillSources
+    });
+  };
 
   return {
     async handle(input: unknown, state: ConnectionState, options: GatewayHandleOptions = {}): Promise<GatewayHandleResult> {
@@ -341,7 +472,14 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         blobStore,
         enterpriseStorageRoot,
         now,
-        options
+        options,
+        skillSyncConfigs,
+        skillSyncStatuses,
+        skillSyncRuns,
+        skillBundles,
+        skillCatalog,
+        installedSkills,
+        knownSkillSources
       );
 
       if (idempotencyKey && result.response.ok) {
@@ -353,6 +491,7 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
 
       return result;
     },
+    runSkillSyncSchedulerTick,
     auth: {
       login: async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
         return await authRuntime.login(body);
@@ -464,6 +603,15 @@ export async function startGatewayServer(options: GatewayServerOptions = {}): Pr
         }));
   const httpConnections = new Map<string, ConnectionState>();
   const sockets = new Set<any>();
+  const skillSyncSchedulerTimer =
+    typeof router.runSkillSyncSchedulerTick === "function"
+      ? setInterval(() => {
+          void router.runSkillSyncSchedulerTick?.();
+        }, 60_000)
+      : undefined;
+  if (router.runSkillSyncSchedulerTick) {
+    void router.runSkillSyncSchedulerTick();
+  }
 
   const server = createServer(async (req: any, res: any) => {
     try {
@@ -494,6 +642,9 @@ export async function startGatewayServer(options: GatewayServerOptions = {}): Pr
     host,
     port: actualPort,
     close: async () => {
+      if (skillSyncSchedulerTimer) {
+        clearInterval(skillSyncSchedulerTimer);
+      }
       for (const socket of sockets) {
         socket.destroy();
       }
@@ -526,7 +677,14 @@ async function route(
   blobStore: BlobStore | undefined,
   enterpriseStorageRoot: string,
   now: () => Date,
-  options: GatewayHandleOptions
+  options: GatewayHandleOptions,
+  skillSyncConfigs: Map<string, SkillSyncConfigRecord>,
+  skillSyncStatuses: Map<string, SkillSyncStatusRecord>,
+  skillSyncRuns: SkillSyncRunRecord[],
+  skillBundles: Map<string, SkillBundleRecord>,
+  skillCatalog: Map<string, SkillCatalogItem>,
+  installedSkills: Map<string, SkillInstalledRecord>,
+  knownSkillSources: Set<string>
 ): Promise<GatewayHandleResult> {
   switch (req.method) {
     case "connect": {
@@ -667,7 +825,9 @@ async function route(
         return invalidParams(req.id, "sessions.history 的 beforeId 必须是正整数");
       }
 
-      const items = await transcriptRepo.list(sessionId, scope, limit, beforeId);
+      const items = (await transcriptRepo.list(sessionId, scope, limit, beforeId)).map((item) =>
+        normalizeTranscriptItemForClient(item)
+      );
       return {
         response: makeSuccessRes(req.id, { items }),
         events: []
@@ -1934,6 +2094,479 @@ async function route(
       };
     }
 
+    case "skills.syncConfig.get": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
+      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+        scopeRef: scopeRef.value,
+        defaults,
+        configs: skillSyncConfigs
+      });
+      const scopedConfig = skillSyncConfigs.get(scopeRef.value.key);
+      const status = reconcileSkillSyncStatusRecord({
+        scopeRef: scopeRef.value,
+        effectiveConfig,
+        statuses: skillSyncStatuses,
+        now,
+        resetNextRun: false
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          scope: scopeRef.value.scope,
+          target: toSkillSyncTarget(scopeRef.value),
+          config: scopedConfig?.config ?? {},
+          effectiveConfig,
+          status: toSkillSyncStatusPayload(status),
+          recentRuns: listSkillSyncRuns(skillSyncRuns, scopeRef.value, 20)
+        }),
+        events: []
+      };
+    }
+
+    case "skills.syncConfig.upsert": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+
+      const rawPatch = isObjectRecord(req.params.config) ? req.params.config : req.params;
+      const patch = normalizeSkillSyncPatch(rawPatch);
+      if (!hasSkillSyncPatch(patch)) {
+        return invalidParams(req.id, "skills.syncConfig.upsert 需要 config 字段");
+      }
+
+      const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
+      const parentEffective = resolveParentSkillSyncConfig({
+        scopeRef: scopeRef.value,
+        defaults,
+        configs: skillSyncConfigs
+      });
+      if (parentEffective) {
+        const boundary = validateSecurityBoundary({
+          parent: parentEffective,
+          childPatch: patch
+        });
+        if (!boundary.ok) {
+          return {
+            response: makeErrorRes(req.id, "FORBIDDEN", boundary.message),
+            events: []
+          };
+        }
+      }
+
+      const existing = skillSyncConfigs.get(scopeRef.value.key);
+      const merged: SkillSyncConfigPatch = {
+        ...(existing?.config ?? {}),
+        ...patch
+      };
+      const updatedAt = now().toISOString();
+      const updatedBy = requireString(req.params, "actor") ?? state.principal?.subject ?? "system";
+      const nextRecord: SkillSyncConfigRecord = {
+        scope: scopeRef.value.scope,
+        tenantId: scopeRef.value.tenantId,
+        workspaceId: scopeRef.value.workspaceId,
+        userId: scopeRef.value.userId,
+        config: merged,
+        updatedAt,
+        updatedBy
+      };
+      skillSyncConfigs.set(scopeRef.value.key, nextRecord);
+      for (const source of merged.sourceFilters ?? []) {
+        knownSkillSources.add(source);
+      }
+
+      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+        scopeRef: scopeRef.value,
+        defaults,
+        configs: skillSyncConfigs
+      });
+      const status = reconcileSkillSyncStatusRecord({
+        scopeRef: scopeRef.value,
+        effectiveConfig,
+        statuses: skillSyncStatuses,
+        now,
+        resetNextRun: true
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          scope: scopeRef.value.scope,
+          target: toSkillSyncTarget(scopeRef.value),
+          config: nextRecord.config,
+          updatedAt,
+          updatedBy,
+          effectiveConfig,
+          status: toSkillSyncStatusPayload(status)
+        }),
+        events: []
+      };
+    }
+
+    case "skills.syncStatus.get": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
+      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+        scopeRef: scopeRef.value,
+        defaults,
+        configs: skillSyncConfigs
+      });
+      const status = reconcileSkillSyncStatusRecord({
+        scopeRef: scopeRef.value,
+        effectiveConfig,
+        statuses: skillSyncStatuses,
+        now,
+        resetNextRun: false
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          scope: scopeRef.value.scope,
+          target: toSkillSyncTarget(scopeRef.value),
+          effectiveConfig,
+          status: toSkillSyncStatusPayload(status),
+          recentRuns: listSkillSyncRuns(skillSyncRuns, scopeRef.value, 50)
+        }),
+        events: []
+      };
+    }
+
+    case "skills.sync.runNow": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
+      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+        scopeRef: scopeRef.value,
+        defaults,
+        configs: skillSyncConfigs
+      });
+      const run = executeSkillSyncRun({
+        scopeRef: scopeRef.value,
+        effectiveConfig,
+        now,
+        statuses: skillSyncStatuses,
+        runs: skillSyncRuns,
+        catalog: skillCatalog,
+        knownSources: knownSkillSources,
+        preserveNextRunAt: true,
+        trigger: "manual",
+        offlineHint: req.params.offline === true || toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false)
+      });
+      return {
+        response: makeSuccessRes(req.id, {
+          scope: scopeRef.value.scope,
+          target: toSkillSyncTarget(scopeRef.value),
+          run,
+          status: toSkillSyncStatusPayload(skillSyncStatuses.get(scopeRef.value.key))
+        }),
+        events: []
+      };
+    }
+
+    case "skills.bundle.import": {
+      const bundleAccess = authorizeSkillBundleAccess(state.principal);
+      if (!bundleAccess.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", bundleAccess.message),
+          events: []
+        };
+      }
+      if (!isObjectRecord(req.params.bundle)) {
+        return invalidParams(req.id, "skills.bundle.import 需要 bundle 对象");
+      }
+      try {
+        const imported = importSkillBundle({
+          bundle: req.params.bundle,
+          actor: requireString(req.params, "actor") ?? state.principal?.subject ?? "system",
+          now,
+          bundles: skillBundles,
+          catalog: skillCatalog,
+          knownSources: knownSkillSources
+        });
+        return {
+          response: makeSuccessRes(req.id, {
+            bundle: toSkillBundlePayload(imported.bundle),
+            importedCount: imported.importedCount,
+            catalogSize: skillCatalog.size
+          }),
+          events: []
+        };
+      } catch (error) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", toErrorMessage(error)),
+          events: []
+        };
+      }
+    }
+
+    case "skills.bundle.export": {
+      const bundleAccess = authorizeSkillBundleAccess(state.principal);
+      if (!bundleAccess.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", bundleAccess.message),
+          events: []
+        };
+      }
+      try {
+        const bundle = exportSkillBundle({
+          bundleId: requireString(req.params, "bundleId"),
+          name: requireString(req.params, "name"),
+          actor: requireString(req.params, "actor") ?? state.principal?.subject ?? "system",
+          skillIds: toStringList(req.params.skillIds),
+          now,
+          bundles: skillBundles,
+          catalog: skillCatalog
+        });
+        return {
+          response: makeSuccessRes(req.id, {
+            bundle: toSkillBundlePayload(bundle)
+          }),
+          events: []
+        };
+      } catch (error) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", toErrorMessage(error)),
+          events: []
+        };
+      }
+    }
+
+    case "skills.bundle.list": {
+      const bundleAccess = authorizeSkillBundleAccess(state.principal);
+      if (!bundleAccess.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", bundleAccess.message),
+          events: []
+        };
+      }
+      const items = [...skillBundles.values()]
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .map((item) => ({
+          bundleId: item.bundleId,
+          name: item.name,
+          checksum: item.checksum,
+          signature: item.signature,
+          createdAt: item.createdAt,
+          createdBy: item.createdBy,
+          itemCount: item.items.length
+        }));
+      return {
+        response: makeSuccessRes(req.id, {
+          items
+        }),
+        events: []
+      };
+    }
+
+    case "skills.installed.list": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const items = listInstalledSkills(installedSkills, scopeRef.value).map((item) => toInstalledSkillPayload(item));
+      return {
+        response: makeSuccessRes(req.id, {
+          items
+        }),
+        events: []
+      };
+    }
+
+    case "skills.install": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const skillId = requireString(req.params, "skillId");
+      if (!skillId) {
+        return invalidParams(req.id, "skills.install 需要 skillId");
+      }
+      const installedBy = requireString(req.params, "actor") ?? state.principal?.subject ?? "system";
+      const key = buildInstalledSkillKey(scopeRef.value, skillId);
+      const nowIso = now().toISOString();
+      const catalogItem = skillCatalog.get(skillId);
+      const existing = installedSkills.get(key);
+      const record: SkillInstalledRecord = {
+        skillId,
+        tenantId: scopeRef.value.tenantId,
+        workspaceId: scopeRef.value.workspaceId,
+        userId: scopeRef.value.userId,
+        installedAt: existing?.installedAt ?? nowIso,
+        installedBy: existing?.installedBy ?? installedBy,
+        source: catalogItem?.source ?? existing?.source,
+        commit: catalogItem?.commit ?? existing?.commit,
+        path: catalogItem?.path ?? existing?.path,
+        checksum: catalogItem?.checksum ?? existing?.checksum,
+        license: catalogItem?.license ?? existing?.license,
+        tags: catalogItem?.tags ?? existing?.tags ?? []
+      };
+      installedSkills.set(key, record);
+      return {
+        response: makeSuccessRes(req.id, {
+          item: toInstalledSkillPayload(record),
+          alreadyInstalled: Boolean(existing)
+        }),
+        events: []
+      };
+    }
+
+    case "skills.uninstall": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const skillId = requireString(req.params, "skillId");
+      if (!skillId) {
+        return invalidParams(req.id, "skills.uninstall 需要 skillId");
+      }
+      const key = buildInstalledSkillKey(scopeRef.value, skillId);
+      const removed = installedSkills.delete(key);
+      return {
+        response: makeSuccessRes(req.id, {
+          skillId,
+          removed
+        }),
+        events: []
+      };
+    }
+
+    case "skills.catalog.list": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
+      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+        scopeRef: scopeRef.value,
+        defaults,
+        configs: skillSyncConfigs
+      });
+      const items = applySkillCatalogFilters([...skillCatalog.values()], effectiveConfig).map((item) => ({
+        skillId: item.skillId,
+        source: item.source,
+        commit: item.commit,
+        path: item.path,
+        checksum: item.checksum,
+        license: item.license,
+        tags: item.tags,
+        availability: item.availability
+      }));
+      return {
+        response: makeSuccessRes(req.id, {
+          items,
+          effectiveFilters: {
+            sourceFilters: effectiveConfig.sourceFilters,
+            licenseFilters: effectiveConfig.licenseFilters,
+            tagFilters: effectiveConfig.tagFilters
+          },
+          availability: resolveCatalogAvailability(items, effectiveConfig.syncMode)
+        }),
+        events: []
+      };
+    }
+
+    case "skills.catalog.refresh": {
+      const scopeRef = resolveSkillSyncScopeRef(req.params, state);
+      if (!scopeRef.ok) {
+        return invalidParams(req.id, scopeRef.message);
+      }
+      const permission = authorizeSkillSyncScopeAccess(req.method, scopeRef.value, state.principal);
+      if (!permission.ok) {
+        return {
+          response: makeErrorRes(req.id, "FORBIDDEN", permission.message),
+          events: []
+        };
+      }
+      const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
+      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+        scopeRef: scopeRef.value,
+        defaults,
+        configs: skillSyncConfigs
+      });
+      const run = executeSkillSyncRun({
+        scopeRef: scopeRef.value,
+        effectiveConfig,
+        now,
+        statuses: skillSyncStatuses,
+        runs: skillSyncRuns,
+        catalog: skillCatalog,
+        knownSources: knownSkillSources,
+        preserveNextRunAt: true,
+        trigger: "manual",
+        offlineHint: req.params.offline === true || toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false)
+      });
+      const items = applySkillCatalogFilters([...skillCatalog.values()], effectiveConfig);
+      return {
+        response: makeSuccessRes(req.id, {
+          run,
+          itemCount: items.length,
+          availability: resolveCatalogAvailability(items, effectiveConfig.syncMode)
+        }),
+        events: []
+      };
+    }
+
     default: {
       return {
         response: makeErrorRes(req.id, "METHOD_NOT_FOUND", `未知方法: ${req.method}`),
@@ -2701,6 +3334,677 @@ function resolvePrincipalUserId(principal: Principal | undefined): string {
   return principal.subject;
 }
 
+function resolveSkillSyncScopeRef(
+  params: Record<string, unknown>,
+  state: ConnectionState
+): { ok: true; value: SkillSyncScopeRef } | { ok: false; message: string } {
+  const rawScope = requireString(params, "scope");
+  const scope: SkillSyncScope = rawScope ? (isSkillSyncScope(rawScope) ? rawScope : "user") : "user";
+  if (rawScope && !isSkillSyncScope(rawScope)) {
+    return {
+      ok: false,
+      message: "skills scope 必须是 tenant/workspace/user"
+    };
+  }
+
+  const tenantId = requireString(params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
+  const workspaceId = requireString(params, "workspaceId") ?? state.principal?.workspaceIds[0] ?? "w_default";
+  const userId = requireString(params, "userId") ?? resolvePrincipalUserId(state.principal);
+  return {
+    ok: true,
+    value: {
+      scope,
+      tenantId,
+      workspaceId,
+      userId,
+      key: buildSkillSyncScopeKey(scope, tenantId, workspaceId, userId)
+    }
+  };
+}
+
+function buildSkillSyncScopeKey(
+  scope: SkillSyncScope,
+  tenantId: string,
+  workspaceId: string,
+  userId: string
+): string {
+  if (scope === "tenant") {
+    return `skill_sync:tenant:${tenantId}`;
+  }
+  if (scope === "workspace") {
+    return `skill_sync:workspace:${tenantId}:${workspaceId}`;
+  }
+  return `skill_sync:user:${tenantId}:${workspaceId}:${userId}`;
+}
+
+function buildInstalledSkillKey(scopeRef: SkillSyncScopeRef, skillId: string): string {
+  return `installed:${scopeRef.tenantId}:${scopeRef.workspaceId}:${scopeRef.userId}:${skillId}`;
+}
+
+function listInstalledSkills(
+  installedSkills: Map<string, SkillInstalledRecord>,
+  scopeRef: SkillSyncScopeRef
+): SkillInstalledRecord[] {
+  return [...installedSkills.values()]
+    .filter(
+      (item) =>
+        item.tenantId === scopeRef.tenantId &&
+        item.workspaceId === scopeRef.workspaceId &&
+        item.userId === scopeRef.userId
+    )
+    .sort((left, right) => right.installedAt.localeCompare(left.installedAt));
+}
+
+function toInstalledSkillPayload(item: SkillInstalledRecord): Record<string, unknown> {
+  return {
+    skillId: item.skillId,
+    tenantId: item.tenantId,
+    workspaceId: item.workspaceId,
+    userId: item.userId,
+    installedAt: item.installedAt,
+    installedBy: item.installedBy,
+    source: item.source,
+    commit: item.commit,
+    path: item.path,
+    checksum: item.checksum,
+    license: item.license,
+    tags: item.tags
+  };
+}
+
+function buildSkillSyncDefaults(params: Record<string, unknown>, knownSources: Set<string>): SkillSyncConfig {
+  return defaultSkillSyncConfig({
+    timezone: requireString(params, "timezone") ?? defaultTimezone(),
+    registeredSources: [...knownSources.values()]
+  });
+}
+
+function toSkillSyncTarget(scopeRef: SkillSyncScopeRef): Record<string, unknown> {
+  return {
+    tenantId: scopeRef.tenantId,
+    ...(scopeRef.scope !== "tenant" ? { workspaceId: scopeRef.workspaceId } : {}),
+    ...(scopeRef.scope === "user" ? { userId: scopeRef.userId } : {})
+  };
+}
+
+function hasSkillSyncPatch(patch: SkillSyncConfigPatch): boolean {
+  return Object.keys(patch).length > 0;
+}
+
+function resolveEffectiveSkillSyncConfigForScope(input: {
+  scopeRef: SkillSyncScopeRef;
+  defaults: SkillSyncConfig;
+  configs: Map<string, SkillSyncConfigRecord>;
+}): SkillSyncConfig {
+  const layers = readSkillSyncLayersForScope(input.scopeRef, input.configs);
+  return resolveEffectiveSkillSyncConfig({
+    defaults: input.defaults,
+    layers
+  });
+}
+
+function resolveParentSkillSyncConfig(input: {
+  scopeRef: SkillSyncScopeRef;
+  defaults: SkillSyncConfig;
+  configs: Map<string, SkillSyncConfigRecord>;
+}): SkillSyncConfig | undefined {
+  if (input.scopeRef.scope === "tenant") {
+    return undefined;
+  }
+  if (input.scopeRef.scope === "workspace") {
+    const tenantKey = buildSkillSyncScopeKey("tenant", input.scopeRef.tenantId, input.scopeRef.workspaceId, input.scopeRef.userId);
+    const tenantConfig = input.configs.get(tenantKey)?.config;
+    return resolveEffectiveSkillSyncConfig({
+      defaults: input.defaults,
+      layers: {
+        tenant: tenantConfig
+      }
+    });
+  }
+  const tenantKey = buildSkillSyncScopeKey("tenant", input.scopeRef.tenantId, input.scopeRef.workspaceId, input.scopeRef.userId);
+  const workspaceKey = buildSkillSyncScopeKey(
+    "workspace",
+    input.scopeRef.tenantId,
+    input.scopeRef.workspaceId,
+    input.scopeRef.userId
+  );
+  const tenantConfig = input.configs.get(tenantKey)?.config;
+  const workspaceConfig = input.configs.get(workspaceKey)?.config;
+  return resolveEffectiveSkillSyncConfig({
+    defaults: input.defaults,
+    layers: {
+      tenant: tenantConfig,
+      workspace: workspaceConfig
+    }
+  });
+}
+
+function readSkillSyncLayersForScope(
+  scopeRef: SkillSyncScopeRef,
+  configs: Map<string, SkillSyncConfigRecord>
+): {
+  tenant?: SkillSyncConfigPatch;
+  workspace?: SkillSyncConfigPatch;
+  user?: SkillSyncConfigPatch;
+} {
+  const tenantKey = buildSkillSyncScopeKey("tenant", scopeRef.tenantId, scopeRef.workspaceId, scopeRef.userId);
+  const workspaceKey = buildSkillSyncScopeKey("workspace", scopeRef.tenantId, scopeRef.workspaceId, scopeRef.userId);
+  const userKey = buildSkillSyncScopeKey("user", scopeRef.tenantId, scopeRef.workspaceId, scopeRef.userId);
+  const tenant = configs.get(tenantKey)?.config;
+  const workspace = configs.get(workspaceKey)?.config;
+  const user = configs.get(userKey)?.config;
+
+  if (scopeRef.scope === "tenant") {
+    return {
+      ...(tenant ? { tenant } : {})
+    };
+  }
+  if (scopeRef.scope === "workspace") {
+    return {
+      ...(tenant ? { tenant } : {}),
+      ...(workspace ? { workspace } : {})
+    };
+  }
+  return {
+    ...(tenant ? { tenant } : {}),
+    ...(workspace ? { workspace } : {}),
+    ...(user ? { user } : {})
+  };
+}
+
+function authorizeSkillSyncScopeAccess(
+  method: MethodName,
+  scopeRef: SkillSyncScopeRef,
+  principal?: Principal
+): { ok: true } | { ok: false; message: string } {
+  if (!principal) {
+    return { ok: true };
+  }
+  const isTenantAdmin = principal.roles.includes("tenant_admin");
+  if (isTenantAdmin) {
+    return { ok: true };
+  }
+  if (method.startsWith("skills.bundle.")) {
+    return {
+      ok: false,
+      message: "仅 tenant_admin 可管理 bundle"
+    };
+  }
+  const isWorkspaceAdmin = principal.roles.includes("workspace_admin");
+  const principalUserId = resolvePrincipalUserId(principal);
+  if (scopeRef.scope === "tenant") {
+    return {
+      ok: false,
+      message: "仅 tenant_admin 可管理 tenant 级 skill sync"
+    };
+  }
+  if (scopeRef.scope === "workspace") {
+    if (isWorkspaceAdmin) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      message: "member 仅可管理 user 级 skill sync"
+    };
+  }
+  if (!isWorkspaceAdmin && scopeRef.userId !== principalUserId) {
+    return {
+      ok: false,
+      message: "member 仅可管理自己的 user 级 skill sync"
+    };
+  }
+  return { ok: true };
+}
+
+function authorizeSkillBundleAccess(principal?: Principal): { ok: true } | { ok: false; message: string } {
+  if (!principal) {
+    return { ok: true };
+  }
+  if (principal.roles.includes("tenant_admin")) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    message: "仅 tenant_admin 可访问 skills.bundle.*"
+  };
+}
+
+function reconcileSkillSyncStatusRecord(input: {
+  scopeRef: SkillSyncScopeRef;
+  effectiveConfig: SkillSyncConfig;
+  statuses: Map<string, SkillSyncStatusRecord>;
+  now: () => Date;
+  resetNextRun: boolean;
+}): SkillSyncStatusRecord {
+  const existing = input.statuses.get(input.scopeRef.key);
+  const next: SkillSyncStatusRecord = {
+    scope: input.scopeRef.scope,
+    tenantId: input.scopeRef.tenantId,
+    workspaceId: input.scopeRef.workspaceId,
+    userId: input.scopeRef.userId,
+    ...(existing?.lastRunAt ? { lastRunAt: existing.lastRunAt } : {}),
+    ...(existing?.lastOutcome ? { lastOutcome: existing.lastOutcome } : {}),
+    ...(existing?.lastError ? { lastError: existing.lastError } : {}),
+    ...(existing?.nextRunAt ? { nextRunAt: existing.nextRunAt } : {})
+  };
+  if (!input.effectiveConfig.autoSyncEnabled || input.effectiveConfig.manualOnly) {
+    delete next.nextRunAt;
+  } else if (input.resetNextRun || !next.nextRunAt) {
+    next.nextRunAt = computeNextDailyRunAt({
+      now: input.now(),
+      syncTime: input.effectiveConfig.syncTime,
+      timezone: input.effectiveConfig.timezone
+    });
+  }
+  input.statuses.set(input.scopeRef.key, next);
+  return next;
+}
+
+function toSkillSyncStatusPayload(status: SkillSyncStatusRecord | undefined): Record<string, unknown> {
+  if (!status) {
+    return {};
+  }
+  return {
+    ...(status.lastRunAt ? { lastRunAt: status.lastRunAt } : {}),
+    ...(status.nextRunAt ? { nextRunAt: status.nextRunAt } : {}),
+    ...(status.lastOutcome ? { lastOutcome: status.lastOutcome } : {}),
+    ...(status.lastError ? { lastError: status.lastError } : {})
+  };
+}
+
+function listSkillSyncRuns(runs: SkillSyncRunRecord[], scopeRef: SkillSyncScopeRef, limit: number): SkillSyncRunRecord[] {
+  return runs
+    .filter(
+      (item) =>
+        item.scope === scopeRef.scope &&
+        item.tenantId === scopeRef.tenantId &&
+        item.workspaceId === scopeRef.workspaceId &&
+        item.userId === scopeRef.userId
+    )
+    .slice(-limit)
+    .reverse();
+}
+
+function executeSkillSyncRun(input: {
+  scopeRef: SkillSyncScopeRef;
+  effectiveConfig: SkillSyncConfig;
+  now: () => Date;
+  statuses: Map<string, SkillSyncStatusRecord>;
+  runs: SkillSyncRunRecord[];
+  catalog: Map<string, SkillCatalogItem>;
+  knownSources: Set<string>;
+  preserveNextRunAt: boolean;
+  trigger: "scheduled" | "manual";
+  offlineHint: boolean;
+}): SkillSyncRunRecord {
+  const startedAt = input.now().toISOString();
+  let status: SkillSyncRunStatus = "success";
+  let fetchedSources = 0;
+  let importedSkills = 0;
+  let error: string | undefined;
+
+  if (input.trigger === "scheduled" && input.effectiveConfig.manualOnly) {
+    status = "skipped_manual_only";
+  } else if (input.effectiveConfig.syncMode === "bundle_only") {
+    status = "skipped_bundle_only";
+  } else if (input.offlineHint) {
+    status = "skipped_offline";
+  } else {
+    try {
+      const sources =
+        input.effectiveConfig.sourceFilters.length > 0
+          ? input.effectiveConfig.sourceFilters
+          : [...input.knownSources.values()];
+      fetchedSources = sources.length;
+      for (const source of sources) {
+        input.knownSources.add(source);
+        const skillId = `${source.replace(/[/:]/g, "_")}.starter`;
+        const tags = input.effectiveConfig.tagFilters.length > 0 ? [...input.effectiveConfig.tagFilters] : ["starter"];
+        const license: SkillSyncLicense = input.effectiveConfig.licenseFilters.includes("review") ? "review" : "allow";
+        const nextItem: SkillCatalogItem = {
+          skillId,
+          source,
+          commit: `sync_${Date.now().toString(36)}`,
+          path: "SKILL.md",
+          checksum: sha256(stableStringify({ skillId, source, tags, license })),
+          license,
+          tags,
+          availability: "online"
+        };
+        input.catalog.set(skillId, nextItem);
+        importedSkills += 1;
+      }
+    } catch (runError) {
+      status = "failed";
+      error = toErrorMessage(runError);
+    }
+  }
+
+  const finishedAt = input.now().toISOString();
+  const run: SkillSyncRunRecord = {
+    runId: `skill_sync_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`,
+    scope: input.scopeRef.scope,
+    tenantId: input.scopeRef.tenantId,
+    workspaceId: input.scopeRef.workspaceId,
+    userId: input.scopeRef.userId,
+    startedAt,
+    finishedAt,
+    status,
+    trigger: input.trigger,
+    fetchedSources,
+    importedSkills,
+    ...(error ? { error } : {})
+  };
+  input.runs.push(run);
+  if (input.runs.length > 600) {
+    input.runs.splice(0, input.runs.length - 600);
+  }
+
+  const current =
+    input.statuses.get(input.scopeRef.key) ??
+    ({
+      scope: input.scopeRef.scope,
+      tenantId: input.scopeRef.tenantId,
+      workspaceId: input.scopeRef.workspaceId,
+      userId: input.scopeRef.userId
+    } as SkillSyncStatusRecord);
+  current.lastRunAt = finishedAt;
+  current.lastOutcome = status;
+  current.lastError = error;
+  if (!input.preserveNextRunAt) {
+    if (input.effectiveConfig.autoSyncEnabled && !input.effectiveConfig.manualOnly) {
+      current.nextRunAt = computeNextDailyRunAt({
+        now: input.now(),
+        syncTime: input.effectiveConfig.syncTime,
+        timezone: input.effectiveConfig.timezone
+      });
+    } else {
+      delete current.nextRunAt;
+    }
+  }
+  input.statuses.set(input.scopeRef.key, current);
+  return run;
+}
+
+async function tickSkillSyncScheduler(input: {
+  now: () => Date;
+  configs: Map<string, SkillSyncConfigRecord>;
+  statuses: Map<string, SkillSyncStatusRecord>;
+  runs: SkillSyncRunRecord[];
+  catalog: Map<string, SkillCatalogItem>;
+  knownSources: Set<string>;
+}): Promise<void> {
+  const refs = [...input.configs.values()].map<SkillSyncScopeRef>((item) => ({
+    scope: item.scope,
+    tenantId: item.tenantId,
+    workspaceId: item.workspaceId,
+    userId: item.userId,
+    key: buildSkillSyncScopeKey(item.scope, item.tenantId, item.workspaceId, item.userId)
+  }));
+  for (const scopeRef of refs) {
+    const defaults = defaultSkillSyncConfig({
+      registeredSources: [...input.knownSources.values()]
+    });
+    const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+      scopeRef,
+      defaults,
+      configs: input.configs
+    });
+    const status = reconcileSkillSyncStatusRecord({
+      scopeRef,
+      effectiveConfig,
+      statuses: input.statuses,
+      now: input.now,
+      resetNextRun: false
+    });
+    if (!status.nextRunAt) {
+      continue;
+    }
+    const dueAt = Date.parse(status.nextRunAt);
+    if (!Number.isFinite(dueAt) || dueAt > input.now().getTime()) {
+      continue;
+    }
+    executeSkillSyncRun({
+      scopeRef,
+      effectiveConfig,
+      now: input.now,
+      statuses: input.statuses,
+      runs: input.runs,
+      catalog: input.catalog,
+      knownSources: input.knownSources,
+      preserveNextRunAt: false,
+      trigger: "scheduled",
+      offlineHint: toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false)
+    });
+  }
+}
+
+function toStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const list: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const trimmed = item.trim();
+    if (!trimmed) {
+      continue;
+    }
+    list.push(trimmed);
+  }
+  return list;
+}
+
+function applySkillCatalogFilters(items: SkillCatalogItem[], effectiveConfig: SkillSyncConfig): SkillCatalogItem[] {
+  const sourceFilterSet = new Set(effectiveConfig.sourceFilters);
+  const licenseFilterSet = new Set<SkillSyncLicense>(effectiveConfig.licenseFilters);
+  const tagFilterSet = new Set(effectiveConfig.tagFilters);
+  return items.filter((item) => {
+    if (sourceFilterSet.size > 0) {
+      if (!item.source || !sourceFilterSet.has(item.source)) {
+        return false;
+      }
+    }
+    if (licenseFilterSet.size > 0) {
+      if (!item.license || !licenseFilterSet.has(item.license)) {
+        return false;
+      }
+    }
+    if (tagFilterSet.size > 0) {
+      if (!item.tags.some((tag) => tagFilterSet.has(tag))) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function resolveCatalogAvailability(
+  items: Array<{ availability?: SkillCatalogAvailability }>,
+  syncMode: SkillSyncMode
+): SkillCatalogAvailability {
+  if (items.some((item) => item.availability === "online")) {
+    return "online";
+  }
+  if (items.length > 0 || syncMode === "bundle_only") {
+    return "cached";
+  }
+  return "unavailable";
+}
+
+function importSkillBundle(input: {
+  bundle: Record<string, unknown>;
+  actor: string;
+  now: () => Date;
+  bundles: Map<string, SkillBundleRecord>;
+  catalog: Map<string, SkillCatalogItem>;
+  knownSources: Set<string>;
+}): { bundle: SkillBundleRecord; importedCount: number } {
+  const items = normalizeSkillBundleItems(input.bundle.items);
+  const checksum = computeBundleChecksum(items);
+  const bundleChecksum = requireString(input.bundle, "checksum");
+  if (bundleChecksum && bundleChecksum !== checksum) {
+    throw new Error("bundle checksum 校验失败");
+  }
+  const signature = requireString(input.bundle, "signature");
+  if (signature && signature !== buildBundleSignature(checksum)) {
+    throw new Error("bundle signature 校验失败");
+  }
+  const bundleId = requireString(input.bundle, "bundleId") ?? `bundle_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+  const name = requireString(input.bundle, "name") ?? bundleId;
+  const createdAt = requireString(input.bundle, "createdAt") ?? input.now().toISOString();
+  const nextBundle: SkillBundleRecord = {
+    bundleId,
+    name,
+    checksum,
+    ...(signature ? { signature } : {}),
+    createdAt,
+    createdBy: input.actor,
+    items
+  };
+  input.bundles.set(bundleId, nextBundle);
+
+  for (const item of items) {
+    if (item.source) {
+      input.knownSources.add(item.source);
+    }
+    input.catalog.set(item.skillId, {
+      ...item,
+      availability: "cached"
+    });
+  }
+
+  return {
+    bundle: nextBundle,
+    importedCount: items.length
+  };
+}
+
+function exportSkillBundle(input: {
+  bundleId?: string;
+  name?: string;
+  actor: string;
+  skillIds: string[];
+  now: () => Date;
+  bundles: Map<string, SkillBundleRecord>;
+  catalog: Map<string, SkillCatalogItem>;
+}): SkillBundleRecord {
+  if (input.bundleId) {
+    const existing = input.bundles.get(input.bundleId);
+    if (!existing) {
+      throw new Error(`未知 bundle: ${input.bundleId}`);
+    }
+    return existing;
+  }
+
+  const selected = input.skillIds.length > 0
+    ? input.skillIds.map((skillId) => input.catalog.get(skillId)).filter((item): item is SkillCatalogItem => Boolean(item))
+    : [...input.catalog.values()];
+  const items: SkillBundleItemRecord[] = selected.map((item) => ({
+    skillId: item.skillId,
+    ...(item.source ? { source: item.source } : {}),
+    ...(item.commit ? { commit: item.commit } : {}),
+    ...(item.path ? { path: item.path } : {}),
+    ...(item.checksum ? { checksum: item.checksum } : {}),
+    ...(item.license ? { license: item.license } : {}),
+    tags: [...item.tags]
+  }));
+  const checksum = computeBundleChecksum(items);
+  const bundleId = `bundle_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+  const bundle: SkillBundleRecord = {
+    bundleId,
+    name: input.name?.trim() || `bundle-${new Date().toISOString().slice(0, 10)}`,
+    checksum,
+    signature: buildBundleSignature(checksum),
+    createdAt: input.now().toISOString(),
+    createdBy: input.actor,
+    items
+  };
+  input.bundles.set(bundle.bundleId, bundle);
+  return bundle;
+}
+
+function toSkillBundlePayload(bundle: SkillBundleRecord): Record<string, unknown> {
+  return {
+    bundleId: bundle.bundleId,
+    name: bundle.name,
+    checksum: bundle.checksum,
+    ...(bundle.signature ? { signature: bundle.signature } : {}),
+    createdAt: bundle.createdAt,
+    createdBy: bundle.createdBy,
+    items: bundle.items.map((item) => ({
+      skillId: item.skillId,
+      source: item.source,
+      commit: item.commit,
+      path: item.path,
+      checksum: item.checksum,
+      license: item.license,
+      tags: item.tags
+    }))
+  };
+}
+
+function normalizeSkillBundleItems(value: unknown): SkillBundleItemRecord[] {
+  if (!Array.isArray(value)) {
+    throw new Error("bundle.items 必须是数组");
+  }
+  const out: SkillBundleItemRecord[] = [];
+  for (const item of value) {
+    if (!isObjectRecord(item)) {
+      continue;
+    }
+    const skillId = requireString(item, "skillId");
+    if (!skillId) {
+      continue;
+    }
+    const rawLicense = requireString(item, "license");
+    const license = rawLicense && (rawLicense === "allow" || rawLicense === "review" || rawLicense === "deny") ? rawLicense : undefined;
+    out.push({
+      skillId,
+      ...(requireString(item, "source") ? { source: requireString(item, "source") } : {}),
+      ...(requireString(item, "commit") ? { commit: requireString(item, "commit") } : {}),
+      ...(requireString(item, "path") ? { path: requireString(item, "path") } : {}),
+      ...(requireString(item, "checksum") ? { checksum: requireString(item, "checksum") } : {}),
+      ...(license ? { license } : {}),
+      tags: toStringList(item.tags)
+    });
+  }
+  if (out.length === 0) {
+    throw new Error("bundle.items 不能为空");
+  }
+  return out;
+}
+
+function computeBundleChecksum(items: SkillBundleItemRecord[]): string {
+  return sha256(stableStringify(items));
+}
+
+function buildBundleSignature(checksum: string): string {
+  return `sig:${checksum}`;
+}
+
+function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function toBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true" || normalized === "yes") {
+      return true;
+    }
+    if (normalized === "0" || normalized === "false" || normalized === "no") {
+      return false;
+    }
+  }
+  return fallback;
+}
+
 function withSessionInput(session: SessionRecord, input: string): SessionRecord {
   const nextTitle =
     session.title === DEFAULT_SESSION_TITLE ? normalizeSessionTitle(summarizeInputForTitle(input)) : session.title;
@@ -2943,6 +4247,27 @@ function asString(value: unknown): string | undefined {
     return undefined;
   }
   return value;
+}
+
+function normalizeTranscriptItemForClient<T extends { event: string; payload: Record<string, unknown> }>(item: T): T {
+  if (item.event !== "agent.delta") {
+    return item;
+  }
+  const delta = asString(item.payload.delta);
+  if (delta !== undefined) {
+    return item;
+  }
+  const legacyText = asString(item.payload.text);
+  if (legacyText === undefined) {
+    return item;
+  }
+  return {
+    ...item,
+    payload: {
+      ...item.payload,
+      delta: legacyText
+    }
+  };
 }
 
 function asPolicyDecision(value: unknown): PolicyDecision | undefined {

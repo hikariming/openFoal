@@ -15,6 +15,7 @@ const zhCN = {
     targets: "执行目标",
     budget: "预算",
     context: "上下文",
+    skillSync: "技能同步",
     infra: "基础设施"
   },
   common: {
@@ -178,6 +179,41 @@ const zhCN = {
     title: "基础设施",
     health: "健康检查",
     reconcile: "存储对账"
+  },
+  skillSync: {
+    title: "技能同步策略",
+    tenant: "租户默认策略",
+    workspace: "工作区覆盖策略",
+    user: "用户覆盖策略",
+    autoSync: "自动同步",
+    manualOnly: "仅手动同步",
+    runNow: "立即同步",
+    saved: "策略已保存",
+    effective: "生效配置",
+    lastRun: "上次同步",
+    nextRun: "下次计划",
+    lastError: "最近错误",
+    lastOutcome: "最近结果",
+    bundle: "离线 Bundle 管理",
+    export: "导出 Bundle",
+    import: "导入 Bundle",
+    bundleExported: "Bundle 导出成功",
+    bundleImported: "Bundle 导入成功",
+    bundleHistory: "历史 Bundle"
+  },
+  skillStore: {
+    getStarted: "开始使用",
+    introducing: "技能商店",
+    subtitle: "技能就是新的软件。",
+    promptsWeLove: "推荐",
+    skillsWeLove: "推荐技能",
+    refresh: "刷新技能列表",
+    loading: "正在加载技能...",
+    empty: "暂无技能数据，可先点击刷新触发同步。",
+    install: "安装技能",
+    uninstall: "删除技能",
+    installSuccess: "安装成功",
+    uninstallSuccess: "删除成功"
   }
 };
 

@@ -286,7 +286,7 @@ export function ChatView({ sessionId, sessionTitle }: { sessionId: string; sessi
     }
 
     if (event.event === "agent.delta") {
-      const delta = asString(event.payload.delta) ?? "";
+      const delta = readDeltaPayload(event.payload);
       if (delta.length === 0) {
         return;
       }
@@ -752,7 +752,7 @@ function buildMessagesFromTranscript(items: GatewayTranscriptItem[]): {
     }
 
     if (item.event === "agent.delta") {
-      const delta = asString(item.payload.delta) ?? "";
+      const delta = readDeltaPayload(item.payload);
       if (!delta) {
         continue;
       }
@@ -874,6 +874,10 @@ function renderRole(role: ChatRole, t: (key: string) => string): string {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function readDeltaPayload(payload: Record<string, unknown>): string {
+  return asString(payload.delta) ?? asString(payload.text) ?? "";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

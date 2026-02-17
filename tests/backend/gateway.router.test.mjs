@@ -39,6 +39,286 @@ test("connect then sessions.list works", async () => {
   }
 });
 
+test("skills.syncConfig supports tenant/workspace/user overrides and boundary", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+  state.principal = {
+    subject: "u_skill_sync_admin",
+    userId: "u_skill_sync_admin",
+    tenantId: "t_skill_sync",
+    workspaceIds: ["w_skill_sync"],
+    roles: ["tenant_admin"],
+    authSource: "local",
+    claims: {}
+  };
+
+  const tenantUpsert = await router.handle(
+    req("r_skill_sync_tenant_upsert", "skills.syncConfig.upsert", {
+      idempotencyKey: "idem_skill_sync_tenant_upsert_1",
+      scope: "tenant",
+      tenantId: "t_skill_sync",
+      config: {
+        sourceFilters: ["anthropics/skills"],
+        licenseFilters: ["allow", "review"]
+      }
+    }),
+    state
+  );
+  assert.equal(tenantUpsert.response.ok, true);
+
+  const userEscapeDenied = await router.handle(
+    req("r_skill_sync_user_escape", "skills.syncConfig.upsert", {
+      idempotencyKey: "idem_skill_sync_user_escape_1",
+      scope: "user",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync",
+      userId: "u_skill_sync_admin",
+      config: {
+        sourceFilters: ["affaan-m/everything-claude-code"]
+      }
+    }),
+    state
+  );
+  assert.equal(userEscapeDenied.response.ok, false);
+  if (!userEscapeDenied.response.ok) {
+    assert.equal(userEscapeDenied.response.error.code, "FORBIDDEN");
+  }
+
+  const workspaceUpsert = await router.handle(
+    req("r_skill_sync_workspace_upsert", "skills.syncConfig.upsert", {
+      idempotencyKey: "idem_skill_sync_workspace_upsert_1",
+      scope: "workspace",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync",
+      config: {
+        sourceFilters: ["anthropics/skills"],
+        tagFilters: ["ops"]
+      }
+    }),
+    state
+  );
+  assert.equal(workspaceUpsert.response.ok, true);
+
+  const userUpsert = await router.handle(
+    req("r_skill_sync_user_upsert", "skills.syncConfig.upsert", {
+      idempotencyKey: "idem_skill_sync_user_upsert_2",
+      scope: "user",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync",
+      userId: "u_skill_sync_admin",
+      config: {
+        sourceFilters: ["anthropics/skills"],
+        tagFilters: ["ops"]
+      }
+    }),
+    state
+  );
+  assert.equal(userUpsert.response.ok, true);
+
+  const fetched = await router.handle(
+    req("r_skill_sync_get_user", "skills.syncConfig.get", {
+      scope: "user",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync",
+      userId: "u_skill_sync_admin"
+    }),
+    state
+  );
+  assert.equal(fetched.response.ok, true);
+  if (fetched.response.ok) {
+    assert.equal(fetched.response.payload.effectiveConfig.sourceFilters.includes("anthropics/skills"), true);
+    assert.equal(fetched.response.payload.effectiveConfig.tagFilters.includes("ops"), true);
+  }
+});
+
+test("skills.sync.runNow keeps next schedule unchanged", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+  state.principal = {
+    subject: "u_skill_sync_member",
+    userId: "u_skill_sync_member",
+    tenantId: "t_skill_sync",
+    workspaceIds: ["w_skill_sync"],
+    roles: ["member"],
+    authSource: "local",
+    claims: {}
+  };
+
+  const upsert = await router.handle(
+    req("r_skill_sync_member_upsert", "skills.syncConfig.upsert", {
+      idempotencyKey: "idem_skill_sync_member_upsert_1",
+      scope: "user",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync",
+      config: {
+        autoSyncEnabled: true,
+        manualOnly: false,
+        syncTime: "03:00",
+        timezone: "UTC"
+      }
+    }),
+    state
+  );
+  assert.equal(upsert.response.ok, true);
+
+  const before = await router.handle(
+    req("r_skill_sync_status_before", "skills.syncStatus.get", {
+      scope: "user",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync"
+    }),
+    state
+  );
+  assert.equal(before.response.ok, true);
+  const beforeNextRunAt = before.response.ok ? before.response.payload.status.nextRunAt : undefined;
+
+  const runNow = await router.handle(
+    req("r_skill_sync_run_now", "skills.sync.runNow", {
+      idempotencyKey: "idem_skill_sync_run_now_1",
+      scope: "user",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync"
+    }),
+    state
+  );
+  assert.equal(runNow.response.ok, true);
+
+  const after = await router.handle(
+    req("r_skill_sync_status_after", "skills.syncStatus.get", {
+      scope: "user",
+      tenantId: "t_skill_sync",
+      workspaceId: "w_skill_sync"
+    }),
+    state
+  );
+  assert.equal(after.response.ok, true);
+  if (after.response.ok) {
+    assert.equal(after.response.payload.status.nextRunAt, beforeNextRunAt);
+  }
+});
+
+test("skills.bundle import/export/list lifecycle works", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+  state.principal = {
+    subject: "u_skill_bundle_admin",
+    userId: "u_skill_bundle_admin",
+    tenantId: "t_bundle",
+    workspaceIds: ["w_bundle"],
+    roles: ["tenant_admin"],
+    authSource: "local",
+    claims: {}
+  };
+
+  const imported = await router.handle(
+    req("r_skill_bundle_import", "skills.bundle.import", {
+      idempotencyKey: "idem_skill_bundle_import_1",
+      bundle: {
+        bundleId: "bundle_test_1",
+        name: "bundle-test",
+        items: [
+          {
+            skillId: "demo.skill",
+            source: "anthropics/skills",
+            tags: ["ops"],
+            license: "allow"
+          }
+        ]
+      }
+    }),
+    state
+  );
+  assert.equal(imported.response.ok, true);
+
+  const listed = await router.handle(
+    req("r_skill_bundle_list", "skills.bundle.list", {
+      tenantId: "t_bundle"
+    }),
+    state
+  );
+  assert.equal(listed.response.ok, true);
+  if (listed.response.ok) {
+    assert.equal(Array.isArray(listed.response.payload.items), true);
+    assert.equal(listed.response.payload.items.length > 0, true);
+  }
+
+  const exported = await router.handle(
+    req("r_skill_bundle_export", "skills.bundle.export", {
+      idempotencyKey: "idem_skill_bundle_export_1",
+      name: "bundle-exported"
+    }),
+    state
+  );
+  assert.equal(exported.response.ok, true);
+  if (exported.response.ok) {
+    assert.equal(typeof exported.response.payload.bundle?.bundleId, "string");
+    assert.equal(Array.isArray(exported.response.payload.bundle?.items), true);
+  }
+});
+
+test("skills install/list/uninstall lifecycle works", async () => {
+  const router = createGatewayRouter();
+  const state = createConnectionState();
+  await router.handle(req("r_connect", "connect", {}), state);
+  state.principal = {
+    subject: "u_skill_install_member",
+    userId: "u_skill_install_member",
+    tenantId: "t_install",
+    workspaceIds: ["w_install"],
+    roles: ["member"],
+    authSource: "local",
+    claims: {}
+  };
+
+  const refresh = await router.handle(
+    req("r_install_catalog_refresh", "skills.catalog.refresh", {
+      idempotencyKey: "idem_install_catalog_refresh_1",
+      scope: "user",
+      sourceFilters: ["anthropics/skills"]
+    }),
+    state
+  );
+  assert.equal(refresh.response.ok, true);
+
+  const install = await router.handle(
+    req("r_install_skill", "skills.install", {
+      idempotencyKey: "idem_install_skill_1",
+      scope: "user",
+      skillId: "anthropics_skills.starter"
+    }),
+    state
+  );
+  assert.equal(install.response.ok, true);
+
+  const listInstalled = await router.handle(
+    req("r_install_list_installed", "skills.installed.list", {
+      scope: "user"
+    }),
+    state
+  );
+  assert.equal(listInstalled.response.ok, true);
+  if (listInstalled.response.ok) {
+    assert.equal(Array.isArray(listInstalled.response.payload.items), true);
+    assert.equal(listInstalled.response.payload.items.some((item) => item.skillId === "anthropics_skills.starter"), true);
+  }
+
+  const uninstall = await router.handle(
+    req("r_install_uninstall", "skills.uninstall", {
+      idempotencyKey: "idem_install_uninstall_1",
+      scope: "user",
+      skillId: "anthropics_skills.starter"
+    }),
+    state
+  );
+  assert.equal(uninstall.response.ok, true);
+  if (uninstall.response.ok) {
+    assert.equal(uninstall.response.payload.removed, true);
+  }
+});
+
 test("context.get returns default template when scoped file is missing", async () => {
   const router = createGatewayRouter();
   const state = createConnectionState();

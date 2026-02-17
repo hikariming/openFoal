@@ -11,6 +11,7 @@ run([
   "tests/backend/storage.sqlite.test.mjs",
   "tests/backend/protocol.contract.test.mjs",
   "tests/backend/gateway.router.test.mjs",
+  "tests/backend/gateway.transcript.compat.test.mjs",
   "tests/backend/gateway.persistence.test.mjs",
   "tests/backend/gateway.auth.test.mjs",
   "tests/backend/gateway.server.test.mjs"
