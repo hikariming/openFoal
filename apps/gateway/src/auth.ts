@@ -139,6 +139,7 @@ const WORKSPACE_SCOPE_METHODS = new Set<MethodName>([
   "policy.update",
   "audit.query",
   "metrics.summary",
+  "sandbox.usage",
   "agent.run",
   "agent.abort",
   "runtime.setMode",

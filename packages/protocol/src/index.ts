@@ -24,6 +24,7 @@ export const METHODS = [
   "policy.update",
   "audit.query",
   "metrics.summary",
+  "sandbox.usage",
   "memory.get",
   "memory.search",
   "memory.appendDaily",

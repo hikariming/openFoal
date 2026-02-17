@@ -1315,6 +1315,79 @@ async function route(
       };
     }
 
+    case "sandbox.usage": {
+      const sessionId = requireString(req.params, "sessionId");
+      if (!sessionId) {
+        return invalidParams(req.id, "sandbox.usage 需要 sessionId");
+      }
+      const scope = resolveSessionScope(req.params, state);
+      let session = await sessionRepo.get(sessionId, scope);
+      if (!session) {
+        const recovered = await recoverLegacyDefaultSessionsForPrincipal({
+          params: req.params,
+          state,
+          targetScope: scope,
+          sessionRepo,
+          transcriptRepo,
+          now,
+          sessionId
+        });
+        if (recovered > 0) {
+          session = await sessionRepo.get(sessionId, scope);
+        }
+      }
+      if (!session) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", `未知会话: ${sessionId}`),
+          events: []
+        };
+      }
+      if (session.runtimeMode !== "cloud") {
+        return {
+          response: makeSuccessRes(req.id, {
+            usage: {
+              available: false,
+              runtimeMode: session.runtimeMode,
+              checkedAt: now().toISOString(),
+              reason: "local_runtime"
+            }
+          }),
+          events: []
+        };
+      }
+      const explicitTargetId = requireString(req.params, "executionTargetId");
+      const target =
+        sessionExecutionTargets.get(sessionId) ??
+        (explicitTargetId ? await executionTargetRepo.get(explicitTargetId) : undefined) ??
+        (await executionTargetRepo.findDefault(scope.tenantId, scope.workspaceId)) ??
+        undefined;
+      if (!target || !target.enabled || target.kind !== "docker-runner") {
+        return {
+          response: makeSuccessRes(req.id, {
+            usage: {
+              available: false,
+              runtimeMode: "cloud",
+              checkedAt: now().toISOString(),
+              reason: "target_unavailable"
+            }
+          }),
+          events: []
+        };
+      }
+      const usage = await readCloudSandboxUsage(target);
+      return {
+        response: makeSuccessRes(req.id, {
+          usage: {
+            ...usage,
+            runtimeMode: "cloud",
+            checkedAt: now().toISOString(),
+            targetId: target.targetId
+          }
+        }),
+        events: []
+      };
+    }
+
     case "infra.health": {
       if (!state.principal || !state.principal.roles.includes("tenant_admin")) {
         return {
@@ -3725,6 +3798,152 @@ function resolveDockerRunnerTimeoutMs(config: Record<string, unknown>): number {
     }
   }
   return 15_000;
+}
+
+async function readCloudSandboxUsage(target: ExecutionTargetRecord): Promise<{
+  available: boolean;
+  source?: string;
+  reason?: string;
+  cpuPercent?: number;
+  memoryPercent?: number;
+  diskPercent?: number;
+}> {
+  const endpoint = resolveDockerRunnerEndpoint(target);
+  if (!endpoint) {
+    return {
+      available: false,
+      reason: `docker-runner 缺少 endpoint: ${target.targetId}`
+    };
+  }
+  const healthEndpoint = resolveDockerRunnerHealthEndpoint(endpoint);
+  const timeoutMs = Math.max(1_000, Math.min(5_000, resolveDockerRunnerTimeoutMs(target.config)));
+  const headers: Record<string, string> = {};
+  if (target.authToken) {
+    headers.authorization = `Bearer ${target.authToken}`;
+  }
+
+  try {
+    const response = await sendDockerRunnerHealthRequest({
+      endpoint: healthEndpoint,
+      timeoutMs,
+      headers
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return {
+        available: false,
+        reason: `health 响应异常(${response.statusCode})`
+      };
+    }
+    const payload = parseJsonObject(response.text);
+    if (!payload) {
+      return {
+        available: false,
+        reason: "health 返回非 JSON"
+      };
+    }
+    const usage = parseSandboxUsage(payload);
+    if (!usage) {
+      return {
+        available: false,
+        reason: "health 缺少 usage 字段"
+      };
+    }
+    return {
+      available: true,
+      source: asString(payload.service) ?? "docker-runner",
+      ...usage
+    };
+  } catch (error) {
+    return {
+      available: false,
+      reason: toErrorMessage(error)
+    };
+  }
+}
+
+function resolveDockerRunnerHealthEndpoint(endpoint: string): string {
+  const url = new URL(endpoint);
+  const rawPath = url.pathname || "/";
+  if (/\/execute\/?$/.test(rawPath)) {
+    url.pathname = rawPath.replace(/\/execute\/?$/, "/health");
+  } else {
+    url.pathname = `${rawPath.replace(/\/+$/, "")}/health`;
+  }
+  url.search = "";
+  return url.toString();
+}
+
+async function sendDockerRunnerHealthRequest(input: {
+  endpoint: string;
+  timeoutMs: number;
+  headers: Record<string, string>;
+}): Promise<{ statusCode: number; text: string }> {
+  const url = new URL(input.endpoint);
+  return await new Promise((resolve, reject) => {
+    const requestFn = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = requestFn(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port ? Number(url.port) : undefined,
+        path: `${url.pathname || "/"}${url.search || ""}`,
+        method: "GET",
+        headers: input.headers
+      },
+      (res: any) => {
+        const chunks: any[] = [];
+        res.on("data", (chunk: any) => {
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          resolve({
+            statusCode: typeof res.statusCode === "number" ? res.statusCode : 500,
+            text: Buffer.concat(chunks).toString("utf8")
+          });
+        });
+      }
+    );
+
+    req.setTimeout(input.timeoutMs, () => {
+      req.destroy(new Error(`timeout after ${input.timeoutMs}ms`));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function parseSandboxUsage(payload: Record<string, unknown>): {
+  cpuPercent: number;
+  memoryPercent: number;
+  diskPercent: number;
+} | undefined {
+  const usageRoot = isObjectRecord(payload.usage) ? payload.usage : payload;
+  const cpuPercent = normalizePercentField(
+    usageRoot.cpuPercent ?? usageRoot.cpuUsagePercent ?? usageRoot.cpu ?? usageRoot.cpuUsage
+  );
+  const memoryPercent = normalizePercentField(
+    usageRoot.memoryPercent ?? usageRoot.memPercent ?? usageRoot.memory ?? usageRoot.memoryUsage
+  );
+  const diskPercent = normalizePercentField(
+    usageRoot.diskPercent ?? usageRoot.storagePercent ?? usageRoot.disk ?? usageRoot.diskUsage
+  );
+  if (cpuPercent === undefined || memoryPercent === undefined || diskPercent === undefined) {
+    return undefined;
+  }
+  return {
+    cpuPercent,
+    memoryPercent,
+    diskPercent
+  };
+}
+
+function normalizePercentField(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const raw = value >= 0 && value <= 1 ? value * 100 : value;
+  const clamped = Math.max(0, Math.min(100, raw));
+  return Number(clamped.toFixed(1));
 }
 
 function parseJsonObject(value: string): Record<string, unknown> | undefined {

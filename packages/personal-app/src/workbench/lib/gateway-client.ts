@@ -7,6 +7,7 @@ import {
   type GatewayMemoryReadResult,
   type GatewayMemorySearchResult,
   type GatewayMetricsSummary,
+  type GatewaySandboxUsage,
   type GatewayModelKeyMeta,
   type GatewayPolicy,
   type GatewayPolicyPatch,
@@ -30,6 +31,7 @@ export type {
   GatewayPolicy,
   GatewayPolicyPatch,
   GatewayMetricsSummary,
+  GatewaySandboxUsage,
   GatewayModelKeyMeta,
   GatewayAuditItem,
   GatewayMemoryReadResult,
@@ -113,6 +115,10 @@ export class GatewayHttpClient {
 
   async getMetricsSummary(): Promise<GatewayMetricsSummary> {
     return await this.client.getMetricsSummary();
+  }
+
+  async getSandboxUsage(params: { sessionId: string; executionTargetId?: string }): Promise<GatewaySandboxUsage> {
+    return await this.client.getSandboxUsage(params);
   }
 
   async getModelKeyMeta(params: { provider?: string } = {}): Promise<GatewayModelKeyMeta[]> {

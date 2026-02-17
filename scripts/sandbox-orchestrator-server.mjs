@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { mkdirSync } from "node:fs";
+import * as fs from "node:fs";
+import os from "node:os";
 import { relative as relativePath } from "node:path";
 import { MinioBlobStore, RedisLeaseIndex, syncLocalDirectoryToMinio } from "../packages/storage/dist/index.js";
 import { createLocalToolExecutor } from "../packages/tool-executor/dist/index.js";
@@ -33,6 +34,7 @@ const leaseIndex = redisUrl
   : null;
 
 const leases = new Map();
+let lastCpuSnapshot = readCpuSnapshot();
 
 const server = createServer(async (req, res) => {
   try {
@@ -40,6 +42,7 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
     if (method === "GET" && url.pathname === "/health") {
+      const usage = readResourceUsage(storageRoot);
       writeJson(res, 200, {
         ok: true,
         service: "sandbox-orchestrator",
@@ -47,6 +50,7 @@ const server = createServer(async (req, res) => {
         leases: leases.size,
         blobBackend,
         redisLeaseIndex: Boolean(leaseIndex),
+        usage,
         time: new Date().toISOString()
       });
       return;
@@ -240,7 +244,7 @@ function touchLease(input) {
     createdAt: new Date(now).toISOString(),
     lastSeenAt: new Date(now).toISOString()
   };
-  mkdirSync(workspaceRoot, { recursive: true });
+  fs.mkdirSync(workspaceRoot, { recursive: true });
   leases.set(key, created);
   return created;
 }
@@ -301,4 +305,77 @@ function sanitizeObjectPrefix(value) {
     .replace(/\.\./g, "_")
     .replace(/^\/+/, "")
     .replace(/\/+/g, "/");
+}
+
+function readResourceUsage(targetPath) {
+  return {
+    cpuPercent: readCpuPercent(),
+    memoryPercent: readMemoryPercent(),
+    diskPercent: readDiskPercent(targetPath)
+  };
+}
+
+function readCpuSnapshot() {
+  const cpus = os.cpus();
+  let idle = 0;
+  let total = 0;
+  for (const cpu of cpus) {
+    idle += cpu.times.idle;
+    total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.idle + cpu.times.irq;
+  }
+  return { idle, total };
+}
+
+function readCpuPercent() {
+  const next = readCpuSnapshot();
+  const prev = lastCpuSnapshot;
+  lastCpuSnapshot = next;
+  if (!prev) {
+    return 0;
+  }
+  const idleDelta = next.idle - prev.idle;
+  const totalDelta = next.total - prev.total;
+  if (!Number.isFinite(totalDelta) || totalDelta <= 0) {
+    return 0;
+  }
+  const usage = 1 - idleDelta / totalDelta;
+  return roundPercent(usage * 100);
+}
+
+function readMemoryPercent() {
+  const total = os.totalmem();
+  const free = os.freemem();
+  if (!Number.isFinite(total) || total <= 0) {
+    return 0;
+  }
+  const used = Math.max(0, total - free);
+  return roundPercent((used / total) * 100);
+}
+
+function readDiskPercent(targetPath) {
+  if (typeof fs.statfsSync !== "function") {
+    return 0;
+  }
+  try {
+    const stat = fs.statfsSync(targetPath);
+    const bsize = Number(stat.bsize);
+    const blocks = Number(stat.blocks);
+    const bfree = Number(stat.bfree);
+    if (!Number.isFinite(bsize) || !Number.isFinite(blocks) || !Number.isFinite(bfree) || blocks <= 0 || bsize <= 0) {
+      return 0;
+    }
+    const total = blocks * bsize;
+    const used = Math.max(0, (blocks - bfree) * bsize);
+    return roundPercent((used / total) * 100);
+  } catch {
+    return 0;
+  }
+}
+
+function roundPercent(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const clamped = Math.max(0, Math.min(100, value));
+  return Number(clamped.toFixed(1));
 }

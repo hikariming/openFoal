@@ -28,6 +28,7 @@ import {
   getGatewayClient,
   type GatewayMemorySearchHit,
   type GatewayModelKeyMeta,
+  type GatewaySandboxUsage,
   type GatewaySession,
   type GatewayTranscriptItem
 } from "../lib/gateway-client";
@@ -89,6 +90,7 @@ export function AppSidebar(props: AppSidebarProps = {}) {
   const [memorySearchMeta, setMemorySearchMeta] = useState("");
   const [llmSavedNotice, setLlmSavedNotice] = useState("");
   const [runtimeResolvedLlm, setRuntimeResolvedLlm] = useState<RuntimeResolvedLlm | undefined>(undefined);
+  const [sandboxUsage, setSandboxUsage] = useState<GatewaySandboxUsage | undefined>(undefined);
   const { sessions, activeSessionId, setSessions, upsertSession, setActiveSession, setRuntimeMode, llmConfig, setLlmConfig } =
     useAppStore();
   const runtimeMode = useAppStore((state) => getSessionRuntimeMode(state.sessions, state.activeSessionId));
@@ -126,6 +128,11 @@ export function AppSidebar(props: AppSidebarProps = {}) {
   const baseUrlOptions = baseUrlOptionsByProvider[editingLlmProfile?.provider ?? ""] ?? [];
   const isLlmDirty = !sameLlmConfig(llmDraft, llmConfig);
   const activeSession = useMemo(() => sessions.find((item) => item.id === activeSessionId), [activeSessionId, sessions]);
+  const sandboxUsageText = useMemo(
+    () => (sandboxUsage?.available ? formatSandboxUsageLine(sandboxUsage, i18n.language) : ""),
+    [i18n.language, sandboxUsage]
+  );
+  const showSandboxUsage = activeSession?.runtimeMode === "cloud" && sandboxUsage?.available === true;
 
   useEffect(() => {
     setLlmDraft(llmConfig);
@@ -255,6 +262,41 @@ export function AppSidebar(props: AppSidebarProps = {}) {
       cancelled = true;
     };
   }, [activeSettingsMenu, settingsModalVisible]);
+
+  useEffect(() => {
+    if (!activeSession || activeSession.runtimeMode !== "cloud") {
+      setSandboxUsage(undefined);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const refreshSandboxUsage = async () => {
+      try {
+        const client = getGatewayClient();
+        await client.ensureConnected();
+        const usage = await client.getSandboxUsage({
+          sessionId: activeSession.id
+        });
+        if (!cancelled) {
+          setSandboxUsage(usage);
+        }
+      } catch {
+        if (!cancelled) {
+          setSandboxUsage(undefined);
+        }
+      }
+    };
+    void refreshSandboxUsage();
+    timer = setInterval(() => {
+      void refreshSandboxUsage();
+    }, 10_000);
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [activeSession?.id, activeSession?.runtimeMode]);
 
   const runtimeIssuedModelLabel = formatRuntimeResolvedLlm(runtimeResolvedLlm) ?? t("sidebar.runtimeIssuedModelEmpty");
 
@@ -581,7 +623,7 @@ export function AppSidebar(props: AppSidebarProps = {}) {
             <span className="dot-green" />
             <Typography.Text type="secondary">{t("sidebar.running")}</Typography.Text>
           </Space>
-          <Typography.Text type="tertiary">{t("sidebar.usage")}</Typography.Text>
+          {showSandboxUsage ? <Typography.Text type="tertiary">{sandboxUsageText}</Typography.Text> : null}
         </div>
       </div>
 
@@ -1179,6 +1221,19 @@ function syncStateColor(syncState: "local_only" | "syncing" | "synced" | "confli
 function formatUsage(value: number | undefined): string {
   const usage = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
   return `${Math.round(usage * 100)}%`;
+}
+
+function formatSandboxUsageLine(value: GatewaySandboxUsage, language: string): string {
+  const memoryLabel = language.toLowerCase().startsWith("zh") ? "内存" : "Mem";
+  const diskLabel = language.toLowerCase().startsWith("zh") ? "磁盘" : "Disk";
+  return `CPU ${formatPercent(value.cpuPercent)} · ${memoryLabel} ${formatPercent(value.memoryPercent)} · ${diskLabel} ${formatPercent(value.diskPercent)}`;
+}
+
+function formatPercent(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${Math.round(Math.max(0, Math.min(100, value)))}%`;
 }
 
 function resolveRuntimeLlmFromTranscript(items: GatewayTranscriptItem[]): RuntimeResolvedLlm | undefined {

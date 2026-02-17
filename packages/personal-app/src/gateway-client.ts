@@ -120,6 +120,18 @@ export type GatewayMetricsSummary = {
   p95LatencyMs: number;
 };
 
+export type GatewaySandboxUsage = {
+  available: boolean;
+  runtimeMode: RuntimeMode;
+  checkedAt: string;
+  source?: string;
+  reason?: string;
+  targetId?: string;
+  cpuPercent?: number;
+  memoryPercent?: number;
+  diskPercent?: number;
+};
+
 export type GatewayUserMembership = {
   workspaceId: string;
   role: UserRole;
@@ -285,6 +297,7 @@ type GatewayMethod =
   | "policy.update"
   | "audit.query"
   | "metrics.summary"
+  | "sandbox.usage"
   | "context.get"
   | "context.upsert"
   | "infra.health"
@@ -806,6 +819,19 @@ export class GatewayClient {
       throw new GatewayRpcError("INVALID_RESPONSE", "Invalid metrics.summary payload");
     }
     return metrics;
+  }
+
+  async getSandboxUsage(params: { sessionId: string; executionTargetId?: string }): Promise<GatewaySandboxUsage> {
+    await this.ensureConnected();
+    const result = await this.request("sandbox.usage", this.withScope({
+      sessionId: params.sessionId,
+      ...(params.executionTargetId ? { executionTargetId: params.executionTargetId } : {})
+    }));
+    const usage = result.response.payload.usage;
+    if (!isGatewaySandboxUsage(usage)) {
+      throw new GatewayRpcError("INVALID_RESPONSE", "Invalid sandbox.usage payload");
+    }
+    return usage;
   }
 
   async listUsers(params: { tenantId?: string; workspaceId?: string } = {}): Promise<GatewayTenantUser[]> {
@@ -1577,6 +1603,38 @@ function isGatewayMetricsSummary(value: unknown): value is GatewayMetricsSummary
     typeof value.toolFailures === "number" &&
     typeof value.p95LatencyMs === "number"
   );
+}
+
+function isGatewaySandboxUsage(value: unknown): value is GatewaySandboxUsage {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const runtimeMode = value.runtimeMode;
+  if (runtimeMode !== "local" && runtimeMode !== "cloud") {
+    return false;
+  }
+  if (typeof value.available !== "boolean" || typeof value.checkedAt !== "string") {
+    return false;
+  }
+  if (value.source !== undefined && typeof value.source !== "string") {
+    return false;
+  }
+  if (value.reason !== undefined && typeof value.reason !== "string") {
+    return false;
+  }
+  if (value.targetId !== undefined && typeof value.targetId !== "string") {
+    return false;
+  }
+  if (value.cpuPercent !== undefined && typeof value.cpuPercent !== "number") {
+    return false;
+  }
+  if (value.memoryPercent !== undefined && typeof value.memoryPercent !== "number") {
+    return false;
+  }
+  if (value.diskPercent !== undefined && typeof value.diskPercent !== "number") {
+    return false;
+  }
+  return true;
 }
 
 function isGatewayAuditItem(value: unknown): value is GatewayAuditItem {
