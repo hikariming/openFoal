@@ -104,7 +104,8 @@ export async function handleAgentRun(input: {
   const { req, state } = input;
   const requireString = input.helpers.requireString;
   const sessionId = requireString(req.params, "sessionId");
-  const userInput = requireString(req.params, "input");
+  const runInput = requireString(req.params, "input");
+  const rawUserInput = requireString(req.params, "rawInput") ?? runInput;
   const reqRuntimeMode = input.helpers.asRuntimeMode(req.params.runtimeMode);
   const requestedLlm = input.helpers.asLlmOptions(req.params.llm);
   const tenantId = requireString(req.params, "tenantId") ?? state.principal?.tenantId ?? "t_default";
@@ -122,7 +123,7 @@ export async function handleAgentRun(input: {
     ...(input.helpers.canReadCrossUserSessions(state.principal) ? {} : { ownerUserId })
   };
   const explicitTargetId = requireString(req.params, "executionTargetId");
-  if (!sessionId || !userInput) {
+  if (!sessionId || !runInput) {
     return {
       response: makeErrorRes(req.id, "INVALID_REQUEST", "agent.run 需要 sessionId 和 input"),
       events: []
@@ -295,7 +296,7 @@ export async function handleAgentRun(input: {
       workspaceId: session.workspaceId,
       userId: session.ownerUserId
     },
-    input: userInput,
+    input: rawUserInput ?? runInput,
     now: input.now
   });
 
@@ -335,11 +336,11 @@ export async function handleAgentRun(input: {
     workspaceId: session.workspaceId,
     ownerUserId: session.ownerUserId,
     event: "user.input",
-    payload: { input: userInput },
+    payload: { input: rawUserInput ?? runInput },
     createdAt: input.now().toISOString()
   });
 
-  const sessionWithInput = input.helpers.withSessionInput(session, userInput);
+  const sessionWithInput = input.helpers.withSessionInput(session, rawUserInput ?? runInput);
   if (sessionWithInput.title !== session.title || sessionWithInput.preview !== session.preview) {
     await input.sessionRepo.upsert(sessionWithInput);
     const refreshed = await input.sessionRepo.get(sessionId, sessionScope);
@@ -357,7 +358,7 @@ export async function handleAgentRun(input: {
   try {
     for await (const coreEvent of input.coreService.run({
       sessionId,
-      input: userInput,
+      input: runInput,
       runtimeMode: runtimeModeForRun,
       ...(llm ? { llm } : {})
     })) {
@@ -425,7 +426,7 @@ export async function handleAgentRun(input: {
     };
   }
 
-  const finalUsage = estimateContextUsage(session.contextUsage, userInput, completedOutput);
+  const finalUsage = estimateContextUsage(session.contextUsage, runInput, completedOutput);
   await input.sessionRepo.updateMeta(sessionId, {
     contextUsage: finalUsage
   }, sessionScope);
@@ -443,7 +444,7 @@ export async function handleAgentRun(input: {
     createdAt: input.now().toISOString()
   });
 
-  const usageSnapshot = input.helpers.estimateRunUsage(userInput, completedOutput);
+  const usageSnapshot = input.helpers.estimateRunUsage(runInput, completedOutput);
   await input.budgetRepo.addUsage({
     scopeKey: budgetScopeKey,
     date: input.now().toISOString().slice(0, 10),

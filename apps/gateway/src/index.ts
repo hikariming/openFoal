@@ -120,7 +120,9 @@ import { request as httpsRequest } from "node:https";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
 import { createHash } from "node:crypto";
 // @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
-import { resolve as resolvePath } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
+// @ts-ignore -- workspace backend packages do not currently ship root-level @types/node.
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 
 declare const Buffer: any;
 declare const process: any;
@@ -227,11 +229,21 @@ type SkillSyncStatusRecord = {
 type SkillBundleItemRecord = {
   skillId: string;
   source?: string;
+  sourceType: "bundle" | "online";
   commit?: string;
   path?: string;
   checksum?: string;
   license?: SkillSyncLicense;
   tags: string[];
+  artifactVersion: string;
+  entrySkillPath: string;
+  files: SkillBundleFileRecord[];
+};
+
+type SkillBundleFileRecord = {
+  path: string;
+  content: string;
+  checksum: string;
 };
 
 type SkillBundleRecord = {
@@ -249,27 +261,49 @@ type SkillCatalogAvailability = "online" | "cached" | "unavailable";
 type SkillCatalogItem = {
   skillId: string;
   source?: string;
+  sourceType: "bundle" | "online";
   commit?: string;
   path?: string;
   checksum?: string;
   license?: SkillSyncLicense;
   tags: string[];
+  artifactVersion?: string;
+  entrySkillPath?: string;
   availability: SkillCatalogAvailability;
 };
 
 type SkillInstalledRecord = {
   skillId: string;
+  scope: SkillSyncScope;
   tenantId: string;
   workspaceId: string;
   userId: string;
   installedAt: string;
   installedBy: string;
+  state: "installed";
+  installPath: string;
+  entrySkillPath: string;
+  invocation: string;
+  artifactVersion: string;
   source?: string;
+  sourceType: "bundle" | "online";
   commit?: string;
   path?: string;
   checksum?: string;
   license?: SkillSyncLicense;
   tags: string[];
+};
+
+type SkillRuntimeState = {
+  version: 1;
+  skillSyncConfigs: SkillSyncConfigRecord[];
+  skillSyncStatuses: SkillSyncStatusRecord[];
+  skillSyncRuns: SkillSyncRunRecord[];
+  skillBundles: SkillBundleRecord[];
+  skillCatalog: SkillCatalogItem[];
+  skillArtifacts: SkillBundleItemRecord[];
+  installedSkills: SkillInstalledRecord[];
+  knownSkillSources: string[];
 };
 
 type DockerRunnerInvokeInput = {
@@ -312,6 +346,7 @@ interface GatewayDeps {
   blobBackend?: "fs" | "minio";
   storageBackend?: "memory" | "sqlite" | "postgres";
   enterpriseStorageRoot?: string;
+  skillsDataRoot?: string;
   now?: () => Date;
 }
 
@@ -342,6 +377,10 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
   const blobBackend = deps.blobBackend ?? "fs";
   const storageBackend = deps.storageBackend ?? "memory";
   const enterpriseStorageRoot = deps.enterpriseStorageRoot ?? sanitizeStorageRoot(process.env.OPENFOAL_ENTERPRISE_STORAGE_ROOT ?? "/data/openfoal");
+  const skillsDataRoot = sanitizeStorageRoot(
+    deps.skillsDataRoot ?? resolveSkillsDataRoot(storageBackend, enterpriseStorageRoot)
+  );
+  const enterpriseBundleOnly = toBoolean(process.env.OPENFOAL_SKILLS_ENTERPRISE_BUNDLE_ONLY, storageBackend === "postgres");
   const authRuntime = deps.authRuntime ?? createGatewayAuthRuntime({
     config: resolveAuthRuntimeConfig(),
     store: authStore,
@@ -364,13 +403,68 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
     policyRepo
   });
   const coreService = deps.coreService ?? createRuntimeCoreService({ toolExecutor: policyAwareToolExecutor });
-  const skillSyncConfigs = new Map<string, SkillSyncConfigRecord>();
-  const skillSyncStatuses = new Map<string, SkillSyncStatusRecord>();
-  const skillSyncRuns: SkillSyncRunRecord[] = [];
-  const skillBundles = new Map<string, SkillBundleRecord>();
-  const skillCatalog = new Map<string, SkillCatalogItem>();
-  const installedSkills = new Map<string, SkillInstalledRecord>();
-  const knownSkillSources = new Set<string>(defaultSkillSyncConfig({}).sourceFilters);
+  const persistedSkillState = loadSkillRuntimeState(skillsDataRoot);
+  const skillSyncConfigs = new Map<string, SkillSyncConfigRecord>(
+    persistedSkillState.skillSyncConfigs.map((item) => [buildSkillSyncScopeKey(item.scope, item.tenantId, item.workspaceId, item.userId), item])
+  );
+  const skillSyncStatuses = new Map<string, SkillSyncStatusRecord>(
+    persistedSkillState.skillSyncStatuses.map((item) => [buildSkillSyncScopeKey(item.scope, item.tenantId, item.workspaceId, item.userId), item])
+  );
+  const skillSyncRuns: SkillSyncRunRecord[] = [...persistedSkillState.skillSyncRuns];
+  const skillBundles = new Map<string, SkillBundleRecord>(persistedSkillState.skillBundles.map((item) => [item.bundleId, item]));
+  const skillCatalog = new Map<string, SkillCatalogItem>(persistedSkillState.skillCatalog.map((item) => [item.skillId, item]));
+  const skillArtifacts = new Map<string, SkillBundleItemRecord>(
+    persistedSkillState.skillArtifacts.map((item) => {
+      try {
+        return [item.skillId, normalizeLoadedSkillArtifact(item)];
+      } catch {
+        const fallback = normalizeLoadedSkillArtifact({
+          ...item,
+          entrySkillPath: "SKILL.md",
+          files: [
+            {
+              path: "SKILL.md",
+              content: `# ${item.skillId}\n`,
+              checksum: sha256(`# ${item.skillId}\n`)
+            }
+          ]
+        } as SkillBundleItemRecord);
+        return [item.skillId, fallback];
+      }
+    })
+  );
+  const installedSkills = new Map<string, SkillInstalledRecord>(
+    persistedSkillState.installedSkills.map((item) => {
+      const normalized: SkillInstalledRecord = {
+        ...item,
+        scope: item.scope ?? "user",
+        userId: (item.scope ?? "user") === "user" ? item.userId : "*",
+        state: "installed",
+        entrySkillPath: item.entrySkillPath ?? "SKILL.md",
+        invocation: item.invocation ?? `/skill:${item.skillId}`,
+        artifactVersion: item.artifactVersion ?? "v1",
+        sourceType: item.sourceType ?? "bundle"
+      };
+      return [buildInstalledSkillKey(normalized, normalized.skillId), normalized];
+    })
+  );
+  const knownSkillSources = new Set<string>(
+    persistedSkillState.knownSkillSources.length > 0
+      ? persistedSkillState.knownSkillSources
+      : defaultSkillSyncConfig({}).sourceFilters
+  );
+  const persistSkillState = (): void => {
+    saveSkillRuntimeState(skillsDataRoot, {
+      skillSyncConfigs: [...skillSyncConfigs.values()],
+      skillSyncStatuses: [...skillSyncStatuses.values()],
+      skillSyncRuns: [...skillSyncRuns],
+      skillBundles: [...skillBundles.values()],
+      skillCatalog: [...skillCatalog.values()],
+      skillArtifacts: [...skillArtifacts.values()],
+      installedSkills: [...installedSkills.values()],
+      knownSkillSources: [...knownSkillSources.values()]
+    });
+  };
   const runSkillSyncSchedulerTick = async (): Promise<void> => {
     await tickSkillSyncScheduler({
       now,
@@ -378,8 +472,11 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
       statuses: skillSyncStatuses,
       runs: skillSyncRuns,
       catalog: skillCatalog,
-      knownSources: knownSkillSources
+      artifacts: skillArtifacts,
+      knownSources: knownSkillSources,
+      enforceBundleOnly: enterpriseBundleOnly
     });
+    persistSkillState();
   };
 
   return {
@@ -471,6 +568,8 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         blobBackend,
         blobStore,
         enterpriseStorageRoot,
+        skillsDataRoot,
+        enterpriseBundleOnly,
         now,
         options,
         skillSyncConfigs,
@@ -478,8 +577,10 @@ export function createGatewayRouter(deps: GatewayDeps = {}): GatewayRouter {
         skillSyncRuns,
         skillBundles,
         skillCatalog,
+        skillArtifacts,
         installedSkills,
-        knownSkillSources
+        knownSkillSources,
+        persistSkillState
       );
 
       if (idempotencyKey && result.response.ok) {
@@ -676,6 +777,8 @@ async function route(
   blobBackend: "fs" | "minio",
   blobStore: BlobStore | undefined,
   enterpriseStorageRoot: string,
+  skillsDataRoot: string,
+  enterpriseBundleOnly: boolean,
   now: () => Date,
   options: GatewayHandleOptions,
   skillSyncConfigs: Map<string, SkillSyncConfigRecord>,
@@ -683,8 +786,10 @@ async function route(
   skillSyncRuns: SkillSyncRunRecord[],
   skillBundles: Map<string, SkillBundleRecord>,
   skillCatalog: Map<string, SkillCatalogItem>,
+  skillArtifacts: Map<string, SkillBundleItemRecord>,
   installedSkills: Map<string, SkillInstalledRecord>,
-  knownSkillSources: Set<string>
+  knownSkillSources: Set<string>,
+  persistSkillState: () => void
 ): Promise<GatewayHandleResult> {
   switch (req.method) {
     case "connect": {
@@ -1341,9 +1446,30 @@ async function route(
       };
     }
 
-    case "agent.run":
+    case "agent.run": {
+      const prepared = prepareAgentRunInput({
+        params: req.params,
+        state,
+        installedSkills
+      });
+      if (!prepared.ok) {
+        return {
+          response: makeErrorRes(req.id, prepared.code, prepared.message),
+          events: []
+        };
+      }
+      const nextReq: ReqFrame = prepared.input === requireString(req.params, "input")
+        ? req
+        : {
+            ...req,
+            params: {
+              ...req.params,
+              rawInput: requireString(req.params, "input") ?? "",
+              input: prepared.input
+            }
+          };
       return await handleAgentRun({
-        req,
+        req: nextReq,
         state,
         coreService,
         sessionRepo,
@@ -1377,6 +1503,7 @@ async function route(
           isObjectRecord
         }
       });
+    }
 
     case "agent.abort": {
       const runId = requireString(req.params, "runId");
@@ -2107,11 +2234,12 @@ async function route(
         };
       }
       const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
-      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+      const rawEffectiveConfig = resolveEffectiveSkillSyncConfigForScope({
         scopeRef: scopeRef.value,
         defaults,
         configs: skillSyncConfigs
       });
+      const effectiveConfig = applyEnterpriseBundleOnly(rawEffectiveConfig, enterpriseBundleOnly);
       const scopedConfig = skillSyncConfigs.get(scopeRef.value.key);
       const status = reconcileSkillSyncStatusRecord({
         scopeRef: scopeRef.value,
@@ -2192,11 +2320,12 @@ async function route(
         knownSkillSources.add(source);
       }
 
-      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+      const rawEffectiveConfig = resolveEffectiveSkillSyncConfigForScope({
         scopeRef: scopeRef.value,
         defaults,
         configs: skillSyncConfigs
       });
+      const effectiveConfig = applyEnterpriseBundleOnly(rawEffectiveConfig, enterpriseBundleOnly);
       const status = reconcileSkillSyncStatusRecord({
         scopeRef: scopeRef.value,
         effectiveConfig,
@@ -2204,6 +2333,7 @@ async function route(
         now,
         resetNextRun: true
       });
+      persistSkillState();
       return {
         response: makeSuccessRes(req.id, {
           scope: scopeRef.value.scope,
@@ -2231,11 +2361,12 @@ async function route(
         };
       }
       const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
-      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+      const rawEffectiveConfig = resolveEffectiveSkillSyncConfigForScope({
         scopeRef: scopeRef.value,
         defaults,
         configs: skillSyncConfigs
       });
+      const effectiveConfig = applyEnterpriseBundleOnly(rawEffectiveConfig, enterpriseBundleOnly);
       const status = reconcileSkillSyncStatusRecord({
         scopeRef: scopeRef.value,
         effectiveConfig,
@@ -2268,11 +2399,12 @@ async function route(
         };
       }
       const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
-      const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
+      const rawEffectiveConfig = resolveEffectiveSkillSyncConfigForScope({
         scopeRef: scopeRef.value,
         defaults,
         configs: skillSyncConfigs
       });
+      const effectiveConfig = applyEnterpriseBundleOnly(rawEffectiveConfig, enterpriseBundleOnly);
       const run = executeSkillSyncRun({
         scopeRef: scopeRef.value,
         effectiveConfig,
@@ -2280,11 +2412,14 @@ async function route(
         statuses: skillSyncStatuses,
         runs: skillSyncRuns,
         catalog: skillCatalog,
+        artifacts: skillArtifacts,
         knownSources: knownSkillSources,
         preserveNextRunAt: true,
         trigger: "manual",
-        offlineHint: req.params.offline === true || toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false)
+        offlineHint: req.params.offline === true || toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false),
+        enforceBundleOnly: enterpriseBundleOnly
       });
+      persistSkillState();
       return {
         response: makeSuccessRes(req.id, {
           scope: scopeRef.value.scope,
@@ -2314,8 +2449,10 @@ async function route(
           now,
           bundles: skillBundles,
           catalog: skillCatalog,
+          artifacts: skillArtifacts,
           knownSources: knownSkillSources
         });
+        persistSkillState();
         return {
           response: makeSuccessRes(req.id, {
             bundle: toSkillBundlePayload(imported.bundle),
@@ -2348,8 +2485,10 @@ async function route(
           skillIds: toStringList(req.params.skillIds),
           now,
           bundles: skillBundles,
-          catalog: skillCatalog
+          catalog: skillCatalog,
+          artifacts: skillArtifacts
         });
+        persistSkillState();
         return {
           response: makeSuccessRes(req.id, {
             bundle: toSkillBundlePayload(bundle)
@@ -2428,26 +2567,68 @@ async function route(
       if (!skillId) {
         return invalidParams(req.id, "skills.install 需要 skillId");
       }
+      const catalogItem = skillCatalog.get(skillId);
+      if (enterpriseBundleOnly && catalogItem?.sourceType !== "bundle") {
+        return {
+          response: makeErrorRes(req.id, "POLICY_DENIED", "企业 bundle_only 策略下仅允许安装 bundle 来源技能"),
+          events: []
+        };
+      }
       const installedBy = requireString(req.params, "actor") ?? state.principal?.subject ?? "system";
       const key = buildInstalledSkillKey(scopeRef.value, skillId);
       const nowIso = now().toISOString();
-      const catalogItem = skillCatalog.get(skillId);
       const existing = installedSkills.get(key);
-      const record: SkillInstalledRecord = {
-        skillId,
-        tenantId: scopeRef.value.tenantId,
-        workspaceId: scopeRef.value.workspaceId,
-        userId: scopeRef.value.userId,
-        installedAt: existing?.installedAt ?? nowIso,
-        installedBy: existing?.installedBy ?? installedBy,
-        source: catalogItem?.source ?? existing?.source,
-        commit: catalogItem?.commit ?? existing?.commit,
-        path: catalogItem?.path ?? existing?.path,
-        checksum: catalogItem?.checksum ?? existing?.checksum,
-        license: catalogItem?.license ?? existing?.license,
-        tags: catalogItem?.tags ?? existing?.tags ?? []
-      };
-      installedSkills.set(key, record);
+      const artifact = skillArtifacts.get(skillId);
+      if (!artifact) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", `技能 ${skillId} 缺少可安装 artifact，请先导入 bundle`),
+          events: []
+        };
+      }
+      const sourceType = catalogItem?.sourceType ?? existing?.sourceType ?? artifact.sourceType;
+      if (enterpriseBundleOnly && sourceType !== "bundle") {
+        return {
+          response: makeErrorRes(req.id, "POLICY_DENIED", "企业 bundle_only 策略下仅允许安装 bundle 来源技能"),
+          events: []
+        };
+      }
+      const installBasePath = resolveSkillInstallBasePath(skillsDataRoot, scopeRef.value);
+      try {
+        const installedArtifact = installSkillArtifactToDisk({
+          basePath: installBasePath,
+          skillId,
+          artifact
+        });
+        const record: SkillInstalledRecord = {
+          skillId,
+          scope: scopeRef.value.scope,
+          tenantId: scopeRef.value.tenantId,
+          workspaceId: scopeRef.value.workspaceId,
+          userId: scopeRef.value.scope === "user" ? scopeRef.value.userId : "*",
+          installedAt: existing?.installedAt ?? nowIso,
+          installedBy: existing?.installedBy ?? installedBy,
+          state: "installed",
+          installPath: installedArtifact.installPath,
+          entrySkillPath: installedArtifact.entrySkillPath,
+          invocation: `/skill:${skillId}`,
+          artifactVersion: installedArtifact.artifactVersion,
+          source: catalogItem?.source ?? existing?.source ?? artifact.source,
+          sourceType,
+          commit: catalogItem?.commit ?? existing?.commit ?? artifact.commit,
+          path: catalogItem?.path ?? existing?.path ?? artifact.path,
+          checksum: catalogItem?.checksum ?? existing?.checksum ?? artifact.checksum,
+          license: catalogItem?.license ?? existing?.license ?? artifact.license,
+          tags: catalogItem?.tags ?? existing?.tags ?? artifact.tags
+        };
+        installedSkills.set(key, record);
+        persistSkillState();
+      } catch (error) {
+        return {
+          response: makeErrorRes(req.id, "INVALID_REQUEST", toErrorMessage(error)),
+          events: []
+        };
+      }
+      const record = installedSkills.get(key)!;
       return {
         response: makeSuccessRes(req.id, {
           item: toInstalledSkillPayload(record),
@@ -2474,7 +2655,14 @@ async function route(
         return invalidParams(req.id, "skills.uninstall 需要 skillId");
       }
       const key = buildInstalledSkillKey(scopeRef.value, skillId);
+      const existing = installedSkills.get(key);
+      if (existing) {
+        uninstallInstalledSkill(existing);
+      }
       const removed = installedSkills.delete(key);
+      if (removed) {
+        persistSkillState();
+      }
       return {
         response: makeSuccessRes(req.id, {
           skillId,
@@ -2538,6 +2726,12 @@ async function route(
           events: []
         };
       }
+      if (enterpriseBundleOnly) {
+        return {
+          response: makeErrorRes(req.id, "POLICY_DENIED", "企业 bundle_only 策略下禁止在线刷新 skills.catalog"),
+          events: []
+        };
+      }
       const defaults = buildSkillSyncDefaults(req.params, knownSkillSources);
       const effectiveConfig = resolveEffectiveSkillSyncConfigForScope({
         scopeRef: scopeRef.value,
@@ -2551,11 +2745,14 @@ async function route(
         statuses: skillSyncStatuses,
         runs: skillSyncRuns,
         catalog: skillCatalog,
+        artifacts: skillArtifacts,
         knownSources: knownSkillSources,
         preserveNextRunAt: true,
         trigger: "manual",
-        offlineHint: req.params.offline === true || toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false)
+        offlineHint: req.params.offline === true || toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false),
+        enforceBundleOnly: enterpriseBundleOnly
       });
+      persistSkillState();
       const items = applySkillCatalogFilters([...skillCatalog.values()], effectiveConfig);
       return {
         response: makeSuccessRes(req.id, {
@@ -3377,8 +3574,14 @@ function buildSkillSyncScopeKey(
   return `skill_sync:user:${tenantId}:${workspaceId}:${userId}`;
 }
 
-function buildInstalledSkillKey(scopeRef: SkillSyncScopeRef, skillId: string): string {
-  return `installed:${scopeRef.tenantId}:${scopeRef.workspaceId}:${scopeRef.userId}:${skillId}`;
+function buildInstalledSkillKey(scopeRef: {
+  scope: SkillSyncScope;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+}, skillId: string): string {
+  const scopeUserId = scopeRef.scope === "user" ? scopeRef.userId : "*";
+  return `installed:${scopeRef.scope}:${scopeRef.tenantId}:${scopeRef.workspaceId}:${scopeUserId}:${skillId}`;
 }
 
 function listInstalledSkills(
@@ -3386,24 +3589,37 @@ function listInstalledSkills(
   scopeRef: SkillSyncScopeRef
 ): SkillInstalledRecord[] {
   return [...installedSkills.values()]
-    .filter(
-      (item) =>
-        item.tenantId === scopeRef.tenantId &&
-        item.workspaceId === scopeRef.workspaceId &&
-        item.userId === scopeRef.userId
-    )
+    .filter((item) => {
+      if (item.tenantId !== scopeRef.tenantId) {
+        return false;
+      }
+      if (scopeRef.scope === "tenant") {
+        return item.scope === "tenant";
+      }
+      if (scopeRef.scope === "workspace") {
+        return item.scope === "workspace" && item.workspaceId === scopeRef.workspaceId;
+      }
+      return item.scope === "user" && item.workspaceId === scopeRef.workspaceId && item.userId === scopeRef.userId;
+    })
     .sort((left, right) => right.installedAt.localeCompare(left.installedAt));
 }
 
 function toInstalledSkillPayload(item: SkillInstalledRecord): Record<string, unknown> {
   return {
     skillId: item.skillId,
+    scope: item.scope,
     tenantId: item.tenantId,
     workspaceId: item.workspaceId,
     userId: item.userId,
     installedAt: item.installedAt,
     installedBy: item.installedBy,
+    state: item.state,
+    installPath: item.installPath,
+    entrySkillPath: item.entrySkillPath,
+    invocation: item.invocation,
+    artifactVersion: item.artifactVersion,
     source: item.source,
+    sourceType: item.sourceType,
     commit: item.commit,
     path: item.path,
     checksum: item.checksum,
@@ -3417,6 +3633,16 @@ function buildSkillSyncDefaults(params: Record<string, unknown>, knownSources: S
     timezone: requireString(params, "timezone") ?? defaultTimezone(),
     registeredSources: [...knownSources.values()]
   });
+}
+
+function applyEnterpriseBundleOnly(config: SkillSyncConfig, enforce: boolean): SkillSyncConfig {
+  if (!enforce) {
+    return config;
+  }
+  return {
+    ...config,
+    syncMode: "bundle_only"
+  };
 }
 
 function toSkillSyncTarget(scopeRef: SkillSyncScopeRef): Record<string, unknown> {
@@ -3632,10 +3858,12 @@ function executeSkillSyncRun(input: {
   statuses: Map<string, SkillSyncStatusRecord>;
   runs: SkillSyncRunRecord[];
   catalog: Map<string, SkillCatalogItem>;
+  artifacts: Map<string, SkillBundleItemRecord>;
   knownSources: Set<string>;
   preserveNextRunAt: boolean;
   trigger: "scheduled" | "manual";
   offlineHint: boolean;
+  enforceBundleOnly: boolean;
 }): SkillSyncRunRecord {
   const startedAt = input.now().toISOString();
   let status: SkillSyncRunStatus = "success";
@@ -3645,7 +3873,7 @@ function executeSkillSyncRun(input: {
 
   if (input.trigger === "scheduled" && input.effectiveConfig.manualOnly) {
     status = "skipped_manual_only";
-  } else if (input.effectiveConfig.syncMode === "bundle_only") {
+  } else if (input.effectiveConfig.syncMode === "bundle_only" || input.enforceBundleOnly) {
     status = "skipped_bundle_only";
   } else if (input.offlineHint) {
     status = "skipped_offline";
@@ -3664,14 +3892,36 @@ function executeSkillSyncRun(input: {
         const nextItem: SkillCatalogItem = {
           skillId,
           source,
+          sourceType: "online",
           commit: `sync_${Date.now().toString(36)}`,
           path: "SKILL.md",
           checksum: sha256(stableStringify({ skillId, source, tags, license })),
           license,
           tags,
+          artifactVersion: "v1",
+          entrySkillPath: "SKILL.md",
           availability: "online"
         };
         input.catalog.set(skillId, nextItem);
+        input.artifacts.set(skillId, {
+          skillId,
+          source,
+          sourceType: "online",
+          commit: nextItem.commit,
+          path: nextItem.path,
+          checksum: nextItem.checksum,
+          license: nextItem.license,
+          tags: [...nextItem.tags],
+          artifactVersion: "v1",
+          entrySkillPath: "SKILL.md",
+          files: [
+            {
+              path: "SKILL.md",
+              content: `# ${skillId}\n\n来自 ${source} 的同步技能模板。\n\n- 用法: /skill:${skillId} [args]\n`,
+              checksum: sha256(`skill:${skillId}:source:${source}`)
+            }
+          ]
+        });
         importedSkills += 1;
       }
     } catch (runError) {
@@ -3732,7 +3982,9 @@ async function tickSkillSyncScheduler(input: {
   statuses: Map<string, SkillSyncStatusRecord>;
   runs: SkillSyncRunRecord[];
   catalog: Map<string, SkillCatalogItem>;
+  artifacts: Map<string, SkillBundleItemRecord>;
   knownSources: Set<string>;
+  enforceBundleOnly: boolean;
 }): Promise<void> {
   const refs = [...input.configs.values()].map<SkillSyncScopeRef>((item) => ({
     scope: item.scope,
@@ -3771,10 +4023,12 @@ async function tickSkillSyncScheduler(input: {
       statuses: input.statuses,
       runs: input.runs,
       catalog: input.catalog,
+      artifacts: input.artifacts,
       knownSources: input.knownSources,
       preserveNextRunAt: false,
       trigger: "scheduled",
-      offlineHint: toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false)
+      offlineHint: toBoolean(process.env.OPENFOAL_FORCE_OFFLINE, false),
+      enforceBundleOnly: input.enforceBundleOnly
     });
   }
 }
@@ -3840,6 +4094,7 @@ function importSkillBundle(input: {
   now: () => Date;
   bundles: Map<string, SkillBundleRecord>;
   catalog: Map<string, SkillCatalogItem>;
+  artifacts: Map<string, SkillBundleItemRecord>;
   knownSources: Set<string>;
 }): { bundle: SkillBundleRecord; importedCount: number } {
   const items = normalizeSkillBundleItems(input.bundle.items);
@@ -3870,8 +4125,21 @@ function importSkillBundle(input: {
     if (item.source) {
       input.knownSources.add(item.source);
     }
-    input.catalog.set(item.skillId, {
+    input.artifacts.set(item.skillId, {
       ...item,
+      files: item.files.map((file) => ({ ...file }))
+    });
+    input.catalog.set(item.skillId, {
+      skillId: item.skillId,
+      source: item.source,
+      sourceType: item.sourceType,
+      commit: item.commit,
+      path: item.path,
+      checksum: item.checksum,
+      license: item.license,
+      tags: [...item.tags],
+      artifactVersion: item.artifactVersion,
+      entrySkillPath: item.entrySkillPath,
       availability: "cached"
     });
   }
@@ -3890,6 +4158,7 @@ function exportSkillBundle(input: {
   now: () => Date;
   bundles: Map<string, SkillBundleRecord>;
   catalog: Map<string, SkillCatalogItem>;
+  artifacts: Map<string, SkillBundleItemRecord>;
 }): SkillBundleRecord {
   if (input.bundleId) {
     const existing = input.bundles.get(input.bundleId);
@@ -3899,18 +4168,42 @@ function exportSkillBundle(input: {
     return existing;
   }
 
-  const selected = input.skillIds.length > 0
-    ? input.skillIds.map((skillId) => input.catalog.get(skillId)).filter((item): item is SkillCatalogItem => Boolean(item))
-    : [...input.catalog.values()];
-  const items: SkillBundleItemRecord[] = selected.map((item) => ({
-    skillId: item.skillId,
-    ...(item.source ? { source: item.source } : {}),
-    ...(item.commit ? { commit: item.commit } : {}),
-    ...(item.path ? { path: item.path } : {}),
-    ...(item.checksum ? { checksum: item.checksum } : {}),
-    ...(item.license ? { license: item.license } : {}),
-    tags: [...item.tags]
-  }));
+  const selectedSkillIds = input.skillIds.length > 0 ? input.skillIds : [...input.catalog.values()].map((item) => item.skillId);
+  const items: SkillBundleItemRecord[] = selectedSkillIds
+    .map((skillId) => {
+      const artifact = input.artifacts.get(skillId);
+      if (artifact) {
+        return {
+          ...artifact,
+          files: artifact.files.map((file) => ({ ...file }))
+        };
+      }
+      const catalogItem = input.catalog.get(skillId);
+      if (!catalogItem) {
+        return undefined;
+      }
+      const fallbackContent = `# ${skillId}\n\n导出的技能缺少原始 artifact，已生成占位 SKILL.md。\n`;
+      return {
+        skillId,
+        source: catalogItem.source,
+        sourceType: catalogItem.sourceType,
+        commit: catalogItem.commit,
+        path: catalogItem.path,
+        checksum: catalogItem.checksum,
+        license: catalogItem.license,
+        tags: [...catalogItem.tags],
+        artifactVersion: catalogItem.artifactVersion ?? "v1",
+        entrySkillPath: catalogItem.entrySkillPath ?? "SKILL.md",
+        files: [
+          {
+            path: "SKILL.md",
+            content: fallbackContent,
+            checksum: sha256(fallbackContent)
+          }
+        ]
+      };
+    })
+    .filter((item): item is SkillBundleItemRecord => Boolean(item));
   const checksum = computeBundleChecksum(items);
   const bundleId = `bundle_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
   const bundle: SkillBundleRecord = {
@@ -3937,11 +4230,19 @@ function toSkillBundlePayload(bundle: SkillBundleRecord): Record<string, unknown
     items: bundle.items.map((item) => ({
       skillId: item.skillId,
       source: item.source,
+      sourceType: item.sourceType,
       commit: item.commit,
       path: item.path,
       checksum: item.checksum,
       license: item.license,
-      tags: item.tags
+      tags: item.tags,
+      artifactVersion: item.artifactVersion,
+      entrySkillPath: item.entrySkillPath,
+      files: item.files.map((file) => ({
+        path: file.path,
+        content: file.content,
+        checksum: file.checksum
+      }))
     }))
   };
 }
@@ -3961,14 +4262,41 @@ function normalizeSkillBundleItems(value: unknown): SkillBundleItemRecord[] {
     }
     const rawLicense = requireString(item, "license");
     const license = rawLicense && (rawLicense === "allow" || rawLicense === "review" || rawLicense === "deny") ? rawLicense : undefined;
+    const sourceType = requireString(item, "sourceType") === "online" ? "online" : "bundle";
+    const files = normalizeBundleFiles(item.files);
+    const artifactVersion = requireString(item, "artifactVersion") ?? "v1";
+    const entrySkillPath = normalizeSkillRelativePath(requireString(item, "entrySkillPath") ?? "SKILL.md");
+    if (!files.some((file) => file.path === entrySkillPath)) {
+      throw new Error(`bundle item ${skillId} 缺少 entrySkillPath 文件: ${entrySkillPath}`);
+    }
+    const computedChecksum = computeBundleItemChecksum({
+      skillId,
+      ...(requireString(item, "source") ? { source: requireString(item, "source") } : {}),
+      sourceType,
+      ...(requireString(item, "commit") ? { commit: requireString(item, "commit") } : {}),
+      ...(requireString(item, "path") ? { path: requireString(item, "path") } : {}),
+      ...(license ? { license } : {}),
+      tags: toStringList(item.tags),
+      artifactVersion,
+      entrySkillPath,
+      files
+    });
+    const providedChecksum = requireString(item, "checksum");
+    if (providedChecksum && providedChecksum !== computedChecksum) {
+      throw new Error(`bundle item checksum 校验失败: ${skillId}`);
+    }
     out.push({
       skillId,
       ...(requireString(item, "source") ? { source: requireString(item, "source") } : {}),
+      sourceType,
       ...(requireString(item, "commit") ? { commit: requireString(item, "commit") } : {}),
       ...(requireString(item, "path") ? { path: requireString(item, "path") } : {}),
-      ...(requireString(item, "checksum") ? { checksum: requireString(item, "checksum") } : {}),
+      checksum: providedChecksum ?? computedChecksum,
       ...(license ? { license } : {}),
-      tags: toStringList(item.tags)
+      tags: toStringList(item.tags),
+      artifactVersion,
+      entrySkillPath,
+      files
     });
   }
   if (out.length === 0) {
@@ -3977,12 +4305,379 @@ function normalizeSkillBundleItems(value: unknown): SkillBundleItemRecord[] {
   return out;
 }
 
+function normalizeBundleFiles(value: unknown): SkillBundleFileRecord[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("bundle item files 不能为空");
+  }
+  const files: SkillBundleFileRecord[] = [];
+  for (const item of value) {
+    if (!isObjectRecord(item)) {
+      continue;
+    }
+    const filePath = normalizeSkillRelativePath(requireString(item, "path"));
+    const content = typeof item.content === "string" ? item.content : undefined;
+    if (!filePath || content === undefined) {
+      continue;
+    }
+    const checksum = requireString(item, "checksum") ?? sha256(content);
+    if (checksum !== sha256(content)) {
+      throw new Error(`bundle file checksum 校验失败: ${filePath}`);
+    }
+    files.push({
+      path: filePath,
+      content,
+      checksum
+    });
+  }
+  if (files.length === 0) {
+    throw new Error("bundle item files 不能为空");
+  }
+  return files;
+}
+
+function computeBundleItemChecksum(item: Omit<SkillBundleItemRecord, "checksum">): string {
+  return sha256(
+    stableStringify({
+      skillId: item.skillId,
+      source: item.source,
+      sourceType: item.sourceType,
+      commit: item.commit,
+      path: item.path,
+      license: item.license,
+      tags: item.tags,
+      artifactVersion: item.artifactVersion,
+      entrySkillPath: item.entrySkillPath,
+      files: item.files.map((file) => ({
+        path: file.path,
+        checksum: file.checksum
+      }))
+    })
+  );
+}
+
 function computeBundleChecksum(items: SkillBundleItemRecord[]): string {
   return sha256(stableStringify(items));
 }
 
 function buildBundleSignature(checksum: string): string {
   return `sig:${checksum}`;
+}
+
+function resolveSkillsDataRoot(storageBackend: "memory" | "sqlite" | "postgres", enterpriseStorageRoot: string): string {
+  if (storageBackend === "postgres") {
+    return joinPath(enterpriseStorageRoot, "skills-runtime");
+  }
+  return joinPath(process.cwd(), ".openfoal", "skills-runtime");
+}
+
+function resolveSkillRuntimeStatePath(skillsDataRoot: string): string {
+  return joinPath(skillsDataRoot, "state.json");
+}
+
+function createEmptySkillRuntimeState(): SkillRuntimeState {
+  return {
+    version: 1,
+    skillSyncConfigs: [],
+    skillSyncStatuses: [],
+    skillSyncRuns: [],
+    skillBundles: [],
+    skillCatalog: [],
+    skillArtifacts: [],
+    installedSkills: [],
+    knownSkillSources: []
+  };
+}
+
+function loadSkillRuntimeState(skillsDataRoot: string): SkillRuntimeState {
+  const statePath = resolveSkillRuntimeStatePath(skillsDataRoot);
+  if (!existsSync(statePath)) {
+    return createEmptySkillRuntimeState();
+  }
+  try {
+    const raw = readFileSync(statePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isObjectRecord(parsed)) {
+      return createEmptySkillRuntimeState();
+    }
+    const state = createEmptySkillRuntimeState();
+    state.skillSyncConfigs = readArray(parsed.skillSyncConfigs).filter(isObjectRecord) as SkillSyncConfigRecord[];
+    state.skillSyncStatuses = readArray(parsed.skillSyncStatuses).filter(isObjectRecord) as SkillSyncStatusRecord[];
+    state.skillSyncRuns = readArray(parsed.skillSyncRuns).filter(isObjectRecord) as SkillSyncRunRecord[];
+    state.skillBundles = readArray(parsed.skillBundles).filter(isObjectRecord) as SkillBundleRecord[];
+    state.skillCatalog = readArray(parsed.skillCatalog).filter(isObjectRecord) as SkillCatalogItem[];
+    state.skillArtifacts = readArray(parsed.skillArtifacts).filter(isObjectRecord) as SkillBundleItemRecord[];
+    state.installedSkills = readArray(parsed.installedSkills).filter(isObjectRecord) as SkillInstalledRecord[];
+    state.knownSkillSources = toStringList(parsed.knownSkillSources);
+    return state;
+  } catch {
+    return createEmptySkillRuntimeState();
+  }
+}
+
+function saveSkillRuntimeState(skillsDataRoot: string, state: Omit<SkillRuntimeState, "version">): void {
+  const statePath = resolveSkillRuntimeStatePath(skillsDataRoot);
+  const nextState: SkillRuntimeState = {
+    version: 1,
+    skillSyncConfigs: state.skillSyncConfigs,
+    skillSyncStatuses: state.skillSyncStatuses,
+    skillSyncRuns: state.skillSyncRuns,
+    skillBundles: state.skillBundles,
+    skillCatalog: state.skillCatalog,
+    skillArtifacts: state.skillArtifacts,
+    installedSkills: state.installedSkills,
+    knownSkillSources: state.knownSkillSources
+  };
+  const tmpPath = `${statePath}.tmp_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`;
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(tmpPath, JSON.stringify(nextState, null, 2), "utf8");
+  renameSync(tmpPath, statePath);
+}
+
+function normalizeLoadedSkillArtifact(item: SkillBundleItemRecord): SkillBundleItemRecord {
+  const files = Array.isArray(item.files)
+    ? item.files
+        .filter((file) => isObjectRecord(file) && typeof file.path === "string" && typeof file.content === "string")
+        .map((file) => {
+          const path = normalizeSkillRelativePath(file.path);
+          const content = file.content;
+          const checksum = typeof file.checksum === "string" && file.checksum.length > 0 ? file.checksum : sha256(content);
+          return {
+            path,
+            content,
+            checksum
+          };
+        })
+    : [];
+  const entrySkillPath = normalizeSkillRelativePath(item.entrySkillPath || "SKILL.md");
+  const normalizedFiles = files.length > 0
+    ? files
+    : [
+        {
+          path: "SKILL.md",
+          content: `# ${item.skillId}\n`,
+          checksum: sha256(`# ${item.skillId}\n`)
+        }
+      ];
+  if (!normalizedFiles.some((file) => file.path === entrySkillPath)) {
+    normalizedFiles.push({
+      path: entrySkillPath,
+      content: `# ${item.skillId}\n`,
+      checksum: sha256(`# ${item.skillId}\n`)
+    });
+  }
+  return {
+    skillId: item.skillId,
+    source: item.source,
+    sourceType: item.sourceType === "online" ? "online" : "bundle",
+    commit: item.commit,
+    path: item.path,
+    checksum: item.checksum,
+    license: item.license,
+    tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === "string") : [],
+    artifactVersion: item.artifactVersion || "v1",
+    entrySkillPath,
+    files: normalizedFiles
+  };
+}
+
+function resolveSkillInstallBasePath(skillsDataRoot: string, scopeRef: SkillSyncScopeRef): string {
+  const tenantId = sanitizeScopePathSegment(scopeRef.tenantId);
+  const workspaceId = sanitizeScopePathSegment(scopeRef.workspaceId);
+  const userId = sanitizeScopePathSegment(scopeRef.userId);
+  if (scopeRef.scope === "tenant") {
+    return joinPath(skillsDataRoot, "tenants", tenantId, "workspaces", workspaceId, "skills", "tenant");
+  }
+  if (scopeRef.scope === "workspace") {
+    return joinPath(skillsDataRoot, "tenants", tenantId, "workspaces", workspaceId, "skills", "workspace");
+  }
+  return joinPath(skillsDataRoot, "tenants", tenantId, "workspaces", workspaceId, "users", userId, "skills");
+}
+
+function normalizeSkillRelativePath(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("skill 文件路径必须是字符串");
+  }
+  const trimmed = value.trim().replace(/\\/g, "/");
+  const parts = trimmed.split("/").filter((segment) => segment.length > 0);
+  if (parts.length === 0) {
+    throw new Error("skill 文件路径不能为空");
+  }
+  for (const part of parts) {
+    if (part === "." || part === "..") {
+      throw new Error(`非法 skill 文件路径: ${value}`);
+    }
+  }
+  return parts.join("/");
+}
+
+function ensureInsidePath(root: string, target: string): void {
+  const resolvedRoot = resolvePath(root);
+  const resolvedTarget = resolvePath(target);
+  if (resolvedTarget === resolvedRoot) {
+    return;
+  }
+  if (!resolvedTarget.startsWith(`${resolvedRoot}/`)) {
+    throw new Error(`非法路径访问: ${target}`);
+  }
+}
+
+function installSkillArtifactToDisk(input: {
+  basePath: string;
+  skillId: string;
+  artifact: SkillBundleItemRecord;
+}): { installPath: string; entrySkillPath: string; artifactVersion: string } {
+  const skillFolder = sanitizeScopePathSegment(input.skillId);
+  const artifactVersion = sanitizeScopePathSegment(input.artifact.artifactVersion || "v1");
+  const installPath = joinPath(input.basePath, skillFolder, "versions", artifactVersion);
+  const tmpPath = `${installPath}.tmp_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`;
+  rmSync(tmpPath, { recursive: true, force: true });
+  mkdirSync(tmpPath, { recursive: true });
+  for (const file of input.artifact.files) {
+    const relativePath = normalizeSkillRelativePath(file.path);
+    const filePath = joinPath(tmpPath, relativePath);
+    ensureInsidePath(tmpPath, filePath);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, file.content, "utf8");
+  }
+  const entrySkillPath = normalizeSkillRelativePath(input.artifact.entrySkillPath || "SKILL.md");
+  const entryAbsolute = joinPath(tmpPath, entrySkillPath);
+  ensureInsidePath(tmpPath, entryAbsolute);
+  if (!existsSync(entryAbsolute)) {
+    rmSync(tmpPath, { recursive: true, force: true });
+    throw new Error(`entrySkillPath 文件不存在: ${entrySkillPath}`);
+  }
+  mkdirSync(dirname(installPath), { recursive: true });
+  rmSync(installPath, { recursive: true, force: true });
+  renameSync(tmpPath, installPath);
+  return {
+    installPath,
+    entrySkillPath,
+    artifactVersion
+  };
+}
+
+function uninstallInstalledSkill(record: SkillInstalledRecord): void {
+  if (!record.installPath) {
+    return;
+  }
+  rmSync(record.installPath, { recursive: true, force: true });
+}
+
+function prepareAgentRunInput(input: {
+  params: Record<string, unknown>;
+  state: ConnectionState;
+  installedSkills: Map<string, SkillInstalledRecord>;
+}):
+  | { ok: true; input: string }
+  | { ok: false; code: "INVALID_REQUEST"; message: string } {
+  const rawInput = requireString(input.params, "input");
+  if (!rawInput) {
+    return {
+      ok: true,
+      input: ""
+    };
+  }
+  const matched = /^\/skill:([A-Za-z0-9._-]+)(?:\s+([\s\S]*))?$/u.exec(rawInput.trim());
+  if (!matched) {
+    return {
+      ok: true,
+      input: rawInput
+    };
+  }
+  const skillId = matched[1];
+  const args = (matched[2] ?? "").trim();
+  const tenantId = requireString(input.params, "tenantId") ?? input.state.principal?.tenantId ?? "t_default";
+  const workspaceId = requireString(input.params, "workspaceId") ?? input.state.principal?.workspaceIds[0] ?? "w_default";
+  const userId = resolveSessionOwnerUserId(input.params, input.state);
+  const installed = resolveEffectiveInstalledSkillForRun({
+    installedSkills: input.installedSkills,
+    tenantId,
+    workspaceId,
+    userId,
+    skillId
+  });
+  if (!installed) {
+    return {
+      ok: false,
+      code: "INVALID_REQUEST",
+      message: `未安装技能: ${skillId}`
+    };
+  }
+  const entrySkillPath = normalizeSkillRelativePath(installed.entrySkillPath || "SKILL.md");
+  const entryAbsolute = joinPath(installed.installPath, entrySkillPath);
+  ensureInsidePath(installed.installPath, entryAbsolute);
+  if (!existsSync(entryAbsolute)) {
+    return {
+      ok: false,
+      code: "INVALID_REQUEST",
+      message: `技能入口文件缺失: ${skillId} -> ${entrySkillPath}`
+    };
+  }
+  const skillPrompt = readFileSync(entryAbsolute, "utf8");
+  const mergedInput =
+    [
+      `[OpenFoal Skill Invocation]`,
+      `skillId: ${skillId}`,
+      `scope: ${installed.scope}`,
+      `entry: ${entrySkillPath}`,
+      "",
+      skillPrompt,
+      args ? `\n[Skill Args]\n${args}` : ""
+    ]
+      .filter((item) => item.length > 0)
+      .join("\n") + "\n";
+  return {
+    ok: true,
+    input: mergedInput
+  };
+}
+
+function resolveEffectiveInstalledSkillForRun(input: {
+  installedSkills: Map<string, SkillInstalledRecord>;
+  tenantId: string;
+  workspaceId: string;
+  userId: string;
+  skillId: string;
+}): SkillInstalledRecord | undefined {
+  const user = input.installedSkills.get(
+    buildInstalledSkillKey(
+      {
+        scope: "user",
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        userId: input.userId
+      },
+      input.skillId
+    )
+  );
+  if (user) {
+    return user;
+  }
+  const workspace = input.installedSkills.get(
+    buildInstalledSkillKey(
+      {
+        scope: "workspace",
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        userId: input.userId
+      },
+      input.skillId
+    )
+  );
+  if (workspace) {
+    return workspace;
+  }
+  return input.installedSkills.get(
+    buildInstalledSkillKey(
+      {
+        scope: "tenant",
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        userId: input.userId
+      },
+      input.skillId
+    )
+  );
 }
 
 function sha256(input: string): string {
@@ -4247,6 +4942,10 @@ function asString(value: unknown): string | undefined {
     return undefined;
   }
   return value;
+}
+
+function readArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function normalizeTranscriptItemForClient<T extends { event: string; payload: Record<string, unknown> }>(item: T): T {

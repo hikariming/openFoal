@@ -7,6 +7,7 @@ import {
   getGatewayClient,
   type GatewaySkillBundle,
   type GatewaySkillBundleSummary,
+  type GatewayInstalledSkill,
   type GatewaySkillSyncConfigPatch,
   type GatewaySkillSyncConfigResponse,
   type GatewaySkillSyncStatusResponse,
@@ -53,6 +54,7 @@ export function SkillSyncPage(): JSX.Element {
   const [userDraft, setUserDraft] = useState<SyncDraft>(() => buildDraft());
 
   const [bundles, setBundles] = useState<GatewaySkillBundleSummary[]>([]);
+  const [installedSkills, setInstalledSkills] = useState<GatewayInstalledSkill[]>([]);
   const [bundleExportName, setBundleExportName] = useState("bundle-enterprise");
   const [bundleText, setBundleText] = useState("");
 
@@ -61,7 +63,7 @@ export function SkillSyncPage(): JSX.Element {
     setError(undefined);
     try {
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const [tenantCfg, workspaceCfg, userCfg, tenantStat, workspaceStat, userStat, bundleItems] = await Promise.all([
+      const [tenantCfg, workspaceCfg, userCfg, tenantStat, workspaceStat, userStat, bundleItems, installedItems] = await Promise.all([
         permissions.canReadSkillSync
           ? safeGetConfig(client, {
               scope: "tenant",
@@ -110,7 +112,14 @@ export function SkillSyncPage(): JSX.Element {
               timezone
             })
           : Promise.resolve(undefined),
-        permissions.canManageSkillBundles ? client.listSkillBundles() : Promise.resolve([])
+        permissions.canManageSkillBundles ? client.listSkillBundles() : Promise.resolve([]),
+        permissions.canReadSkillSync
+          ? client.listInstalledSkills({
+              scope: "workspace",
+              tenantId,
+              workspaceId
+            })
+          : Promise.resolve([])
       ]);
 
       setTenantConfig(tenantCfg);
@@ -120,6 +129,7 @@ export function SkillSyncPage(): JSX.Element {
       setWorkspaceStatus(workspaceStat);
       setUserStatus(userStat);
       setBundles(bundleItems);
+      setInstalledSkills(installedItems);
       setTenantDraft(buildDraft(tenantCfg));
       setWorkspaceDraft(buildDraft(workspaceCfg));
       setUserDraft(buildDraft(userCfg));
@@ -305,6 +315,21 @@ export function SkillSyncPage(): JSX.Element {
           </Space>
         </Card>
       ) : null}
+
+      <Card title={t("common.installed")} style={{ width: "100%" }}>
+        <Space vertical align="start" style={{ width: "100%" }}>
+          <Typography.Text type="tertiary">{installedSkills.length}</Typography.Text>
+          {installedSkills.length === 0 ? (
+            <Typography.Text type="tertiary">-</Typography.Text>
+          ) : (
+            installedSkills.map((item) => (
+              <Typography.Text key={`${item.scope ?? "user"}:${item.skillId}`} type="tertiary">
+                [{item.scope ?? "user"}] {item.skillId} · {item.invocation ?? `/skill:${item.skillId}`}
+              </Typography.Text>
+            ))
+          )}
+        </Space>
+      </Card>
     </Space>
   );
 }

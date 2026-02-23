@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createConnectionState, createGatewayRouter } from "../../apps/gateway/dist/index.js";
 
@@ -224,7 +227,15 @@ test("skills.bundle import/export/list lifecycle works", async () => {
             skillId: "demo.skill",
             source: "anthropics/skills",
             tags: ["ops"],
-            license: "allow"
+            license: "allow",
+            artifactVersion: "v1",
+            entrySkillPath: "SKILL.md",
+            files: [
+              {
+                path: "SKILL.md",
+                content: "# demo.skill\n\nRun demo skill.\n"
+              }
+            ]
           }
         ]
       }
@@ -272,26 +283,60 @@ test("skills install/list/uninstall lifecycle works", async () => {
     authSource: "local",
     claims: {}
   };
+  const memberPrincipal = state.principal;
 
-  const refresh = await router.handle(
-    req("r_install_catalog_refresh", "skills.catalog.refresh", {
-      idempotencyKey: "idem_install_catalog_refresh_1",
-      scope: "user",
-      sourceFilters: ["anthropics/skills"]
+  state.principal = {
+    subject: "u_skill_install_admin",
+    userId: "u_skill_install_admin",
+    tenantId: "t_install",
+    workspaceIds: ["w_install"],
+    roles: ["tenant_admin"],
+    authSource: "local",
+    claims: {}
+  };
+  const imported = await router.handle(
+    req("r_install_bundle_import", "skills.bundle.import", {
+      idempotencyKey: "idem_install_bundle_import_1",
+      bundle: {
+        bundleId: "bundle_install_test_1",
+        name: "bundle-install-test",
+        items: [
+          {
+            skillId: "bundle.skill",
+            source: "enterprise/local",
+            sourceType: "bundle",
+            tags: ["ops"],
+            license: "allow",
+            artifactVersion: "v1",
+            entrySkillPath: "SKILL.md",
+            files: [
+              {
+                path: "SKILL.md",
+                content: "# bundle.skill\n\nUse this skill.\n"
+              }
+            ]
+          }
+        ]
+      }
     }),
     state
   );
-  assert.equal(refresh.response.ok, true);
+  assert.equal(imported.response.ok, true);
+  state.principal = memberPrincipal;
 
   const install = await router.handle(
     req("r_install_skill", "skills.install", {
       idempotencyKey: "idem_install_skill_1",
       scope: "user",
-      skillId: "anthropics_skills.starter"
+      skillId: "bundle.skill"
     }),
     state
   );
   assert.equal(install.response.ok, true);
+  if (install.response.ok) {
+    assert.equal(install.response.payload.item.invocation, "/skill:bundle.skill");
+    assert.equal(typeof install.response.payload.item.installPath, "string");
+  }
 
   const listInstalled = await router.handle(
     req("r_install_list_installed", "skills.installed.list", {
@@ -302,20 +347,211 @@ test("skills install/list/uninstall lifecycle works", async () => {
   assert.equal(listInstalled.response.ok, true);
   if (listInstalled.response.ok) {
     assert.equal(Array.isArray(listInstalled.response.payload.items), true);
-    assert.equal(listInstalled.response.payload.items.some((item) => item.skillId === "anthropics_skills.starter"), true);
+    assert.equal(listInstalled.response.payload.items.some((item) => item.skillId === "bundle.skill"), true);
   }
+
+  const invoke = await router.handle(
+    req("r_install_skill_invoke", "agent.run", {
+      idempotencyKey: "idem_install_skill_invoke_1",
+      sessionId: "s_skill_install_run",
+      input: "/skill:bundle.skill hello",
+      runtimeMode: "local"
+    }),
+    state
+  );
+  assert.equal(invoke.response.ok, true);
 
   const uninstall = await router.handle(
     req("r_install_uninstall", "skills.uninstall", {
       idempotencyKey: "idem_install_uninstall_1",
       scope: "user",
-      skillId: "anthropics_skills.starter"
+      skillId: "bundle.skill"
     }),
     state
   );
   assert.equal(uninstall.response.ok, true);
   if (uninstall.response.ok) {
     assert.equal(uninstall.response.payload.removed, true);
+  }
+});
+
+test("enterprise bundle_only blocks online refresh and non-bundle install", async () => {
+  const previous = process.env.OPENFOAL_SKILLS_ENTERPRISE_BUNDLE_ONLY;
+  process.env.OPENFOAL_SKILLS_ENTERPRISE_BUNDLE_ONLY = "true";
+  try {
+    const router = createGatewayRouter();
+    const state = createConnectionState();
+    await router.handle(req("r_bundle_only_connect", "connect", {}), state);
+    state.principal = {
+      subject: "u_bundle_only_member",
+      userId: "u_bundle_only_member",
+      tenantId: "t_bundle_only",
+      workspaceIds: ["w_bundle_only"],
+      roles: ["member"],
+      authSource: "local",
+      claims: {}
+    };
+
+    const refresh = await router.handle(
+      req("r_bundle_only_refresh", "skills.catalog.refresh", {
+        idempotencyKey: "idem_bundle_only_refresh_1",
+        scope: "user"
+      }),
+      state
+    );
+    assert.equal(refresh.response.ok, false);
+    if (!refresh.response.ok) {
+      assert.equal(refresh.response.error.code, "POLICY_DENIED");
+    }
+
+    state.principal = {
+      subject: "u_bundle_only_admin",
+      userId: "u_bundle_only_admin",
+      tenantId: "t_bundle_only",
+      workspaceIds: ["w_bundle_only"],
+      roles: ["tenant_admin"],
+      authSource: "local",
+      claims: {}
+    };
+    const imported = await router.handle(
+      req("r_bundle_only_import", "skills.bundle.import", {
+        idempotencyKey: "idem_bundle_only_import_1",
+        bundle: {
+          bundleId: "bundle_bundle_only_1",
+          name: "bundle-only-test",
+          items: [
+            {
+              skillId: "online.skill",
+              sourceType: "online",
+              artifactVersion: "v1",
+              entrySkillPath: "SKILL.md",
+              tags: ["test"],
+              files: [
+                {
+                  path: "SKILL.md",
+                  content: "# online.skill\n"
+                }
+              ]
+            }
+          ]
+        }
+      }),
+      state
+    );
+    assert.equal(imported.response.ok, true);
+
+    state.principal = {
+      subject: "u_bundle_only_member",
+      userId: "u_bundle_only_member",
+      tenantId: "t_bundle_only",
+      workspaceIds: ["w_bundle_only"],
+      roles: ["member"],
+      authSource: "local",
+      claims: {}
+    };
+    const install = await router.handle(
+      req("r_bundle_only_install", "skills.install", {
+        idempotencyKey: "idem_bundle_only_install_1",
+        scope: "user",
+        skillId: "online.skill"
+      }),
+      state
+    );
+    assert.equal(install.response.ok, false);
+    if (!install.response.ok) {
+      assert.equal(install.response.error.code, "POLICY_DENIED");
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.OPENFOAL_SKILLS_ENTERPRISE_BUNDLE_ONLY;
+    } else {
+      process.env.OPENFOAL_SKILLS_ENTERPRISE_BUNDLE_ONLY = previous;
+    }
+  }
+});
+
+test("skills install state persists across router restart", async () => {
+  const skillsDataRoot = mkdtempSync(join(tmpdir(), "openfoal-skill-state-"));
+  try {
+    const router1 = createGatewayRouter({ skillsDataRoot });
+    const state1 = createConnectionState();
+    await router1.handle(req("r_persist_connect_1", "connect", {}), state1);
+    state1.principal = {
+      subject: "u_persist_admin",
+      userId: "u_persist_admin",
+      tenantId: "t_persist",
+      workspaceIds: ["w_persist"],
+      roles: ["tenant_admin"],
+      authSource: "local",
+      claims: {}
+    };
+    const imported = await router1.handle(
+      req("r_persist_import", "skills.bundle.import", {
+        idempotencyKey: "idem_persist_import_1",
+        bundle: {
+          bundleId: "bundle_persist_1",
+          name: "bundle-persist",
+          items: [
+            {
+              skillId: "persist.skill",
+              sourceType: "bundle",
+              artifactVersion: "v1",
+              entrySkillPath: "SKILL.md",
+              tags: ["persist"],
+              files: [
+                {
+                  path: "SKILL.md",
+                  content: "# persist.skill\n"
+                }
+              ]
+            }
+          ]
+        }
+      }),
+      state1
+    );
+    assert.equal(imported.response.ok, true);
+
+    const install = await router1.handle(
+      req("r_persist_install", "skills.install", {
+        idempotencyKey: "idem_persist_install_1",
+        scope: "user",
+        tenantId: "t_persist",
+        workspaceId: "w_persist",
+        userId: "u_persist_admin",
+        skillId: "persist.skill"
+      }),
+      state1
+    );
+    assert.equal(install.response.ok, true);
+
+    const router2 = createGatewayRouter({ skillsDataRoot });
+    const state2 = createConnectionState();
+    await router2.handle(req("r_persist_connect_2", "connect", {}), state2);
+    state2.principal = {
+      subject: "u_persist_admin",
+      userId: "u_persist_admin",
+      tenantId: "t_persist",
+      workspaceIds: ["w_persist"],
+      roles: ["tenant_admin"],
+      authSource: "local",
+      claims: {}
+    };
+    const listed = await router2.handle(
+      req("r_persist_list", "skills.installed.list", {
+        scope: "user",
+        tenantId: "t_persist",
+        workspaceId: "w_persist",
+        userId: "u_persist_admin"
+      }),
+      state2
+    );
+    assert.equal(listed.response.ok, true);
+    if (listed.response.ok) {
+      assert.equal(listed.response.payload.items.some((item) => item.skillId === "persist.skill"), true);
+    }
+  } finally {
+    rmSync(skillsDataRoot, { recursive: true, force: true });
   }
 });
 

@@ -32,6 +32,7 @@ type SkillRow = {
   title: string;
   desc: string;
   brand: string;
+  invocation: string;
   source?: string;
   tags: string[];
   installed: boolean;
@@ -107,6 +108,7 @@ export function SkillStoreView() {
       title: formatSkillTitle(item.skillId),
       desc: buildSkillDesc(item.source, item.tags),
       brand: makeSkillBrand(item.skillId),
+      invocation: `/skill:${item.skillId}`,
       source: item.source,
       tags: item.tags,
       installed: installedSet.has(item.skillId)
@@ -119,6 +121,7 @@ export function SkillStoreView() {
       title: formatSkillTitle(item.skillId),
       desc: buildSkillDesc(item.source, item.tags),
       brand: makeSkillBrand(item.skillId),
+      invocation: item.invocation ?? `/skill:${item.skillId}`,
       source: item.source,
       tags: item.tags,
       installed: true,
@@ -294,6 +297,7 @@ function SkillRowItem(props: SkillRowItemProps): JSX.Element {
       <div className="skill-copy">
         <Typography.Text className="skill-title">{props.item.title}</Typography.Text>
         <Typography.Text type="tertiary">{subtitle}</Typography.Text>
+        <Typography.Text type="tertiary">{props.item.invocation}</Typography.Text>
       </div>
       <button
         type="button"

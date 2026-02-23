@@ -578,6 +578,40 @@ test("AUTH-UT-004 authorizer role matrix enforces member/workspace_admin/tenant_
     memberState
   );
   assert.equal(memberSkillSyncUpsert.response.ok, true);
+  const bundleSeedState = await connectLocalRole(router, {
+    userId: "u_bundle_seed",
+    role: "tenant_admin",
+    tenantId: "t_matrix",
+    workspaceIds: ["w_alpha"],
+    secret: "matrix_secret",
+    nowMs
+  });
+  const bundleSeed = await router.handle(
+    req("r_seed_bundle_for_member_install", "skills.bundle.import", {
+      idempotencyKey: "idem_seed_bundle_for_member_install_1",
+      bundle: {
+        bundleId: "bundle_auth_seed_1",
+        name: "bundle-auth-seed",
+        items: [
+          {
+            skillId: "demo.skill",
+            sourceType: "bundle",
+            artifactVersion: "v1",
+            entrySkillPath: "SKILL.md",
+            tags: ["seed"],
+            files: [
+              {
+                path: "SKILL.md",
+                content: "# demo.skill\n"
+              }
+            ]
+          }
+        ]
+      }
+    }),
+    bundleSeedState
+  );
+  assert.equal(bundleSeed.response.ok, true);
   const memberSkillInstallAllowed = await router.handle(
     req("r_member_skill_install", "skills.install", {
       idempotencyKey: "idem_member_skill_install_1",

@@ -333,14 +333,24 @@ export type GatewaySkillSyncStatusResponse = {
   recentRuns: GatewaySkillSyncRun[];
 };
 
+export type GatewaySkillBundleFile = {
+  path: string;
+  content: string;
+  checksum: string;
+};
+
 export type GatewaySkillBundleItem = {
   skillId: string;
   source?: string;
+  sourceType?: "bundle" | "online";
   commit?: string;
   path?: string;
   checksum?: string;
   license?: SkillSyncLicense;
   tags: string[];
+  artifactVersion?: string;
+  entrySkillPath?: string;
+  files?: GatewaySkillBundleFile[];
 };
 
 export type GatewaySkillBundle = {
@@ -366,11 +376,14 @@ export type GatewaySkillBundleSummary = {
 export type GatewaySkillCatalogItem = {
   skillId: string;
   source?: string;
+  sourceType?: "bundle" | "online";
   commit?: string;
   path?: string;
   checksum?: string;
   license?: SkillSyncLicense;
   tags: string[];
+  artifactVersion?: string;
+  entrySkillPath?: string;
   availability: "online" | "cached" | "unavailable";
 };
 
@@ -386,12 +399,19 @@ export type GatewaySkillCatalogResult = {
 
 export type GatewayInstalledSkill = {
   skillId: string;
+  scope?: SkillSyncScope;
   tenantId: string;
   workspaceId: string;
   userId: string;
   installedAt: string;
   installedBy: string;
+  state?: "installed";
+  installPath?: string;
+  entrySkillPath?: string;
+  invocation?: string;
+  artifactVersion?: string;
   source?: string;
+  sourceType?: "bundle" | "online";
   commit?: string;
   path?: string;
   checksum?: string;
@@ -2351,6 +2371,9 @@ function isGatewaySkillBundleItem(value: unknown): value is GatewaySkillBundleIt
   if (value.source !== undefined && typeof value.source !== "string") {
     return false;
   }
+  if (value.sourceType !== undefined && value.sourceType !== "bundle" && value.sourceType !== "online") {
+    return false;
+  }
   if (value.commit !== undefined && typeof value.commit !== "string") {
     return false;
   }
@@ -2365,6 +2388,22 @@ function isGatewaySkillBundleItem(value: unknown): value is GatewaySkillBundleIt
   }
   if (!Array.isArray(value.tags) || !value.tags.every((entry) => typeof entry === "string")) {
     return false;
+  }
+  if (value.artifactVersion !== undefined && typeof value.artifactVersion !== "string") {
+    return false;
+  }
+  if (value.entrySkillPath !== undefined && typeof value.entrySkillPath !== "string") {
+    return false;
+  }
+  if (value.files !== undefined) {
+    if (!Array.isArray(value.files)) {
+      return false;
+    }
+    for (const file of value.files) {
+      if (!isRecord(file) || typeof file.path !== "string" || typeof file.content !== "string" || typeof file.checksum !== "string") {
+        return false;
+      }
+    }
   }
   return true;
 }
@@ -2410,10 +2449,13 @@ function isGatewaySkillCatalogItem(value: unknown): value is GatewaySkillCatalog
   if (
     typeof value.skillId !== "string" ||
     (value.source !== undefined && typeof value.source !== "string") ||
+    (value.sourceType !== undefined && value.sourceType !== "bundle" && value.sourceType !== "online") ||
     (value.commit !== undefined && typeof value.commit !== "string") ||
     (value.path !== undefined && typeof value.path !== "string") ||
     (value.checksum !== undefined && typeof value.checksum !== "string") ||
-    (value.license !== undefined && !isSkillSyncLicense(value.license))
+    (value.license !== undefined && !isSkillSyncLicense(value.license)) ||
+    (value.artifactVersion !== undefined && typeof value.artifactVersion !== "string") ||
+    (value.entrySkillPath !== undefined && typeof value.entrySkillPath !== "string")
   ) {
     return false;
   }
@@ -2462,6 +2504,27 @@ function isGatewayInstalledSkill(value: unknown): value is GatewayInstalledSkill
     return false;
   }
   if (value.source !== undefined && typeof value.source !== "string") {
+    return false;
+  }
+  if (value.scope !== undefined && !isSkillSyncScope(value.scope)) {
+    return false;
+  }
+  if (value.state !== undefined && value.state !== "installed") {
+    return false;
+  }
+  if (value.installPath !== undefined && typeof value.installPath !== "string") {
+    return false;
+  }
+  if (value.entrySkillPath !== undefined && typeof value.entrySkillPath !== "string") {
+    return false;
+  }
+  if (value.invocation !== undefined && typeof value.invocation !== "string") {
+    return false;
+  }
+  if (value.artifactVersion !== undefined && typeof value.artifactVersion !== "string") {
+    return false;
+  }
+  if (value.sourceType !== undefined && value.sourceType !== "bundle" && value.sourceType !== "online") {
     return false;
   }
   if (value.commit !== undefined && typeof value.commit !== "string") {
