@@ -80,12 +80,17 @@
 9. `P2-E2E-002` 控制台策略变更影响下次 run。
 10. `P2-E2E-003` 审计页可追溯拒绝与策略变更事件。
 11. `P2-E2E-004` 启动 mock docker-runner + gateway + web-console，验证审计筛选/分页链路。
+12. `PPT-E2E-001` 个人模式 bundle 导入、安装、`/skill:openfoal-ppt-v1` 触发并产出 `.pptx`。
+13. `PPT-E2E-002` 企业模式同链路产出 `.pptx`，并验证 tenant/workspace scope。
+14. `PPT-E2E-003` 企业 `bundle_only` 阻断在线 refresh/install，仅 bundle 安装可用。
+15. `PPT-E2E-004` 离线演练：复用 bundle 和已装 skill（依赖本地可用模型）产出 `.pptx`。
 
 自动化脚本映射：
 
 1. `P2-E2E-004` 对应命令：`npm run test:p2:e2e`
 2. Docker 已启动场景补充命令：`npm run test:p2:e2e:docker`
 3. `AUTH-CT-001~004` 与 `AUTH-UT-001~004` 对应命令：`npm run test:auth`
+4. `PPT-E2E-001~004` 对应命令：`npm run test:skill:ppt:e2e`（详见 `docs/testing/PPT_SKILL_E2E.md`）
 
 ### Auth（首批）
 

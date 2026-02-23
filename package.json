@@ -16,6 +16,7 @@
     "test:p1:smoke": "node scripts/p1-smoke-test.mjs",
     "test:p2:e2e": "node scripts/p2-e2e-test.mjs",
     "test:p2:e2e:docker": "node scripts/p2-e2e-docker-smoke.mjs",
+    "test:skill:ppt:e2e": "node scripts/skill-ppt-e2e.mjs",
     "smoke:enterprise:full": "node scripts/smoke-enterprise-full.mjs",
     "migrate:layout": "node scripts/migrate-openfoal-layout.mjs",
     "migrate:enterprise:pg": "node scripts/migrate-enterprise-sqlite-to-pg.mjs",
@@ -33,5 +34,8 @@
     "logs:personal": "docker compose --profile personal logs -f gateway personal-web",
     "logs:enterprise": "docker compose --profile enterprise logs -f gateway web-console docker-runner bootstrap-enterprise",
     "ps:docker": "docker compose ps"
+  },
+  "dependencies": {
+    "pptxgenjs": "^4.0.1"
   }
 }

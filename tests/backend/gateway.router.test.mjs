@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createConnectionState, createGatewayRouter } from "../../apps/gateway/dist/index.js";
+
+const PPT_SKILL_BUNDLE_FIXTURE_PATH = new URL("../../fixtures/skills/openfoal-ppt-v1/bundle.json", import.meta.url);
 
 function req(id, method, params = {}) {
   return {
@@ -373,6 +375,71 @@ test("skills install/list/uninstall lifecycle works", async () => {
   if (uninstall.response.ok) {
     assert.equal(uninstall.response.payload.removed, true);
   }
+});
+
+test("agent.run injects openfoal-ppt-v1 prompt and JSON args from /skill invocation", async () => {
+  let capturedInput;
+  const router = createGatewayRouter({
+    coreService: {
+      async *run(input) {
+        capturedInput = input.input;
+        yield {
+          type: "accepted",
+          runId: "run_ppt_skill_1",
+          sessionId: input.sessionId,
+          runtimeMode: input.runtimeMode
+        };
+        yield {
+          type: "completed",
+          runId: "run_ppt_skill_1",
+          output: "ok"
+        };
+      },
+      async *continue() {},
+      async abort() {}
+    }
+  });
+  const state = createConnectionState();
+  await router.handle(req("r_ppt_connect", "connect", {}), state);
+
+  const bundle = JSON.parse(readFileSync(PPT_SKILL_BUNDLE_FIXTURE_PATH, "utf8"));
+  const imported = await router.handle(
+    req("r_ppt_bundle_import", "skills.bundle.import", {
+      idempotencyKey: "idem_ppt_bundle_import_1",
+      bundle
+    }),
+    state
+  );
+  assert.equal(imported.response.ok, true);
+
+  const installed = await router.handle(
+    req("r_ppt_skill_install", "skills.install", {
+      idempotencyKey: "idem_ppt_skill_install_1",
+      scope: "user",
+      skillId: "openfoal-ppt-v1"
+    }),
+    state
+  );
+  assert.equal(installed.response.ok, true);
+
+  const argsJson = "{\"title\":\"QBR 2026\",\"slides\":8,\"lang\":\"zh-CN\",\"out\":\"./.openfoal/output/qbr-2026.pptx\"}";
+  const invoked = await router.handle(
+    req("r_ppt_skill_invoke", "agent.run", {
+      idempotencyKey: "idem_ppt_skill_invoke_1",
+      sessionId: "s_ppt_skill_1",
+      input: `/skill:openfoal-ppt-v1 ${argsJson}`,
+      runtimeMode: "local"
+    }),
+    state
+  );
+  assert.equal(invoked.response.ok, true);
+  assert.equal(typeof capturedInput, "string");
+  assert.match(capturedInput, /\[OpenFoal Skill Invocation\]/);
+  assert.match(capturedInput, /skillId: openfoal-ppt-v1/);
+  assert.match(capturedInput, /# OpenFoal PPT V1 Skill/);
+  assert.match(capturedInput, /\[Skill Args\]/);
+  assert.match(capturedInput, /"title":"QBR 2026"/);
+  assert.match(capturedInput, /"out":"\.\/\.openfoal\/output\/qbr-2026\.pptx"/);
 });
 
 test("enterprise bundle_only blocks online refresh and non-bundle install", async () => {
