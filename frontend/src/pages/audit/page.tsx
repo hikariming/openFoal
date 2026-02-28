@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Input, Select, Table, Tag } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 
 type ActionType = 'member.update' | 'sso.update' | 'billing.contract.update'
@@ -45,6 +46,7 @@ const auditRows: AuditRow[] = [
 ]
 
 export default function AuditPage() {
+  const { t } = useTranslation()
   const [keyword, setKeyword] = useState('')
   const [action, setAction] = useState<ActionType | 'all'>('all')
 
@@ -63,15 +65,12 @@ export default function AuditPage() {
   }, [action, keyword])
 
   return (
-    <PageShell
-      title="审计日志"
-      description="统一审计事件视图：actor/action/resource/result/time/ip。"
-    >
+    <PageShell title={t('audit.title')} description={t('audit.description')}>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <Input
           showClear
           style={{ width: 280 }}
-          placeholder="搜索 actor/resource/ip"
+          placeholder={t('audit.searchPlaceholder')}
           value={keyword}
           onChange={(value) => setKeyword(value)}
         />
@@ -79,7 +78,7 @@ export default function AuditPage() {
           style={{ width: 240 }}
           value={action}
           optionList={[
-            { value: 'all', label: '全部动作' },
+            { value: 'all', label: t('audit.actionAll') },
             { value: 'member.update', label: 'member.update' },
             { value: 'sso.update', label: 'sso.update' },
             { value: 'billing.contract.update', label: 'billing.contract.update' },
@@ -93,18 +92,18 @@ export default function AuditPage() {
         pagination={false}
         dataSource={filteredRows}
         columns={[
-          { title: 'Actor', dataIndex: 'actor' },
-          { title: 'Action', dataIndex: 'action' },
-          { title: 'Resource', dataIndex: 'resource' },
+          { title: t('audit.columns.actor'), dataIndex: 'actor' },
+          { title: t('audit.columns.action'), dataIndex: 'action' },
+          { title: t('audit.columns.resource'), dataIndex: 'resource' },
           {
-            title: 'Result',
+            title: t('audit.columns.result'),
             dataIndex: 'result',
             render: (value: 'success' | 'failure') => (
-              <Tag color={value === 'success' ? 'green' : 'red'}>{value}</Tag>
+              <Tag color={value === 'success' ? 'green' : 'red'}>{t(`common.status.${value}`)}</Tag>
             ),
           },
-          { title: 'IP', dataIndex: 'ip' },
-          { title: 'Time', dataIndex: 'createdAt' },
+          { title: t('audit.columns.ip'), dataIndex: 'ip' },
+          { title: t('audit.columns.time'), dataIndex: 'createdAt' },
         ]}
       />
     </PageShell>

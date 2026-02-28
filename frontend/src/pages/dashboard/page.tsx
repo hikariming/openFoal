@@ -1,60 +1,56 @@
 import { Banner, Card, Tag, Typography } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 
 export default function DashboardPage() {
+  const { t } = useTranslation()
+
   return (
-    <PageShell
-      title="企业控制台总览"
-      description="租户状态、权限风险和企业账户健康度总览。"
-    >
-      <Banner
-        type="success"
-        fullMode={false}
-        description="当前是前端静态阶段：数据由页面内 mock 提供，后续可无缝替换后端接口。"
-      />
+    <PageShell title={t('dashboard.title')} description={t('dashboard.description')}>
+      <Banner type="success" fullMode={false} description={t('dashboard.staticBanner')} />
 
       <div className="page-grid">
-        <Card className="page-col-4" title="活跃成员">
+        <Card className="page-col-4" title={t('dashboard.activeMembers')}>
           <Typography.Title heading={2} style={{ margin: 0 }}>
             64
           </Typography.Title>
-          <Typography.Text type="tertiary">近 7 天 +12%</Typography.Text>
+          <Typography.Text type="tertiary">{t('dashboard.activeMembersTrend')}</Typography.Text>
         </Card>
 
-        <Card className="page-col-4" title="高风险权限">
+        <Card className="page-col-4" title={t('dashboard.highRiskPermissions')}>
           <Typography.Title heading={2} style={{ margin: 0 }}>
             3
           </Typography.Title>
-          <Typography.Text type="tertiary">需完成季度复核</Typography.Text>
+          <Typography.Text type="tertiary">{t('dashboard.quarterlyReview')}</Typography.Text>
         </Card>
 
-        <Card className="page-col-4" title="审计告警">
+        <Card className="page-col-4" title={t('dashboard.auditAlerts')}>
           <Typography.Title heading={2} style={{ margin: 0 }}>
             1
           </Typography.Title>
-          <Typography.Text type="tertiary">来自 SSO 配置变更</Typography.Text>
+          <Typography.Text type="tertiary">{t('dashboard.alertFromSso')}</Typography.Text>
         </Card>
 
-        <Card className="page-col-12" title="企业准备度">
+        <Card className="page-col-12" title={t('dashboard.enterpriseReadiness')}>
           <Typography.Paragraph>
-            已启用能力：
+            {t('dashboard.enabledCapabilities')}
             <Tag color="green" style={{ marginLeft: 8 }}>
-              租户隔离
+              {t('dashboard.capabilityTenantIsolation')}
             </Tag>
             <Tag color="blue" style={{ marginLeft: 8 }}>
-              RBAC
+              {t('dashboard.capabilityRbac')}
             </Tag>
             <Tag color="orange" style={{ marginLeft: 8 }}>
-              审计日志
+              {t('dashboard.capabilityAudit')}
             </Tag>
             <Tag color="cyan" style={{ marginLeft: 8 }}>
-              SSO
+              {t('dashboard.capabilitySso')}
             </Tag>
             <Tag color="blue" style={{ marginLeft: 8 }}>
-              企业 MCP
+              {t('dashboard.capabilityMcp')}
             </Tag>
             <Tag color="light-blue" style={{ marginLeft: 8 }}>
-              企业 Skill
+              {t('dashboard.capabilitySkill')}
             </Tag>
           </Typography.Paragraph>
         </Card>

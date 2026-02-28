@@ -1,6 +1,7 @@
 import { lazy, Suspense, type ReactElement } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { Empty, Spin } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { ConsoleLayout } from '@/app/layout/console-layout'
 import { AuthGuard } from '@/components/auth/auth-guard'
 import { routePaths } from '@/app/router/route-paths'
@@ -17,7 +18,20 @@ const UserPrototypePage = lazy(() => import('@/pages/user-prototype/page'))
 const NotFoundPage = lazy(() => import('@/pages/not-found/page'))
 
 function RouteFallback() {
-  return <Spin size="large" tip="页面加载中..." />
+  const { t } = useTranslation()
+  return <Spin size="large" tip={t('router.loading')} />
+}
+
+function RouteNotFound() {
+  const { t } = useTranslation()
+
+  return (
+    <Empty
+      title={t('router.pageNotFoundTitle')}
+      description={t('router.pageNotFoundDescription')}
+      imageStyle={{ width: 180, height: 180 }}
+    />
+  )
 }
 
 function withSuspense(node: ReactElement) {
@@ -75,13 +89,7 @@ export const router = createBrowserRouter([
       },
       {
         path: '*',
-        element: (
-          <Empty
-            title="页面不存在"
-            description="请检查地址，或从左侧导航进入页面。"
-            imageStyle={{ width: 180, height: 180 }}
-          />
-        ),
+        element: <RouteNotFound />,
       },
     ],
   },

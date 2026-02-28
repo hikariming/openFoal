@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Banner, Button, Card, Form, Radio, Tag } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 
 interface SsoFormValues {
@@ -10,18 +11,19 @@ interface SsoFormValues {
 }
 
 export default function SsoPage() {
+  const { t } = useTranslation()
   const [savedConfig, setSavedConfig] = useState<SsoFormValues | null>(null)
 
   return (
-    <PageShell
-      title="SSO 配置"
-      description="建议先接 OIDC，再扩展到 SAML。这里先做纯前端交互。"
-    >
+    <PageShell title={t('sso.title')} description={t('sso.description')}>
       {savedConfig ? (
         <Banner
           type="success"
           fullMode={false}
-          description={`最近保存：${savedConfig.provider.toUpperCase()} / ${savedConfig.issuer}`}
+          description={t('sso.recentSaved', {
+            provider: savedConfig.provider.toUpperCase(),
+            issuer: savedConfig.issuer,
+          })}
         />
       ) : null}
 
@@ -40,8 +42,8 @@ export default function SsoPage() {
         >
           <Form.RadioGroup
             field="provider"
-            label="协议"
-            extraText="企业建议优先 OIDC，兼容需求再启用 SAML"
+            label={t('sso.providerLabel')}
+            extraText={t('sso.providerHint')}
           >
             <Radio value="oidc">OIDC</Radio>
             <Radio value="saml">SAML</Radio>
@@ -49,36 +51,36 @@ export default function SsoPage() {
 
           <Form.Input
             field="issuer"
-            label="Issuer / Entity ID"
+            label={t('sso.issuerLabel')}
             trigger="blur"
-            rules={[{ required: true, message: '请填写 Issuer / Entity ID' }]}
+            rules={[{ required: true, message: t('sso.issuerRequired') }]}
           />
           <Form.Input
             field="clientId"
-            label="Client ID"
+            label={t('sso.clientIdLabel')}
             trigger="blur"
-            rules={[{ required: true, message: '请填写 Client ID' }]}
+            rules={[{ required: true, message: t('sso.clientIdRequired') }]}
           />
           <Form.Input
             field="callbackUrl"
-            label="Callback URL"
+            label={t('sso.callbackLabel')}
             trigger="blur"
-            rules={[{ required: true, message: '请填写回调地址' }]}
+            rules={[{ required: true, message: t('sso.callbackRequired') }]}
           />
 
           <Button htmlType="submit" type="primary">
-            保存 SSO 配置
+            {t('sso.save')}
           </Button>
         </Form>
       </Card>
 
       <Card>
-        能力状态：
+        {t('sso.capabilityStatus')}
         <Tag color="cyan" style={{ marginLeft: 8 }}>
-          OIDC Ready
+          {t('sso.oidcReady')}
         </Tag>
         <Tag color="light-blue" style={{ marginLeft: 8 }}>
-          SAML Planned
+          {t('sso.samlPlanned')}
         </Tag>
       </Card>
     </PageShell>

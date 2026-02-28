@@ -11,6 +11,7 @@ import {
   Toast,
   Typography,
 } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 
 type McpStatus = 'connected' | 'error' | 'disabled'
@@ -51,27 +52,28 @@ const initialRows: McpServerRow[] = [
   },
 ]
 
-const statusOptions = [
-  { value: 'all', label: '全部状态' },
-  { value: 'connected', label: 'connected' },
-  { value: 'error', label: 'error' },
-  { value: 'disabled', label: 'disabled' },
-]
-
-function renderStatusTag(status: McpStatus) {
-  if (status === 'connected') {
-    return <Tag color="green">connected</Tag>
-  }
-  if (status === 'error') {
-    return <Tag color="red">error</Tag>
-  }
-  return <Tag>disabled</Tag>
-}
-
 export default function McpPage() {
+  const { t } = useTranslation()
   const [rows, setRows] = useState<McpServerRow[]>(initialRows)
   const [keyword, setKeyword] = useState('')
   const [status, setStatus] = useState<McpStatus | 'all'>('all')
+
+  const statusOptions = [
+    { value: 'all', label: t('mcp.statusAll') },
+    { value: 'connected', label: t('common.status.connected') },
+    { value: 'error', label: t('common.status.error') },
+    { value: 'disabled', label: t('common.status.disabled') },
+  ]
+
+  const renderStatusTag = (value: McpStatus) => {
+    if (value === 'connected') {
+      return <Tag color="green">{t('common.status.connected')}</Tag>
+    }
+    if (value === 'error') {
+      return <Tag color="red">{t('common.status.error')}</Tag>
+    }
+    return <Tag>{t('common.status.disabled')}</Tag>
+  }
 
   const filteredRows = useMemo(() => {
     const q = keyword.trim().toLowerCase()
@@ -88,15 +90,11 @@ export default function McpPage() {
 
   return (
     <PageShell
-      title="企业 MCP 管理"
-      description="统一管理企业 MCP 连接器，后续可接入真实握手和健康检查接口。"
-      actions={<Button type="primary">新增 MCP 连接</Button>}
+      title={t('mcp.title')}
+      description={t('mcp.description')}
+      actions={<Button type="primary">{t('mcp.createConnection')}</Button>}
     >
-      <Banner
-        type="info"
-        fullMode={false}
-        description="MCP（Model Context Protocol）是连接 AI 与外部工具/数据源的标准协议。"
-      />
+      <Banner type="info" fullMode={false} description={t('mcp.intro')} />
 
       <Card>
         <Space spacing={12} wrap>
@@ -104,7 +102,7 @@ export default function McpPage() {
             showClear
             style={{ width: 280 }}
             value={keyword}
-            placeholder="搜索连接名称或 endpoint"
+            placeholder={t('mcp.searchPlaceholder')}
             onChange={(value) => setKeyword(value)}
           />
           <Select
@@ -118,7 +116,7 @@ export default function McpPage() {
 
       {filteredRows.length === 0 ? (
         <Card>
-          <Empty title="没有匹配的 MCP 连接" description="调整筛选条件后重试。" />
+          <Empty title={t('mcp.emptyTitle')} description={t('mcp.emptyDescription')} />
         </Card>
       ) : (
         <div className="page-grid">
@@ -138,12 +136,18 @@ export default function McpPage() {
                 }
               >
                 <Space vertical align="start" spacing={8} style={{ width: '100%' }}>
-                  <Typography.Text type="tertiary">Transport: {record.transport}</Typography.Text>
-                  <Typography.Text ellipsis={{ showTooltip: true }}>Endpoint: {record.endpoint}</Typography.Text>
-                  <Typography.Text type="tertiary">最近更新: {record.updatedAt}</Typography.Text>
+                  <Typography.Text type="tertiary">
+                    {t('mcp.transport')}: {record.transport}
+                  </Typography.Text>
+                  <Typography.Text ellipsis={{ showTooltip: true }}>
+                    {t('mcp.endpoint')}: {record.endpoint}
+                  </Typography.Text>
+                  <Typography.Text type="tertiary">
+                    {t('mcp.updatedAt')}: {record.updatedAt}
+                  </Typography.Text>
                   <Space>
                     <Button size="small" theme="borderless">
-                      查看详情
+                      {t('mcp.viewDetails')}
                     </Button>
                     <Button
                       size="small"
@@ -159,10 +163,17 @@ export default function McpPage() {
                               : row,
                           ),
                         )
-                        Toast.success(`已切换 ${record.name} 为 ${nextStatus}`)
+                        Toast.success(
+                          t('mcp.toggledStatus', {
+                            name: record.name,
+                            status: t(`common.status.${nextStatus}`),
+                          }),
+                        )
                       }}
                     >
-                      {record.status === 'disabled' ? '启用' : '禁用'}
+                      {record.status === 'disabled'
+                        ? t('common.actions.enable')
+                        : t('common.actions.disable')}
                     </Button>
                   </Space>
                 </Space>

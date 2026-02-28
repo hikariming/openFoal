@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Button, Input, Select, Table, Tag } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 import type { UserRole } from '@/stores/auth-store'
 
@@ -13,14 +14,6 @@ interface MemberRow {
   status: MemberStatus
 }
 
-const roleOptions = [
-  { value: 'owner', label: 'Owner' },
-  { value: 'admin', label: 'Admin' },
-  { value: 'it_admin', label: 'IT Admin' },
-  { value: 'billing', label: 'Billing' },
-  { value: 'member', label: 'Member' },
-]
-
 const initialMembers: MemberRow[] = [
   { id: 'm1', name: 'Alice Li', email: 'alice@openfoal.com', role: 'owner', status: 'active' },
   { id: 'm2', name: 'Bob Chen', email: 'bob@openfoal.com', role: 'admin', status: 'active' },
@@ -28,8 +21,17 @@ const initialMembers: MemberRow[] = [
 ]
 
 export default function MembersPage() {
+  const { t } = useTranslation()
   const [members, setMembers] = useState<MemberRow[]>(initialMembers)
   const [keyword, setKeyword] = useState('')
+
+  const roleOptions = [
+    { value: 'owner', label: t('common.roles.owner') },
+    { value: 'admin', label: t('common.roles.admin') },
+    { value: 'it_admin', label: t('common.roles.it_admin') },
+    { value: 'billing', label: t('common.roles.billing') },
+    { value: 'member', label: t('common.roles.member') },
+  ]
 
   const filteredMembers = useMemo(() => {
     const normalized = keyword.trim().toLowerCase()
@@ -45,15 +47,15 @@ export default function MembersPage() {
 
   return (
     <PageShell
-      title="成员管理"
-      description="邀请成员、变更角色、停用账户。"
-      actions={<Button type="primary">邀请成员</Button>}
+      title={t('members.title')}
+      description={t('members.description')}
+      actions={<Button type="primary">{t('members.inviteMember')}</Button>}
     >
       <Input
         showClear
         value={keyword}
         style={{ maxWidth: 320 }}
-        placeholder="搜索姓名或邮箱"
+        placeholder={t('members.searchPlaceholder')}
         onChange={(value) => setKeyword(value)}
       />
 
@@ -62,10 +64,10 @@ export default function MembersPage() {
         dataSource={filteredMembers}
         rowKey="id"
         columns={[
-          { title: '姓名', dataIndex: 'name' },
-          { title: '邮箱', dataIndex: 'email' },
+          { title: t('members.columns.name'), dataIndex: 'name' },
+          { title: t('members.columns.email'), dataIndex: 'email' },
           {
-            title: '角色',
+            title: t('members.columns.role'),
             dataIndex: 'role',
             render: (_, record: MemberRow) => (
               <Select
@@ -85,20 +87,20 @@ export default function MembersPage() {
             ),
           },
           {
-            title: '状态',
+            title: t('members.columns.status'),
             dataIndex: 'status',
             render: (value: MemberStatus) => {
               if (value === 'active') {
-                return <Tag color="green">active</Tag>
+                return <Tag color="green">{t('common.status.active')}</Tag>
               }
               if (value === 'invited') {
-                return <Tag color="blue">invited</Tag>
+                return <Tag color="blue">{t('common.status.invited')}</Tag>
               }
-              return <Tag>disabled</Tag>
+              return <Tag>{t('common.status.disabled')}</Tag>
             },
           },
           {
-            title: '操作',
+            title: t('members.columns.action'),
             dataIndex: 'action',
             render: (_, record: MemberRow) => (
               <Button
@@ -116,7 +118,9 @@ export default function MembersPage() {
                   )
                 }}
               >
-                {record.status === 'disabled' ? '启用' : '停用'}
+                {record.status === 'disabled'
+                  ? t('common.actions.enable')
+                  : t('common.actions.disable')}
               </Button>
             ),
           },

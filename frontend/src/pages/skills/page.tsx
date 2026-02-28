@@ -12,6 +12,7 @@ import {
   Toast,
   Typography,
 } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 
 type SkillStatus = 'published' | 'draft' | 'deprecated'
@@ -22,7 +23,7 @@ interface SkillRow {
   mcpBinding: string
   version: string
   status: SkillStatus
-  description: string
+  descriptionKey: string
 }
 
 const initialRows: SkillRow[] = [
@@ -32,7 +33,7 @@ const initialRows: SkillRow[] = [
     mcpBinding: 'GitHub MCP',
     version: 'v1.4.2',
     status: 'published',
-    description: '扫描仓库风险并生成修复建议。',
+    descriptionKey: 'skills.seedDescriptions.securityRiskScan',
   },
   {
     id: 'skill_contract_check',
@@ -40,7 +41,7 @@ const initialRows: SkillRow[] = [
     mcpBinding: 'Confluence MCP',
     version: 'v0.8.1',
     status: 'draft',
-    description: '校验企业合同条款完整性与风险项。',
+    descriptionKey: 'skills.seedDescriptions.contractValidator',
   },
   {
     id: 'skill_incident_summary',
@@ -48,32 +49,33 @@ const initialRows: SkillRow[] = [
     mcpBinding: 'Jira MCP',
     version: 'v0.9.0',
     status: 'deprecated',
-    description: '自动总结故障票据并输出复盘摘要。',
+    descriptionKey: 'skills.seedDescriptions.incidentSummary',
   },
 ]
 
-const statusOptions = [
-  { value: 'all', label: '全部状态' },
-  { value: 'published', label: 'published' },
-  { value: 'draft', label: 'draft' },
-  { value: 'deprecated', label: 'deprecated' },
-]
-
-function renderStatusTag(status: SkillStatus) {
-  if (status === 'published') {
-    return <Tag color="green">published</Tag>
-  }
-  if (status === 'draft') {
-    return <Tag color="blue">draft</Tag>
-  }
-  return <Tag color="orange">deprecated</Tag>
-}
-
 export default function SkillsPage() {
+  const { t } = useTranslation()
   const [rows, setRows] = useState<SkillRow[]>(initialRows)
   const [keyword, setKeyword] = useState('')
   const [status, setStatus] = useState<SkillStatus | 'all'>('all')
   const [previewSkill, setPreviewSkill] = useState<SkillRow | null>(null)
+
+  const statusOptions = [
+    { value: 'all', label: t('skills.statusAll') },
+    { value: 'published', label: t('common.status.published') },
+    { value: 'draft', label: t('common.status.draft') },
+    { value: 'deprecated', label: t('common.status.deprecated') },
+  ]
+
+  const renderStatusTag = (value: SkillStatus) => {
+    if (value === 'published') {
+      return <Tag color="green">{t('common.status.published')}</Tag>
+    }
+    if (value === 'draft') {
+      return <Tag color="blue">{t('common.status.draft')}</Tag>
+    }
+    return <Tag color="orange">{t('common.status.deprecated')}</Tag>
+  }
 
   const filteredRows = useMemo(() => {
     const q = keyword.trim().toLowerCase()
@@ -82,23 +84,19 @@ export default function SkillsPage() {
       const keywordMatched =
         q.length === 0 ||
         row.name.toLowerCase().includes(q) ||
-        row.description.toLowerCase().includes(q) ||
+        t(row.descriptionKey).toLowerCase().includes(q) ||
         row.mcpBinding.toLowerCase().includes(q)
       return statusMatched && keywordMatched
     })
-  }, [keyword, rows, status])
+  }, [keyword, rows, status, t])
 
   return (
     <PageShell
-      title="企业 Skill 管理"
-      description="管理企业级 Skill 模板、版本与发布状态。"
-      actions={<Button type="primary">创建 Skill</Button>}
+      title={t('skills.title')}
+      description={t('skills.description')}
+      actions={<Button type="primary">{t('skills.createSkill')}</Button>}
     >
-      <Banner
-        type="info"
-        fullMode={false}
-        description="Skill 可理解为可复用的任务能力包，通常包含提示词、约束规则、资源引用和执行流程。"
-      />
+      <Banner type="info" fullMode={false} description={t('skills.intro')} />
 
       <Card>
         <Space spacing={12} wrap>
@@ -106,7 +104,7 @@ export default function SkillsPage() {
             showClear
             style={{ width: 280 }}
             value={keyword}
-            placeholder="搜索技能名称/描述/MCP 绑定"
+            placeholder={t('skills.searchPlaceholder')}
             onChange={(value) => setKeyword(value)}
           />
           <Select
@@ -120,7 +118,7 @@ export default function SkillsPage() {
 
       {filteredRows.length === 0 ? (
         <Card>
-          <Empty title="没有匹配的 Skill" description="调整筛选条件后重试。" />
+          <Empty title={t('skills.emptyTitle')} description={t('skills.emptyDescription')} />
         </Card>
       ) : (
         <div className="page-grid">
@@ -136,12 +134,16 @@ export default function SkillsPage() {
               }
             >
               <Space vertical align="start" spacing={8} style={{ width: '100%' }}>
-                <Typography.Text>{record.description}</Typography.Text>
-                <Typography.Text type="tertiary">MCP 绑定: {record.mcpBinding}</Typography.Text>
-                <Typography.Text type="tertiary">版本: {record.version}</Typography.Text>
+                <Typography.Text>{t(record.descriptionKey)}</Typography.Text>
+                <Typography.Text type="tertiary">
+                  {t('skills.mcpBinding')}: {record.mcpBinding}
+                </Typography.Text>
+                <Typography.Text type="tertiary">
+                  {t('skills.version')}: {record.version}
+                </Typography.Text>
                 <Space>
                   <Button size="small" theme="borderless" onClick={() => setPreviewSkill(record)}>
-                    查看
+                    {t('common.actions.view')}
                   </Button>
                   <Button
                     size="small"
@@ -151,10 +153,10 @@ export default function SkillsPage() {
                           row.id === record.id ? { ...row, status: 'published' } : row,
                         ),
                       )
-                      Toast.success(`已发布 ${record.name}`)
+                      Toast.success(t('skills.publishSuccess', { name: record.name }))
                     }}
                   >
-                    发布
+                    {t('common.actions.publish')}
                   </Button>
                 </Space>
               </Space>
@@ -164,36 +166,36 @@ export default function SkillsPage() {
       )}
 
       <Modal
-        title="Skill 详情"
+        title={t('skills.detailTitle')}
         visible={Boolean(previewSkill)}
         onCancel={() => setPreviewSkill(null)}
         footer={
           <Button type="primary" onClick={() => setPreviewSkill(null)}>
-            确认
+            {t('common.actions.confirm')}
           </Button>
         }
       >
         {previewSkill ? (
           <Space vertical spacing={8} align="start">
             <Typography.Text>
-              <strong>名称：</strong>
+              <strong>{t('skills.fields.name')}：</strong>
               {previewSkill.name}
             </Typography.Text>
             <Typography.Text>
-              <strong>描述：</strong>
-              {previewSkill.description}
+              <strong>{t('skills.fields.description')}：</strong>
+              {t(previewSkill.descriptionKey)}
             </Typography.Text>
             <Typography.Text>
-              <strong>MCP 绑定：</strong>
+              <strong>{t('skills.fields.binding')}：</strong>
               {previewSkill.mcpBinding}
             </Typography.Text>
             <Typography.Text>
-              <strong>版本：</strong>
+              <strong>{t('skills.fields.version')}：</strong>
               {previewSkill.version}
             </Typography.Text>
             <Typography.Text>
-              <strong>状态：</strong>
-              {previewSkill.status}
+              <strong>{t('skills.fields.status')}：</strong>
+              {t(`common.status.${previewSkill.status}`)}
             </Typography.Text>
           </Space>
         ) : null}

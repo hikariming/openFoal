@@ -1,8 +1,10 @@
 import { Button, Empty } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
 import { routePaths } from '@/app/router/route-paths'
 
 export default function NotFoundPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
 
   return (
@@ -14,12 +16,12 @@ export default function NotFoundPage() {
       }}
     >
       <Empty
-        title="页面不存在"
-        description="你访问的地址不存在，返回企业控制台继续操作。"
+        title={t('notFound.title')}
+        description={t('notFound.description')}
         imageStyle={{ width: 220, height: 220 }}
       >
         <Button type="primary" onClick={() => navigate(routePaths.dashboard)}>
-          回到控制台
+          {t('notFound.backToConsole')}
         </Button>
       </Empty>
     </div>

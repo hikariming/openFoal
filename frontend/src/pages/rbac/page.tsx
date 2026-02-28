@@ -1,15 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Card, Select, Switch, Table, Tag } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 import type { UserRole } from '@/stores/auth-store'
-
-const roleOptions = [
-  { value: 'owner', label: 'Owner' },
-  { value: 'admin', label: 'Admin' },
-  { value: 'it_admin', label: 'IT Admin' },
-  { value: 'billing', label: 'Billing' },
-  { value: 'member', label: 'Member' },
-]
 
 const permissionSeeds: Record<UserRole, string[]> = {
   owner: ['tenant.manage', 'member.manage', 'audit.read', 'billing.manage', 'sso.manage'],
@@ -19,15 +12,8 @@ const permissionSeeds: Record<UserRole, string[]> = {
   member: ['audit.read'],
 }
 
-const permissionCatalog = [
-  { code: 'tenant.manage', description: '管理组织/租户配置' },
-  { code: 'member.manage', description: '邀请/停用/调整成员角色' },
-  { code: 'audit.read', description: '查看审计日志' },
-  { code: 'billing.manage', description: '管理订阅、发票、合同' },
-  { code: 'sso.manage', description: '配置 OIDC/SAML SSO' },
-]
-
 export default function RbacPage() {
+  const { t } = useTranslation()
   const [activeRole, setActiveRole] = useState<UserRole>('admin')
   const [granted, setGranted] = useState<Record<UserRole, Set<string>>>(() => ({
     owner: new Set(permissionSeeds.owner),
@@ -37,19 +23,35 @@ export default function RbacPage() {
     member: new Set(permissionSeeds.member),
   }))
 
+  const roleOptions = [
+    { value: 'owner', label: t('common.roles.owner') },
+    { value: 'admin', label: t('common.roles.admin') },
+    { value: 'it_admin', label: t('common.roles.it_admin') },
+    { value: 'billing', label: t('common.roles.billing') },
+    { value: 'member', label: t('common.roles.member') },
+  ]
+
+  const permissionCatalog = [
+    { code: 'tenant.manage', description: t('rbac.permissions.tenantManage') },
+    { code: 'member.manage', description: t('rbac.permissions.memberManage') },
+    { code: 'audit.read', description: t('rbac.permissions.auditRead') },
+    { code: 'billing.manage', description: t('rbac.permissions.billingManage') },
+    { code: 'sso.manage', description: t('rbac.permissions.ssoManage') },
+  ]
+
   const rows = useMemo(
     () =>
       permissionCatalog.map((item) => ({
         ...item,
         enabled: granted[activeRole].has(item.code),
       })),
-    [activeRole, granted],
+    [activeRole, granted, permissionCatalog],
   )
 
   return (
     <PageShell
-      title="RBAC 权限"
-      description="按角色配置资源权限，先前端验证交互，再接后端策略引擎。"
+      title={t('rbac.title')}
+      description={t('rbac.description')}
       actions={
         <Select
           value={activeRole}
@@ -60,7 +62,7 @@ export default function RbacPage() {
       }
     >
       <Card>
-        当前角色：<Tag color="blue">{activeRole}</Tag>
+        {t('rbac.currentRole')}: <Tag color="blue">{activeRole}</Tag>
       </Card>
 
       <Table
@@ -68,10 +70,10 @@ export default function RbacPage() {
         dataSource={rows}
         rowKey="code"
         columns={[
-          { title: '权限编码', dataIndex: 'code' },
-          { title: '说明', dataIndex: 'description' },
+          { title: t('rbac.columns.code'), dataIndex: 'code' },
+          { title: t('rbac.columns.description'), dataIndex: 'description' },
           {
-            title: '启用',
+            title: t('rbac.columns.enabled'),
             dataIndex: 'enabled',
             render: (enabled: boolean, record: { code: string }) => (
               <Switch

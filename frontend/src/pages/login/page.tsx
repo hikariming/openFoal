@@ -1,7 +1,9 @@
 import { useMemo } from 'react'
 import { Button, Card, Form, Space, Typography } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { routePaths } from '@/app/router/route-paths'
+import { LanguageSwitch } from '@/components/shared/language-switch'
 import { useAuthStore } from '@/stores/auth-store'
 import { useTenantStore } from '@/stores/tenant-store'
 
@@ -15,6 +17,7 @@ interface RedirectState {
 }
 
 export default function LoginPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const location = useLocation()
   const loginAsDemo = useAuthStore((state) => state.loginAsDemo)
@@ -37,10 +40,11 @@ export default function LoginPage() {
       }}
     >
       <Card style={{ width: 420 }}>
-        <Typography.Title heading={3}>企业版登录</Typography.Title>
-        <Typography.Paragraph type="tertiary">
-          当前为前端阶段，先选择租户再进入控制台。
-        </Typography.Paragraph>
+        <Space vertical align="start" style={{ width: '100%' }} spacing={8}>
+          <LanguageSwitch />
+          <Typography.Title heading={3}>{t('login.title')}</Typography.Title>
+          <Typography.Paragraph type="tertiary">{t('login.description')}</Typography.Paragraph>
+        </Space>
 
         <Form<LoginFormValues>
           labelPosition="top"
@@ -53,22 +57,22 @@ export default function LoginPage() {
         >
           <Form.Select
             field="tenantId"
-            label="租户"
+            label={t('login.tenant')}
             optionList={tenants.map((tenant) => ({
               value: tenant.id,
               label: `${tenant.name} (${tenant.region})`,
             }))}
-            rules={[{ required: true, message: '请选择租户' }]}
+            rules={[{ required: true, message: t('login.tenantRequired') }]}
           />
           <Form.Input
             field="email"
-            label="企业邮箱"
+            label={t('login.email')}
             trigger="blur"
-            rules={[{ required: true, message: '请输入企业邮箱' }]}
+            rules={[{ required: true, message: t('login.emailRequired') }]}
           />
           <Space vertical align="start" style={{ width: '100%' }} spacing={8}>
             <Button htmlType="submit" type="primary" block>
-              登录并进入企业控制台
+              {t('login.submit')}
             </Button>
             <Button
               block
@@ -76,7 +80,7 @@ export default function LoginPage() {
               type="tertiary"
               onClick={() => navigate(routePaths.userPrototype)}
             >
-              进入用户端原型
+              {t('login.userPrototype')}
             </Button>
           </Space>
         </Form>

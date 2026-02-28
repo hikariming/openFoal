@@ -1,4 +1,5 @@
 import { Button, Card, Table, Tag, Typography } from '@douyinfe/semi-ui'
+import { useTranslation } from 'react-i18next'
 import { PageShell } from '@/components/shared/page-shell'
 
 const invoiceRows = [
@@ -7,41 +8,45 @@ const invoiceRows = [
 ]
 
 export default function BillingPage() {
+  const { t } = useTranslation()
+
   return (
     <PageShell
-      title="计费与合同"
-      description="展示订阅计划、合同状态、发票记录。"
-      actions={<Button type="primary">升级套餐</Button>}
+      title={t('billing.title')}
+      description={t('billing.description')}
+      actions={<Button type="primary">{t('billing.upgradePlan')}</Button>}
     >
       <div className="page-grid">
-        <Card className="page-col-6" title="当前套餐">
+        <Card className="page-col-6" title={t('billing.currentPlan')}>
           <Typography.Title heading={4} style={{ margin: 0 }}>
             Enterprise Annual
           </Typography.Title>
-          <Typography.Text type="tertiary">到期时间：2027-02-27</Typography.Text>
+          <Typography.Text type="tertiary">
+            {t('billing.expiresAt', { date: '2027-02-27' })}
+          </Typography.Text>
         </Card>
 
-        <Card className="page-col-6" title="合同状态">
+        <Card className="page-col-6" title={t('billing.contractStatus')}>
           <Typography.Paragraph style={{ margin: 0 }}>
-            合同编号：CTR-2026-001
+            {t('billing.contractNo', { contractId: 'CTR-2026-001' })}
           </Typography.Paragraph>
-          <Tag color="green">ACTIVE</Tag>
+          <Tag color="green">{t('common.status.active')}</Tag>
         </Card>
 
-        <Card className="page-col-12" title="发票记录">
+        <Card className="page-col-12" title={t('billing.invoiceHistory')}>
           <Table
             pagination={false}
             rowKey="id"
             dataSource={invoiceRows}
             columns={[
-              { title: 'Invoice ID', dataIndex: 'id' },
-              { title: '账期', dataIndex: 'period' },
-              { title: '金额', dataIndex: 'amount' },
+              { title: t('billing.columns.invoiceId'), dataIndex: 'id' },
+              { title: t('billing.columns.period'), dataIndex: 'period' },
+              { title: t('billing.columns.amount'), dataIndex: 'amount' },
               {
-                title: '状态',
+                title: t('billing.columns.status'),
                 dataIndex: 'status',
-                render: (value: string) => (
-                  <Tag color={value === 'paid' ? 'green' : 'orange'}>{value}</Tag>
+                render: (value: 'paid' | 'pending') => (
+                  <Tag color={value === 'paid' ? 'green' : 'orange'}>{t(`common.status.${value}`)}</Tag>
                 ),
               },
             ]}

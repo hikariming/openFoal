@@ -21,22 +21,15 @@ import {
   IconUserGroup,
 } from '@douyinfe/semi-icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { routePaths } from '@/app/router/route-paths'
+import { LanguageSwitch } from '@/components/shared/language-switch'
 import { useAuthStore } from '@/stores/auth-store'
 import { useTenantStore } from '@/stores/tenant-store'
 import { useUiStore } from '@/stores/ui-store'
 
-const navItems = [
-  { itemKey: routePaths.dashboard, text: 'Dashboard', icon: <IconHomeStroked size="large" /> },
-  { itemKey: routePaths.members, text: '成员管理', icon: <IconUserGroup size="large" /> },
-  { itemKey: routePaths.rbac, text: 'RBAC 权限', icon: <IconSafeStroked size="large" /> },
-  { itemKey: routePaths.audit, text: '审计日志', icon: <IconHistory size="large" /> },
-  { itemKey: routePaths.sso, text: 'SSO 配置', icon: <IconKeyStroked size="large" /> },
-  { itemKey: routePaths.mcp, text: '企业 MCP', icon: <IconServerStroked size="large" /> },
-  { itemKey: routePaths.skills, text: '企业 Skill', icon: <IconPuzzle size="large" /> },
-]
-
 export function ConsoleLayout() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const location = useLocation()
   const logout = useAuthStore((state) => state.logout)
@@ -45,6 +38,16 @@ export function ConsoleLayout() {
   const currentTenantId = useTenantStore((state) => state.currentTenantId)
   const siderCollapsed = useUiStore((state) => state.siderCollapsed)
   const toggleSider = useUiStore((state) => state.toggleSider)
+
+  const navItems = [
+    { itemKey: routePaths.dashboard, text: t('layout.nav.dashboard'), icon: <IconHomeStroked size="large" /> },
+    { itemKey: routePaths.members, text: t('layout.nav.members'), icon: <IconUserGroup size="large" /> },
+    { itemKey: routePaths.rbac, text: t('layout.nav.rbac'), icon: <IconSafeStroked size="large" /> },
+    { itemKey: routePaths.audit, text: t('layout.nav.audit'), icon: <IconHistory size="large" /> },
+    { itemKey: routePaths.sso, text: t('layout.nav.sso'), icon: <IconKeyStroked size="large" /> },
+    { itemKey: routePaths.mcp, text: t('layout.nav.mcp'), icon: <IconServerStroked size="large" /> },
+    { itemKey: routePaths.skills, text: t('layout.nav.skills'), icon: <IconPuzzle size="large" /> },
+  ]
 
   const currentTenant = tenants.find((tenant) => tenant.id === currentTenantId) ?? tenants[0]
   const userInitial = (session?.name?.slice(0, 1) || 'U').toUpperCase()
@@ -56,10 +59,10 @@ export function ConsoleLayout() {
 
   const onAskLogout = () => {
     Modal.confirm({
-      title: '确认退出当前账号？',
-      content: '这会清理本地登录状态。',
-      okText: '退出',
-      cancelText: '取消',
+      title: t('layout.logoutConfirmTitle'),
+      content: t('layout.logoutConfirmContent'),
+      okText: t('layout.logoutConfirmOk'),
+      cancelText: t('layout.logoutConfirmCancel'),
       onOk: onLogout,
     })
   }
@@ -78,13 +81,13 @@ export function ConsoleLayout() {
         <div className="app-sider-inner">
           <div className="app-brand">
             <div className="app-brand-mark">OF</div>
-            {!siderCollapsed ? <span className="app-brand-text">OpenFoal Enterprise</span> : null}
+            {!siderCollapsed ? <span className="app-brand-text">{t('layout.brand')}</span> : null}
           </div>
 
           {!siderCollapsed ? (
             <div className="app-sider-tenant-chip">
               <Typography.Text type="tertiary" size="small">
-                当前租户
+                {t('common.currentTenant')}
               </Typography.Text>
               <Tag color="light-blue">{currentTenant?.name ?? '-'}</Tag>
             </div>
@@ -111,7 +114,7 @@ export function ConsoleLayout() {
               {!siderCollapsed ? (
                 <div className="app-profile-meta">
                   <Typography.Text strong className="app-profile-name">
-                    {session?.name ?? '未登录用户'}
+                    {session?.name ?? t('common.unknownUser')}
                   </Typography.Text>
                   <Typography.Text type="tertiary" className="app-profile-email">
                     {session?.email ?? '-'}
@@ -121,7 +124,7 @@ export function ConsoleLayout() {
             </div>
 
             <Space spacing={8} className="app-sider-actions">
-              <Tooltip content={siderCollapsed ? '展开侧栏' : '收起侧栏'}>
+              <Tooltip content={siderCollapsed ? t('layout.expandSidebar') : t('layout.collapseSidebar')}>
                 <Button
                   theme="light"
                   type="tertiary"
@@ -130,7 +133,7 @@ export function ConsoleLayout() {
                   onClick={toggleSider}
                 />
               </Tooltip>
-              <Tooltip content="退出登录">
+              <Tooltip content={t('layout.logoutTooltip')}>
                 <Button
                   theme="light"
                   type="danger"
@@ -146,12 +149,13 @@ export function ConsoleLayout() {
       <Layout>
         <Layout.Header className="app-header">
           <Space>
-            <Typography.Text strong>{session?.name ?? '未登录用户'}</Typography.Text>
+            <Typography.Text strong>{session?.name ?? t('common.unknownUser')}</Typography.Text>
             <Typography.Text type="tertiary">{session?.email ?? '-'}</Typography.Text>
           </Space>
           <Space>
-            <Typography.Text type="tertiary">当前租户</Typography.Text>
+            <Typography.Text type="tertiary">{t('common.currentTenant')}</Typography.Text>
             <Tag color="light-blue">{currentTenant?.name ?? '-'}</Tag>
+            <LanguageSwitch />
           </Space>
         </Layout.Header>
         <Layout.Content className="app-content">
