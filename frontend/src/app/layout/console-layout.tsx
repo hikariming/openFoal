@@ -51,7 +51,8 @@ export function ConsoleLayout() {
     { itemKey: routePaths.skills, text: t('layout.nav.skills'), icon: <IconPuzzle size="large" /> },
   ]
 
-  const currentTenant = tenants.find((tenant) => tenant.id === currentTenantId) ?? tenants[0]
+  const currentTenant = tenants.find((tenant) => tenant.id === currentTenantId) ?? null
+  const tenantDisplayName = currentTenant?.name ?? session?.tenantId ?? '-'
   const userInitial = (session?.name?.slice(0, 1) || 'U').toUpperCase()
 
   const onLogout = () => {
@@ -91,7 +92,7 @@ export function ConsoleLayout() {
               <Typography.Text type="tertiary" size="small">
                 {t('common.currentTenant')}
               </Typography.Text>
-              <Tag color="light-blue">{currentTenant?.name ?? '-'}</Tag>
+              <Tag color="light-blue">{tenantDisplayName}</Tag>
             </div>
           ) : null}
 
@@ -156,7 +157,7 @@ export function ConsoleLayout() {
           </Space>
           <Space>
             <Typography.Text type="tertiary">{t('common.currentTenant')}</Typography.Text>
-            <Tag color="light-blue">{currentTenant?.name ?? '-'}</Tag>
+            <Tag color="light-blue">{tenantDisplayName}</Tag>
             <LanguageSwitch />
           </Space>
         </Layout.Header>

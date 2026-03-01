@@ -9,11 +9,13 @@ import {
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
+import { fetchLoginTenants } from '@/api/tenant-api'
 import LoginPage from '@/pages/login/page'
 import { useAuthStore } from '@/stores/auth-store'
 import { useTenantStore } from '@/stores/tenant-store'
 
 const mockNavigate = vi.fn()
+const fetchLoginTenantsMock = vi.mocked(fetchLoginTenants)
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -31,6 +33,10 @@ vi.mock('react-router-dom', async () => {
 
 vi.mock('@/components/shared/language-switch', () => ({
   LanguageSwitch: () => <div>language-switch</div>,
+}))
+
+vi.mock('@/api/tenant-api', () => ({
+  fetchLoginTenants: vi.fn(),
 }))
 
 vi.mock('@douyinfe/semi-ui', () => {
@@ -150,10 +156,15 @@ vi.mock('@douyinfe/semi-ui', () => {
 describe('LoginPage', () => {
   beforeEach(() => {
     mockNavigate.mockReset()
+    fetchLoginTenantsMock.mockReset()
+    fetchLoginTenantsMock.mockResolvedValue([
+      { id: 'tenant_seed_main', name: 'Seed Tenant' },
+    ])
 
     useTenantStore.setState({
-      tenants: [{ id: 'tenant_seed_main', name: 'Seed Tenant', region: 'local' }],
-      currentTenantId: 'tenant_seed_main',
+      tenants: [],
+      currentTenantId: '',
+      setTenants: useTenantStore.getState().setTenants,
       setCurrentTenant: useTenantStore.getState().setCurrentTenant,
     })
 
@@ -186,7 +197,7 @@ describe('LoginPage', () => {
       </MemoryRouter>,
     )
 
-    fireEvent.change(screen.getByLabelText('login.password'), {
+    fireEvent.change(await screen.findByLabelText('login.password'), {
       target: { value: 'AdminPass123!' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'login.submit' }))
@@ -216,7 +227,7 @@ describe('LoginPage', () => {
       </MemoryRouter>,
     )
 
-    fireEvent.change(screen.getByLabelText('login.password'), {
+    fireEvent.change(await screen.findByLabelText('login.password'), {
       target: { value: 'WrongPass' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'login.submit' }))

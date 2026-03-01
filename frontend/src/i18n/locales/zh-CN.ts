@@ -74,6 +74,9 @@ const zhCN = {
     password: '密码',
     passwordRequired: '请输入密码',
     loginFailed: '账号密码错误或无租户访问权限。',
+    tenantsLoading: '正在加载租户列表...',
+    tenantsLoadFailed: '租户加载失败，请刷新后重试。',
+    noTenants: '暂无可用租户，请联系管理员。',
     submit: '登录并进入企业控制台',
   },
   dashboard: {

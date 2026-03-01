@@ -21,3 +21,8 @@ export interface LoginResult {
   expiresIn: string
   session: AuthSession
 }
+
+export interface LoginTenantOption {
+  id: string
+  name: string
+}

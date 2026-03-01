@@ -74,6 +74,9 @@ const enUS = {
     password: 'Password',
     passwordRequired: 'Please enter your password',
     loginFailed: 'Invalid credentials or tenant access denied.',
+    tenantsLoading: 'Loading tenant list...',
+    tenantsLoadFailed: 'Failed to load tenants. Please refresh and retry.',
+    noTenants: 'No available tenants. Please contact an administrator.',
     submit: 'Sign in to Enterprise Console',
   },
   dashboard: {

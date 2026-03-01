@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config'
 import { JwtService } from '@nestjs/jwt'
 import * as argon2 from 'argon2'
 import { PrismaService } from '../../common/prisma.service'
-import { AuthSession, JwtClaims, LoginResult, UserRole } from './auth.types'
+import { AuthSession, JwtClaims, LoginResult, LoginTenantOption, UserRole } from './auth.types'
 
 interface LoginInput {
   email: string
@@ -101,6 +101,21 @@ export class AuthService {
         role,
       },
     }
+  }
+
+  async listLoginTenants(): Promise<LoginTenantOption[]> {
+    return this.prisma.tenant.findMany({
+      where: {
+        status: 'NORMAL',
+      },
+      orderBy: {
+        createdAt: 'asc',
+      },
+      select: {
+        id: true,
+        name: true,
+      },
+    })
   }
 
   // Deprecated compatibility endpoint for existing clients.

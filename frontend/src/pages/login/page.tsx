@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Button, Card, Form, Space, Typography } from '@douyinfe/semi-ui'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
+import { fetchLoginTenants } from '@/api/tenant-api'
 import { routePaths } from '@/app/router/route-paths'
 import { LanguageSwitch } from '@/components/shared/language-switch'
 import { useAuthStore } from '@/stores/auth-store'
@@ -20,8 +21,11 @@ export default function LoginPage() {
   const session = useAuthStore((state) => state.session)
   const tenants = useTenantStore((state) => state.tenants)
   const currentTenantId = useTenantStore((state) => state.currentTenantId)
+  const setTenants = useTenantStore((state) => state.setTenants)
   const setCurrentTenant = useTenantStore((state) => state.setCurrentTenant)
 
+  const [loadingTenants, setLoadingTenants] = useState(true)
+  const [tenantsLoadFailed, setTenantsLoadFailed] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -34,6 +38,39 @@ export default function LoginPage() {
       replace: true,
     })
   }, [navigate, session])
+
+  useEffect(() => {
+    let active = true
+
+    const loadTenants = async () => {
+      setLoadingTenants(true)
+      setTenantsLoadFailed(false)
+
+      try {
+        const tenantOptions = await fetchLoginTenants()
+        if (!active) {
+          return
+        }
+
+        setTenants(tenantOptions)
+      } catch {
+        if (active) {
+          setTenantsLoadFailed(true)
+          setTenants([])
+        }
+      } finally {
+        if (active) {
+          setLoadingTenants(false)
+        }
+      }
+    }
+
+    void loadTenants()
+
+    return () => {
+      active = false
+    }
+  }, [setTenants])
 
   const handleSubmit = async (values: LoginFormValues) => {
     setSubmitting(true)
@@ -69,21 +106,35 @@ export default function LoginPage() {
           <Typography.Paragraph type="tertiary">{t('login.description')}</Typography.Paragraph>
         </Space>
 
-        <Form<LoginFormValues>
-          labelPosition="top"
-          initValues={{
-            email: 'admin@openfoal.dev',
-            password: '',
-            tenantId: currentTenantId,
-          }}
-          onSubmit={handleSubmit}
-        >
+        {loadingTenants ? (
+          <Typography.Text type="tertiary">{t('login.tenantsLoading')}</Typography.Text>
+        ) : null}
+
+        {tenantsLoadFailed ? (
+          <Typography.Text type="danger">{t('login.tenantsLoadFailed')}</Typography.Text>
+        ) : null}
+
+        {!loadingTenants && tenants.length === 0 ? (
+          <Typography.Text type="danger">{t('login.noTenants')}</Typography.Text>
+        ) : null}
+
+        {!loadingTenants && tenants.length > 0 ? (
+          <Form<LoginFormValues>
+            key={currentTenantId || 'tenant-login'}
+            labelPosition="top"
+            initValues={{
+              email: 'admin@openfoal.dev',
+              password: '',
+              tenantId: currentTenantId || tenants[0].id,
+            }}
+            onSubmit={handleSubmit}
+          >
           <Form.Select
             field="tenantId"
             label={t('login.tenant')}
             optionList={tenants.map((tenant) => ({
               value: tenant.id,
-              label: `${tenant.name} (${tenant.region})`,
+              label: tenant.name,
             }))}
             rules={[{ required: true, message: t('login.tenantRequired') }]}
           />
@@ -108,7 +159,8 @@ export default function LoginPage() {
               {t('login.submit')}
             </Button>
           </Space>
-        </Form>
+          </Form>
+        ) : null}
       </Card>
     </div>
   )

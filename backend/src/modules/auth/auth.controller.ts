@@ -39,6 +39,11 @@ class IssueTokenDto {
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @Get('tenants')
+  tenants() {
+    return this.authService.listLoginTenants()
+  }
+
   @Post('login')
   login(@Body() body: LoginDto) {
     return this.authService.login(body)

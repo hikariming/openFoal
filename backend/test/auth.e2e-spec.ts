@@ -31,6 +31,12 @@ describe('Auth API (e2e)', () => {
     const memberHash = await argon2.hash('MemberPass123!', { type: argon2.argon2id })
 
     const mockPrisma: Partial<PrismaService> = {
+      tenant: {
+        findMany: jest.fn(async () => [
+          { id: 'tenant_admin', name: 'Admin Tenant' },
+          { id: 'tenant_member', name: 'Member Tenant' },
+        ]),
+      } as any,
       account: {
         findUnique: jest.fn(async ({ where }: any) => {
           if (where?.email === adminAccount.email) {
@@ -121,6 +127,14 @@ describe('Auth API (e2e)', () => {
     expect(res.body).toHaveProperty('accessToken')
     expect(res.body.session.role).toBe('admin')
     expect(res.body.session.tenantId).toBe('tenant_admin')
+  })
+
+  it('GET /api/auth/tenants returns public tenant options', async () => {
+    const res = await request(app.getHttpServer()).get('/api/auth/tenants').expect(200)
+    expect(res.body).toEqual([
+      { id: 'tenant_admin', name: 'Admin Tenant' },
+      { id: 'tenant_member', name: 'Member Tenant' },
+    ])
   })
 
   it('POST /api/auth/login logs in member', async () => {
