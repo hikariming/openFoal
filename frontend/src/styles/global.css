@@ -81,11 +81,15 @@ body {
 
 .app-nav {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding-top: 6px;
 }
 
 .app-sider-footer {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
   margin-top: auto;
   padding: 12px;
   border-top: 1px solid var(--semi-color-border);
@@ -127,6 +131,7 @@ body {
 
 .app-sider-action-btn {
   border-radius: 10px;
+  pointer-events: auto;
 }
 
 .app-sider.is-collapsed .app-brand {

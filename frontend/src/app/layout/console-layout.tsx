@@ -2,7 +2,6 @@ import {
   Avatar,
   Button,
   Layout,
-  Modal,
   Nav,
   Space,
   Tag,
@@ -58,16 +57,6 @@ export function ConsoleLayout() {
   const onLogout = () => {
     logout()
     navigate(routePaths.login)
-  }
-
-  const onAskLogout = () => {
-    Modal.confirm({
-      title: t('layout.logoutConfirmTitle'),
-      content: t('layout.logoutConfirmContent'),
-      okText: t('layout.logoutConfirmOk'),
-      cancelText: t('layout.logoutConfirmCancel'),
-      onOk: onLogout,
-    })
   }
 
   return (
@@ -142,7 +131,7 @@ export function ConsoleLayout() {
                   type="danger"
                   icon={<IconExit />}
                   className="app-sider-action-btn"
-                  onClick={onAskLogout}
+                  onClick={onLogout}
                 />
               </Tooltip>
             </Space>
