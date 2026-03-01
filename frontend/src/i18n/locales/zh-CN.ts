@@ -66,13 +66,15 @@ const zhCN = {
   },
   login: {
     title: '企业版登录',
-    description: '当前为前端阶段，先选择租户再进入控制台。',
+    description: '使用租户账号登录企业系统。',
     tenant: '租户',
     tenantRequired: '请选择租户',
     email: '企业邮箱',
     emailRequired: '请输入企业邮箱',
+    password: '密码',
+    passwordRequired: '请输入密码',
+    loginFailed: '账号密码错误或无租户访问权限。',
     submit: '登录并进入企业控制台',
-    userPrototype: '进入用户端原型',
   },
   dashboard: {
     title: '企业控制台总览',

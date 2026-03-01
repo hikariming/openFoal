@@ -66,13 +66,15 @@ const enUS = {
   },
   login: {
     title: 'Enterprise Login',
-    description: 'Frontend-only mode for now. Select a tenant before entering the console.',
+    description: 'Sign in with tenant-scoped account credentials.',
     tenant: 'Tenant',
     tenantRequired: 'Please select a tenant',
     email: 'Work email',
     emailRequired: 'Please enter your work email',
+    password: 'Password',
+    passwordRequired: 'Please enter your password',
+    loginFailed: 'Invalid credentials or tenant access denied.',
     submit: 'Sign in to Enterprise Console',
-    userPrototype: 'Open User Prototype',
   },
   dashboard: {
     title: 'Enterprise Overview',

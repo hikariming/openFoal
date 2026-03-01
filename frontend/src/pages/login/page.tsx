@@ -1,7 +1,7 @@
-import { useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, Card, Form, Space, Typography } from '@douyinfe/semi-ui'
 import { useTranslation } from 'react-i18next'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { routePaths } from '@/app/router/route-paths'
 import { LanguageSwitch } from '@/components/shared/language-switch'
 import { useAuthStore } from '@/stores/auth-store'
@@ -9,26 +9,49 @@ import { useTenantStore } from '@/stores/tenant-store'
 
 interface LoginFormValues {
   email: string
+  password: string
   tenantId: string
-}
-
-interface RedirectState {
-  from?: string
 }
 
 export default function LoginPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const location = useLocation()
-  const loginAsDemo = useAuthStore((state) => state.loginAsDemo)
+  const login = useAuthStore((state) => state.login)
+  const session = useAuthStore((state) => state.session)
   const tenants = useTenantStore((state) => state.tenants)
   const currentTenantId = useTenantStore((state) => state.currentTenantId)
   const setCurrentTenant = useTenantStore((state) => state.setCurrentTenant)
 
-  const redirectTo = useMemo(() => {
-    const state = location.state as RedirectState | null
-    return state?.from || routePaths.dashboard
-  }, [location.state])
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!session) {
+      return
+    }
+
+    navigate(session.role === 'admin' ? routePaths.dashboard : routePaths.userPrototype, {
+      replace: true,
+    })
+  }, [navigate, session])
+
+  const handleSubmit = async (values: LoginFormValues) => {
+    setSubmitting(true)
+    setError('')
+
+    try {
+      setCurrentTenant(values.tenantId)
+      const session = await login(values)
+
+      navigate(session.role === 'admin' ? routePaths.dashboard : routePaths.userPrototype, {
+        replace: true,
+      })
+    } catch {
+      setError(t('login.loginFailed'))
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   return (
     <div
@@ -48,12 +71,12 @@ export default function LoginPage() {
 
         <Form<LoginFormValues>
           labelPosition="top"
-          initValues={{ email: 'owner@openfoal.com', tenantId: currentTenantId }}
-          onSubmit={(values) => {
-            setCurrentTenant(values.tenantId)
-            loginAsDemo(values.email)
-            navigate(redirectTo, { replace: true })
+          initValues={{
+            email: 'admin@openfoal.dev',
+            password: '',
+            tenantId: currentTenantId,
           }}
+          onSubmit={handleSubmit}
         >
           <Form.Select
             field="tenantId"
@@ -70,17 +93,19 @@ export default function LoginPage() {
             trigger="blur"
             rules={[{ required: true, message: t('login.emailRequired') }]}
           />
+          <Form.Input
+            field="password"
+            mode="password"
+            label={t('login.password')}
+            trigger="blur"
+            rules={[{ required: true, message: t('login.passwordRequired') }]}
+          />
+
+          {error ? <Typography.Text type="danger">{error}</Typography.Text> : null}
+
           <Space vertical align="start" style={{ width: '100%' }} spacing={8}>
-            <Button htmlType="submit" type="primary" block>
+            <Button htmlType="submit" type="primary" block loading={submitting}>
               {t('login.submit')}
-            </Button>
-            <Button
-              block
-              theme="light"
-              type="tertiary"
-              onClick={() => navigate(routePaths.userPrototype)}
-            >
-              {t('login.userPrototype')}
             </Button>
           </Space>
         </Form>

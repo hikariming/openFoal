@@ -5,10 +5,7 @@ import { PageShell } from '@/components/shared/page-shell'
 import type { UserRole } from '@/stores/auth-store'
 
 const permissionSeeds: Record<UserRole, string[]> = {
-  owner: ['tenant.manage', 'member.manage', 'audit.read', 'billing.manage', 'sso.manage'],
-  admin: ['member.manage', 'audit.read', 'sso.manage'],
-  it_admin: ['member.manage', 'audit.read', 'sso.manage'],
-  billing: ['billing.manage', 'audit.read'],
+  admin: ['tenant.manage', 'member.manage', 'audit.read', 'billing.manage', 'sso.manage'],
   member: ['audit.read'],
 }
 
@@ -16,18 +13,12 @@ export default function RbacPage() {
   const { t } = useTranslation()
   const [activeRole, setActiveRole] = useState<UserRole>('admin')
   const [granted, setGranted] = useState<Record<UserRole, Set<string>>>(() => ({
-    owner: new Set(permissionSeeds.owner),
     admin: new Set(permissionSeeds.admin),
-    it_admin: new Set(permissionSeeds.it_admin),
-    billing: new Set(permissionSeeds.billing),
     member: new Set(permissionSeeds.member),
   }))
 
   const roleOptions = [
-    { value: 'owner', label: t('common.roles.owner') },
     { value: 'admin', label: t('common.roles.admin') },
-    { value: 'it_admin', label: t('common.roles.it_admin') },
-    { value: 'billing', label: t('common.roles.billing') },
     { value: 'member', label: t('common.roles.member') },
   ]
 

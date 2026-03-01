@@ -3,7 +3,9 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { Empty, Spin } from '@douyinfe/semi-ui'
 import { useTranslation } from 'react-i18next'
 import { ConsoleLayout } from '@/app/layout/console-layout'
+import { AdminRouteGuard } from '@/components/auth/admin-route-guard'
 import { AuthGuard } from '@/components/auth/auth-guard'
+import { MemberRouteGuard } from '@/components/auth/member-route-guard'
 import { routePaths } from '@/app/router/route-paths'
 
 const DashboardPage = lazy(() => import('@/pages/dashboard/page'))
@@ -46,13 +48,19 @@ export const router = createBrowserRouter([
   },
   {
     path: routePaths.userPrototype,
-    element: withSuspense(<UserPrototypePage />),
+    element: (
+      <AuthGuard>
+        <MemberRouteGuard>{withSuspense(<UserPrototypePage />)}</MemberRouteGuard>
+      </AuthGuard>
+    ),
   },
   {
     path: '/',
     element: (
       <AuthGuard>
-        <ConsoleLayout />
+        <AdminRouteGuard>
+          <ConsoleLayout />
+        </AdminRouteGuard>
       </AuthGuard>
     ),
     children: [

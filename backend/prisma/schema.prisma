@@ -21,11 +21,8 @@ enum TenantStatus {
 }
 
 enum TenantAccountRole {
-  OWNER
   ADMIN
-  EDITOR
-  NORMAL
-  DATASET_OPERATOR
+  MEMBER
 }
 
 enum MessageRole {
@@ -90,8 +87,9 @@ model Tenant {
 model Account {
   id                 String              @id @default(uuid())
   name               String
-  email              String
+  email              String              @unique(map: "account_email_key")
   password           String?
+  passwordHash       String?             @map("password_hash")
   passwordSalt       String?             @map("password_salt")
   avatar             String?
   interfaceLanguage  String?             @map("interface_language")
@@ -111,7 +109,6 @@ model Account {
   invitedTenantJoins TenantAccountJoin[] @relation("TenantAccountInviter")
   invitationsUsed    InvitationCode[]    @relation("InvitationUsedByAccount")
 
-  @@index([email], map: "account_email_idx")
   @@map("accounts")
 }
 
@@ -120,7 +117,7 @@ model TenantAccountJoin {
   tenantId  String            @map("tenant_id")
   accountId String            @map("account_id")
   current   Boolean           @default(false)
-  role      TenantAccountRole @default(NORMAL)
+  role      TenantAccountRole @default(MEMBER)
   invitedBy String?           @map("invited_by")
   createdAt DateTime          @default(now()) @map("created_at")
   updatedAt DateTime          @updatedAt @map("updated_at")

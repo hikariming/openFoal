@@ -1,27 +1,42 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { apiRequest } from '@/lib/api-client'
 
-export type UserRole = 'owner' | 'admin' | 'it_admin' | 'billing' | 'member'
+export type UserRole = 'admin' | 'member'
 
 export interface UserSession {
-  userId: string
+  accountId: string
   name: string
   email: string
-  roles: UserRole[]
+  tenantId: string
+  role: UserRole
+  accessToken: string
+}
+
+interface LoginCredentials {
+  email: string
+  password: string
+  tenantId: string
+}
+
+interface LoginResponse {
+  accessToken: string
+  tokenType: string
+  expiresIn: string
+  session: {
+    accountId: string
+    name: string
+    email: string
+    tenantId: string
+    role: UserRole
+  }
 }
 
 interface AuthState {
   isAuthenticated: boolean
   session: UserSession | null
-  loginAsDemo: (email: string) => void
+  login: (credentials: LoginCredentials) => Promise<UserSession>
   logout: () => void
-}
-
-const demoSession: UserSession = {
-  userId: 'u_owner_demo',
-  name: 'Enterprise Owner',
-  email: 'owner@openfoal.com',
-  roles: ['owner', 'admin'],
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -29,14 +44,24 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       isAuthenticated: false,
       session: null,
-      loginAsDemo: (email) => {
+      login: async (credentials) => {
+        const response = await apiRequest<LoginResponse>('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify(credentials),
+          skipAuth: true,
+        })
+
+        const session: UserSession = {
+          ...response.session,
+          accessToken: response.accessToken,
+        }
+
         set({
           isAuthenticated: true,
-          session: {
-            ...demoSession,
-            email: email || demoSession.email,
-          },
+          session,
         })
+
+        return session
       },
       logout: () => {
         set({

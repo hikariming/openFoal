@@ -15,9 +15,9 @@ interface MemberRow {
 }
 
 const initialMembers: MemberRow[] = [
-  { id: 'm1', name: 'Alice Li', email: 'alice@openfoal.com', role: 'owner', status: 'active' },
+  { id: 'm1', name: 'Alice Li', email: 'alice@openfoal.com', role: 'admin', status: 'active' },
   { id: 'm2', name: 'Bob Chen', email: 'bob@openfoal.com', role: 'admin', status: 'active' },
-  { id: 'm3', name: 'Cindy Wu', email: 'cindy@openfoal.com', role: 'billing', status: 'invited' },
+  { id: 'm3', name: 'Cindy Wu', email: 'cindy@openfoal.com', role: 'member', status: 'invited' },
 ]
 
 export default function MembersPage() {
@@ -26,10 +26,7 @@ export default function MembersPage() {
   const [keyword, setKeyword] = useState('')
 
   const roleOptions = [
-    { value: 'owner', label: t('common.roles.owner') },
     { value: 'admin', label: t('common.roles.admin') },
-    { value: 'it_admin', label: t('common.roles.it_admin') },
-    { value: 'billing', label: t('common.roles.billing') },
     { value: 'member', label: t('common.roles.member') },
   ]
 

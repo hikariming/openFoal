@@ -8,10 +8,10 @@ interface AuthGuardProps {
 }
 
 export function AuthGuard({ children }: AuthGuardProps) {
-  const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
+  const session = useAuthStore((state) => state.session)
   const location = useLocation()
 
-  if (!isAuthenticated) {
+  if (!session) {
     return (
       <Navigate
         to={routePaths.login}
