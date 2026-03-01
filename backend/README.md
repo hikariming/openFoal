@@ -45,3 +45,12 @@ API prefix is `/api`.
 - `GET /api/sandboxes`
 - `GET /api/agents`
 - `GET /api/audit-logs`
+
+## Test Scripts
+
+```bash
+npm run test
+npm run test:unit
+npm run test:e2e
+npm run test:coverage
+```
