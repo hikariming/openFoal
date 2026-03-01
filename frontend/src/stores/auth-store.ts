@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { apiRequest } from '@/lib/api-client'
+import { loginWithPassword, type LoginCredentials, type LoginResponse } from '@/api/auth-api'
 
 export type UserRole = 'admin' | 'member'
 
@@ -11,25 +11,6 @@ export interface UserSession {
   tenantId: string
   role: UserRole
   accessToken: string
-}
-
-interface LoginCredentials {
-  email: string
-  password: string
-  tenantId: string
-}
-
-interface LoginResponse {
-  accessToken: string
-  tokenType: string
-  expiresIn: string
-  session: {
-    accountId: string
-    name: string
-    email: string
-    tenantId: string
-    role: UserRole
-  }
 }
 
 interface AuthState {
@@ -45,11 +26,7 @@ export const useAuthStore = create<AuthState>()(
       isAuthenticated: false,
       session: null,
       login: async (credentials) => {
-        const response = await apiRequest<LoginResponse>('/api/auth/login', {
-          method: 'POST',
-          body: JSON.stringify(credentials),
-          skipAuth: true,
-        })
+        const response: LoginResponse = await loginWithPassword(credentials)
 
         const session: UserSession = {
           ...response.session,
