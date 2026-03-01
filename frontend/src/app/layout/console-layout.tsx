@@ -10,6 +10,7 @@ import {
   Typography,
 } from '@douyinfe/semi-ui'
 import {
+  IconDesktop,
   IconExit,
   IconHistory,
   IconHomeStroked,
@@ -46,6 +47,7 @@ export function ConsoleLayout() {
     { itemKey: routePaths.audit, text: t('layout.nav.audit'), icon: <IconHistory size="large" /> },
     { itemKey: routePaths.sso, text: t('layout.nav.sso'), icon: <IconKeyStroked size="large" /> },
     { itemKey: routePaths.mcp, text: t('layout.nav.mcp'), icon: <IconServerStroked size="large" /> },
+    { itemKey: routePaths.sandbox, text: t('layout.nav.sandbox'), icon: <IconDesktop size="large" /> },
     { itemKey: routePaths.skills, text: t('layout.nav.skills'), icon: <IconPuzzle size="large" /> },
   ]
 

@@ -12,6 +12,7 @@ const RbacPage = lazy(() => import('@/pages/rbac/page'))
 const AuditPage = lazy(() => import('@/pages/audit/page'))
 const SsoPage = lazy(() => import('@/pages/sso/page'))
 const McpPage = lazy(() => import('@/pages/mcp/page'))
+const SandboxPage = lazy(() => import('@/pages/sandbox/page'))
 const SkillsPage = lazy(() => import('@/pages/skills/page'))
 const LoginPage = lazy(() => import('@/pages/login/page'))
 const UserPrototypePage = lazy(() => import('@/pages/user-prototype/page'))
@@ -82,6 +83,10 @@ export const router = createBrowserRouter([
       {
         path: routePaths.mcp,
         element: withSuspense(<McpPage />),
+      },
+      {
+        path: routePaths.sandbox,
+        element: withSuspense(<SandboxPage />),
       },
       {
         path: routePaths.skills,

@@ -7,5 +7,6 @@ export const routePaths = {
   audit: '/audit',
   sso: '/sso',
   mcp: '/mcp',
+  sandbox: '/sandbox',
   skills: '/skills',
 } as const

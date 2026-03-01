@@ -215,6 +215,10 @@
   cursor: pointer;
 }
 
+.user-prototype-root .user-trigger-card:hover {
+  background: #e6e4e1;
+}
+
 .user-prototype-root .user-trigger-copy {
   min-width: 0;
   flex: 1;
@@ -234,25 +238,29 @@
   font-size: 14px;
 }
 
-.user-prototype-root .account-popover {
+.account-dropdown-wrap {
+  padding: 0 !important;
+  border-radius: 16px !important;
+  border: 1px solid #dfdbd8 !important;
+  background: #f8f7f6 !important;
+  box-shadow: 0 18px 40px rgba(34, 27, 22, 0.14) !important;
+}
+
+.account-dropdown-panel {
   width: 320px;
   max-width: calc(100vw - 24px);
-  border-radius: 16px;
-  background: #f8f7f6;
-  border: 1px solid #dfdbd8;
-  box-shadow: 0 18px 40px rgba(34, 27, 22, 0.14);
   padding: 14px;
   display: grid;
   gap: 2px;
 }
 
-.user-prototype-root .account-head {
+.account-dropdown-head {
   display: flex;
   gap: 10px;
   align-items: center;
 }
 
-.user-prototype-root .account-name {
+.account-dropdown-name {
   display: block;
   font-size: 20px;
   line-height: 1.1;
@@ -260,39 +268,30 @@
   color: #2f2a27;
 }
 
-.user-prototype-root .account-email {
+.account-dropdown-email {
   display: block;
   margin-top: 2px;
   font-size: 13px;
 }
 
-.user-prototype-root .account-divider {
-  height: 1px;
-  background: #ddd8d5;
-  margin: 4px 0;
-}
-
-.user-prototype-root .account-menu-btn {
+.account-dropdown-menu.semi-dropdown-menu {
   border: 0;
   background: transparent;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 6px;
-  color: #3b3635;
-  cursor: pointer;
-  font-size: 14px;
-  text-align: left;
+  box-shadow: none;
+  padding: 0;
 }
 
-.user-prototype-root .account-menu-btn:hover {
-  background: #efedeb;
+.account-dropdown-menu .semi-dropdown-item {
+  margin: 2px 0;
+  border-radius: 10px;
 }
 
-.user-prototype-root .account-menu-btn-danger {
-  color: #ef4444;
+.account-dropdown-menu .semi-dropdown-item > .semi-icon {
+  color: #595452;
+}
+
+.account-dropdown-menu .semi-dropdown-item-danger > .semi-icon {
+  color: currentColor;
 }
 
 .user-prototype-root .desktop-main-wrap {

@@ -2,10 +2,11 @@ import {
   Avatar,
   Button,
   Card,
+  Divider,
+  Dropdown,
   Input,
   Layout,
   Nav,
-  Popover,
   Space,
   Tag,
   Typography,
@@ -185,7 +186,7 @@ const quickActions = [
 export default function UserPrototypePage() {
   const [activeMenu, setActiveMenu] = useState<SideMenu>('new')
   const [activeSessionId, setActiveSessionId] = useState(sessionsSeed[0].id)
-  const [popoverVisible, setPopoverVisible] = useState(false)
+  const [accountMenuVisible, setAccountMenuVisible] = useState(false)
 
   const activeSession = useMemo(
     () => sessionsSeed.find((session) => session.id === activeSessionId) ?? sessionsSeed[0],
@@ -273,48 +274,38 @@ export default function UserPrototypePage() {
           </div>
 
           <div className="user-box">
-            <Popover
+            <Dropdown
               position="topLeft"
               trigger="click"
               spacing={10}
               showArrow={false}
-              visible={popoverVisible}
-              onVisibleChange={setPopoverVisible}
-              content={
-                <div className="account-popover">
-                  <div className="account-head">
+              visible={accountMenuVisible}
+              onVisibleChange={setAccountMenuVisible}
+              contentClassName="account-dropdown-wrap"
+              render={
+                <div className="account-dropdown-panel">
+                  <div className="account-dropdown-head">
                     <Avatar color="orange" size="default">
                       啵鸣
                     </Avatar>
                     <div>
-                      <Typography.Text className="account-name">啵鸣喵</Typography.Text>
-                      <Typography.Text type="tertiary" className="account-email">
+                      <Typography.Text className="account-dropdown-name">啵鸣喵</Typography.Text>
+                      <Typography.Text type="tertiary" className="account-dropdown-email">
                         openfoal@example.com
                       </Typography.Text>
                     </div>
                   </div>
-                  <div className="account-divider" />
-                  <button type="button" className="account-menu-btn">
-                    <IconSettingStroked />
-                    <span>Settings</span>
-                  </button>
-                  <button type="button" className="account-menu-btn">
-                    <IconCommentStroked />
-                    <span>Community</span>
-                  </button>
-                  <button type="button" className="account-menu-btn">
-                    <IconMailStroked />
-                    <span>Contact Us</span>
-                  </button>
-                  <button type="button" className="account-menu-btn">
-                    <IconPhoneStroked />
-                    <span>iOS App</span>
-                  </button>
-                  <div className="account-divider" />
-                  <button type="button" className="account-menu-btn account-menu-btn-danger">
-                    <IconExit />
-                    <span>Sign Out</span>
-                  </button>
+                  <Divider margin="10px 0 8px" />
+                  <Dropdown.Menu className="account-dropdown-menu">
+                    <Dropdown.Item icon={<IconSettingStroked />}>Settings</Dropdown.Item>
+                    <Dropdown.Item icon={<IconCommentStroked />}>Community</Dropdown.Item>
+                    <Dropdown.Item icon={<IconMailStroked />}>Contact Us</Dropdown.Item>
+                    <Dropdown.Item icon={<IconPhoneStroked />}>iOS App</Dropdown.Item>
+                    <Dropdown.Divider />
+                    <Dropdown.Item icon={<IconExit />} type="danger">
+                      Sign Out
+                    </Dropdown.Item>
+                  </Dropdown.Menu>
                 </div>
               }
             >
@@ -328,13 +319,13 @@ export default function UserPrototypePage() {
                     openfoal@example.com
                   </Typography.Text>
                 </div>
-                {popoverVisible ? (
+                {accountMenuVisible ? (
                   <IconChevronUp className="muted-icon" />
                 ) : (
                   <IconChevronDown className="muted-icon" />
                 )}
               </button>
-            </Popover>
+            </Dropdown>
           </div>
         </Layout.Sider>
 
