@@ -103,6 +103,9 @@ const zhCN = {
     description: '邀请成员、变更角色、停用账户。',
     inviteMember: '邀请成员',
     searchPlaceholder: '搜索姓名或邮箱',
+    loadFailed: '成员数据加载失败，请稍后重试。',
+    updateRoleFailed: '角色更新失败，请稍后重试。',
+    updateStatusFailed: '成员状态更新失败，请稍后重试。',
     columns: {
       name: '姓名',
       email: '邮箱',

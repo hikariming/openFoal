@@ -1,10 +1,9 @@
-import { useMemo, useState } from 'react'
-import { Button, Input, Select, Table, Tag } from '@douyinfe/semi-ui'
+import { useEffect, useMemo, useState } from 'react'
+import { Button, Input, Select, Table, Tag, Toast, Typography } from '@douyinfe/semi-ui'
 import { useTranslation } from 'react-i18next'
+import { fetchMembers, type MemberStatus, updateMemberRole, updateMemberStatus } from '@/api/members-api'
 import { PageShell } from '@/components/shared/page-shell'
 import type { UserRole } from '@/stores/auth-store'
-
-type MemberStatus = 'active' | 'invited' | 'disabled'
 
 interface MemberRow {
   id: string
@@ -14,16 +13,55 @@ interface MemberRow {
   status: MemberStatus
 }
 
-const initialMembers: MemberRow[] = [
-  { id: 'm1', name: 'Alice Li', email: 'alice@openfoal.com', role: 'admin', status: 'active' },
-  { id: 'm2', name: 'Bob Chen', email: 'bob@openfoal.com', role: 'admin', status: 'active' },
-  { id: 'm3', name: 'Cindy Wu', email: 'cindy@openfoal.com', role: 'member', status: 'invited' },
-]
-
 export default function MembersPage() {
   const { t } = useTranslation()
-  const [members, setMembers] = useState<MemberRow[]>(initialMembers)
+  const [members, setMembers] = useState<MemberRow[]>([])
   const [keyword, setKeyword] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [updatingRoleId, setUpdatingRoleId] = useState<string | null>(null)
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+
+    const loadMembers = async () => {
+      setLoading(true)
+      setLoadFailed(false)
+
+      try {
+        const result = await fetchMembers()
+        if (!active) {
+          return
+        }
+
+        setMembers(
+          result.map((item) => ({
+            id: item.accountId,
+            name: item.name,
+            email: item.email,
+            role: item.role,
+            status: item.status,
+          })),
+        )
+      } catch {
+        if (active) {
+          setMembers([])
+          setLoadFailed(true)
+        }
+      } finally {
+        if (active) {
+          setLoading(false)
+        }
+      }
+    }
+
+    void loadMembers()
+
+    return () => {
+      active = false
+    }
+  }, [])
 
   const roleOptions = [
     { value: 'admin', label: t('common.roles.admin') },
@@ -48,6 +86,10 @@ export default function MembersPage() {
       description={t('members.description')}
       actions={<Button type="primary">{t('members.inviteMember')}</Button>}
     >
+      {loadFailed ? (
+        <Typography.Text type="danger">{t('members.loadFailed')}</Typography.Text>
+      ) : null}
+
       <Input
         showClear
         value={keyword}
@@ -57,6 +99,7 @@ export default function MembersPage() {
       />
 
       <Table
+        loading={loading}
         pagination={false}
         dataSource={filteredMembers}
         rowKey="id"
@@ -71,14 +114,23 @@ export default function MembersPage() {
                 value={record.role}
                 style={{ width: 160 }}
                 optionList={roleOptions}
-                onChange={(value) => {
-                  setMembers((prev) =>
-                    prev.map((member) =>
-                      member.id === record.id
-                        ? { ...member, role: value as UserRole }
-                        : member,
-                    ),
-                  )
+                disabled={Boolean(updatingRoleId || updatingStatusId)}
+                onChange={async (value) => {
+                  const nextRole = value as UserRole
+                  setUpdatingRoleId(record.id)
+
+                  try {
+                    await updateMemberRole(record.id, nextRole)
+                    setMembers((prev) =>
+                      prev.map((member) =>
+                        member.id === record.id ? { ...member, role: nextRole } : member,
+                      ),
+                    )
+                  } catch {
+                    Toast.error(t('members.updateRoleFailed'))
+                  } finally {
+                    setUpdatingRoleId(null)
+                  }
                 }}
               />
             ),
@@ -102,17 +154,23 @@ export default function MembersPage() {
             render: (_, record: MemberRow) => (
               <Button
                 theme="borderless"
-                onClick={() => {
-                  setMembers((prev) =>
-                    prev.map((member) =>
-                      member.id === record.id
-                        ? {
-                            ...member,
-                            status: member.status === 'disabled' ? 'active' : 'disabled',
-                          }
-                        : member,
-                    ),
-                  )
+                disabled={Boolean(updatingRoleId || updatingStatusId)}
+                onClick={async () => {
+                  const nextStatus = record.status === 'disabled' ? 'active' : 'disabled'
+                  setUpdatingStatusId(record.id)
+
+                  try {
+                    await updateMemberStatus(record.id, nextStatus)
+                    setMembers((prev) =>
+                      prev.map((member) =>
+                        member.id === record.id ? { ...member, status: nextStatus } : member,
+                      ),
+                    )
+                  } catch {
+                    Toast.error(t('members.updateStatusFailed'))
+                  } finally {
+                    setUpdatingStatusId(null)
+                  }
                 }}
               >
                 {record.status === 'disabled'

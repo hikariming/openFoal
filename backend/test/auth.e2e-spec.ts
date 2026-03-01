@@ -6,6 +6,7 @@ import * as argon2 from 'argon2'
 import request = require('supertest')
 import { PrismaService } from '../src/common/prisma.service'
 import { AuthModule } from '../src/modules/auth/auth.module'
+import { MembersModule } from '../src/modules/members/members.module'
 import { TenantModule } from '../src/modules/tenant/tenant.module'
 
 const adminAccount = {
@@ -20,6 +21,12 @@ const memberAccount = {
   email: 'member@example.com',
 }
 
+const tenantAdminMemberAccount = {
+  id: 'acc_admin_member',
+  name: 'Ops Member',
+  email: 'ops@example.com',
+}
+
 describe('Auth API (e2e)', () => {
   let app: INestApplication
 
@@ -29,6 +36,24 @@ describe('Auth API (e2e)', () => {
 
     const adminHash = await argon2.hash('AdminPass123!', { type: argon2.argon2id })
     const memberHash = await argon2.hash('MemberPass123!', { type: argon2.argon2id })
+
+    const accountMap = new Map<string, { id: string; name: string; email: string }>([
+      [adminAccount.id, adminAccount],
+      [memberAccount.id, memberAccount],
+      [tenantAdminMemberAccount.id, tenantAdminMemberAccount],
+    ])
+
+    const tenantRoleMap = new Map<string, 'ADMIN' | 'MEMBER'>([
+      [`tenant_admin:${adminAccount.id}`, 'ADMIN'],
+      [`tenant_admin:${tenantAdminMemberAccount.id}`, 'MEMBER'],
+      [`tenant_member:${memberAccount.id}`, 'MEMBER'],
+    ])
+
+    const accountStatusMap = new Map<string, 'ACTIVE' | 'PENDING' | 'UNINITIALIZED' | 'BANNED' | 'CLOSED'>([
+      [adminAccount.id, 'ACTIVE'],
+      [memberAccount.id, 'ACTIVE'],
+      [tenantAdminMemberAccount.id, 'PENDING'],
+    ])
 
     const mockPrisma: Partial<PrismaService> = {
       tenant: {
@@ -61,9 +86,26 @@ describe('Auth API (e2e)', () => {
             return memberAccount
           }
 
+          if (where?.id === tenantAdminMemberAccount.id) {
+            return tenantAdminMemberAccount
+          }
+
           return null
         }),
-        update: jest.fn(async () => undefined),
+        update: jest.fn(async ({ where, data }: any) => {
+          if (!where?.id || !accountMap.has(where.id)) {
+            return null
+          }
+
+          if (data?.status) {
+            accountStatusMap.set(where.id, data.status)
+          }
+
+          return {
+            ...accountMap.get(where.id),
+            status: accountStatusMap.get(where.id),
+          }
+        }),
       } as any,
       tenantAccountJoin: {
         findUnique: jest.fn(async ({ where }: any) => {
@@ -71,16 +113,44 @@ describe('Auth API (e2e)', () => {
           if (!composite) {
             return null
           }
-
-          if (composite.tenantId === 'tenant_admin' && composite.accountId === adminAccount.id) {
-            return { role: 'ADMIN' }
+          const role = tenantRoleMap.get(`${composite.tenantId}:${composite.accountId}`)
+          return role ? { role } : null
+        }),
+        findMany: jest.fn(async ({ where }: any) => {
+          const tenantId = where?.tenantId
+          if (!tenantId) {
+            return []
           }
 
-          if (composite.tenantId === 'tenant_member' && composite.accountId === memberAccount.id) {
-            return { role: 'MEMBER' }
+          return Array.from(tenantRoleMap.entries())
+            .filter(([key]) => key.startsWith(`${tenantId}:`))
+            .map(([key, role]) => {
+              const accountId = key.slice(tenantId.length + 1)
+              const account = accountMap.get(accountId)
+              return {
+                accountId,
+                role,
+                account: {
+                  name: account?.name ?? '',
+                  email: account?.email ?? '',
+                  status: accountStatusMap.get(accountId) ?? 'ACTIVE',
+                },
+              }
+            })
+        }),
+        update: jest.fn(async ({ where, data }: any) => {
+          const composite = where?.tenantId_accountId
+          if (!composite) {
+            return null
           }
 
-          return null
+          const key = `${composite.tenantId}:${composite.accountId}`
+          if (!tenantRoleMap.has(key)) {
+            return null
+          }
+
+          tenantRoleMap.set(key, data?.role ?? 'MEMBER')
+          return { accountId: composite.accountId, role: data?.role ?? 'MEMBER' }
         }),
       } as any,
     }
@@ -90,6 +160,7 @@ describe('Auth API (e2e)', () => {
         ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
         AuthModule,
         TenantModule,
+        MembersModule,
       ],
     })
       .overrideProvider(PrismaService)
@@ -204,6 +275,116 @@ describe('Auth API (e2e)', () => {
 
     await request(app.getHttpServer())
       .get('/api/tenants')
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .expect(403)
+  })
+
+  it('GET /api/members returns tenant members for admin role', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/api/auth/login')
+      .send({
+        email: adminAccount.email,
+        password: 'AdminPass123!',
+        tenantId: 'tenant_admin',
+      })
+      .expect(201)
+
+    const membersRes = await request(app.getHttpServer())
+      .get('/api/members')
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .expect(200)
+
+    expect(Array.isArray(membersRes.body)).toBe(true)
+    expect(membersRes.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: adminAccount.id,
+          role: 'admin',
+          status: 'active',
+        }),
+        expect.objectContaining({
+          accountId: tenantAdminMemberAccount.id,
+          role: 'member',
+          status: 'invited',
+        }),
+      ]),
+    )
+  })
+
+  it('PATCH /api/members/:accountId/role updates member role', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/api/auth/login')
+      .send({
+        email: adminAccount.email,
+        password: 'AdminPass123!',
+        tenantId: 'tenant_admin',
+      })
+      .expect(201)
+
+    await request(app.getHttpServer())
+      .patch(`/api/members/${tenantAdminMemberAccount.id}/role`)
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .send({ role: 'admin' })
+      .expect(200)
+
+    const membersRes = await request(app.getHttpServer())
+      .get('/api/members')
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .expect(200)
+
+    expect(membersRes.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: tenantAdminMemberAccount.id,
+          role: 'admin',
+        }),
+      ]),
+    )
+  })
+
+  it('PATCH /api/members/:accountId/status updates member status', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/api/auth/login')
+      .send({
+        email: adminAccount.email,
+        password: 'AdminPass123!',
+        tenantId: 'tenant_admin',
+      })
+      .expect(201)
+
+    await request(app.getHttpServer())
+      .patch(`/api/members/${tenantAdminMemberAccount.id}/status`)
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .send({ status: 'disabled' })
+      .expect(200)
+
+    const membersRes = await request(app.getHttpServer())
+      .get('/api/members')
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .expect(200)
+
+    expect(membersRes.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: tenantAdminMemberAccount.id,
+          status: 'disabled',
+        }),
+      ]),
+    )
+  })
+
+  it('GET /api/members returns 403 for member role', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/api/auth/login')
+      .send({
+        email: memberAccount.email,
+        password: 'MemberPass123!',
+        tenantId: 'tenant_member',
+      })
+      .expect(201)
+
+    await request(app.getHttpServer())
+      .get('/api/members')
       .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
       .expect(403)
   })

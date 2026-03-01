@@ -103,6 +103,9 @@ const enUS = {
     description: 'Invite members, update roles, and disable accounts.',
     inviteMember: 'Invite Member',
     searchPlaceholder: 'Search by name or email',
+    loadFailed: 'Failed to load members. Please try again later.',
+    updateRoleFailed: 'Failed to update role. Please try again later.',
+    updateStatusFailed: 'Failed to update member status. Please try again later.',
     columns: {
       name: 'Name',
       email: 'Email',

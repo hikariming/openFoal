@@ -6,6 +6,7 @@ import { SandboxModule } from './modules/sandbox/sandbox.module'
 import { AgentModule } from './modules/agent/agent.module'
 import { AuditModule } from './modules/audit/audit.module'
 import { HealthModule } from './modules/health/health.module'
+import { MembersModule } from './modules/members/members.module'
 import { PrismaModule } from './common/prisma.module'
 import { RedisModule } from './common/redis.module'
 import { MinioModule } from './common/minio.module'
@@ -22,6 +23,7 @@ import { MinioModule } from './common/minio.module'
     SandboxModule,
     AgentModule,
     AuditModule,
+    MembersModule,
   ],
 })
 export class AppModule {}
