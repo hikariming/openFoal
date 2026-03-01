@@ -7,10 +7,25 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum UserStatus {
+enum AccountStatus {
+  PENDING
+  UNINITIALIZED
   ACTIVE
-  INVITED
-  DISABLED
+  BANNED
+  CLOSED
+}
+
+enum TenantStatus {
+  NORMAL
+  ARCHIVE
+}
+
+enum TenantAccountRole {
+  OWNER
+  ADMIN
+  EDITOR
+  NORMAL
+  DATASET_OPERATOR
 }
 
 enum MessageRole {
@@ -46,81 +61,110 @@ enum SandboxStatus {
 }
 
 model Tenant {
-  id          String         @id @default(cuid())
-  name        String
-  slug        String         @unique
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-  memberships Membership[]
-  roles       Role[]
-  agents      Agent[]
-  sessions    Session[]
-  messages    Message[]
-  toolCalls   ToolCall[]
-  runJobs     RunJob[]
-  skills      Skill[]
-  skillBindings SkillBinding[]
-  sandboxes   Sandbox[]
-  sandboxLeases SandboxLease[]
-  sandboxEvents SandboxEvent[]
-  auditLogs   AuditLog[]
-  secrets     SecretRef[]
+  id                  String              @id @default(uuid())
+  name                String
+  encryptPublicKey    String?             @map("encrypt_public_key")
+  plan                String              @default("basic")
+  status              TenantStatus        @default(NORMAL)
+  customConfig        Json?               @map("custom_config")
+  createdAt           DateTime            @default(now()) @map("created_at")
+  updatedAt           DateTime            @updatedAt @map("updated_at")
+  tenantAccounts      TenantAccountJoin[]
+  invitationsUsed     InvitationCode[]    @relation("InvitationUsedByTenant")
+  agents              Agent[]
+  sessions            Session[]
+  messages            Message[]
+  toolCalls           ToolCall[]
+  runJobs             RunJob[]
+  skills              Skill[]
+  skillBindings       SkillBinding[]
+  sandboxes           Sandbox[]
+  sandboxLeases       SandboxLease[]
+  sandboxEvents       SandboxEvent[]
+  auditLogs           AuditLog[]
+  secrets             SecretRef[]
+
+  @@map("tenants")
 }
 
-model User {
-  id          String       @id @default(cuid())
-  email       String       @unique
-  name        String
-  status      UserStatus   @default(INVITED)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  memberships Membership[]
-  messages    Message[]    @relation("MessageAuthor")
-  auditLogs   AuditLog[]   @relation("AuditActor")
+model Account {
+  id                 String              @id @default(uuid())
+  name               String
+  email              String
+  password           String?
+  passwordSalt       String?             @map("password_salt")
+  avatar             String?
+  interfaceLanguage  String?             @map("interface_language")
+  interfaceTheme     String?             @map("interface_theme")
+  timezone           String?
+  lastLoginAt        DateTime?           @map("last_login_at")
+  lastLoginIp        String?             @map("last_login_ip")
+  lastActiveAt       DateTime            @default(now()) @map("last_active_at")
+  status             AccountStatus       @default(ACTIVE)
+  initializedAt      DateTime?           @map("initialized_at")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  tenantAccounts     TenantAccountJoin[]
+  integrations       AccountIntegrate[]
+  messages           Message[]           @relation("MessageAuthor")
+  auditLogs          AuditLog[]          @relation("AuditActor")
+  invitedTenantJoins TenantAccountJoin[] @relation("TenantAccountInviter")
+  invitationsUsed    InvitationCode[]    @relation("InvitationUsedByAccount")
+
+  @@index([email], map: "account_email_idx")
+  @@map("accounts")
 }
 
-model Membership {
-  id        String   @id @default(cuid())
-  tenantId  String
-  userId    String
-  roleId    String?
-  createdAt DateTime @default(now())
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role      Role?    @relation(fields: [roleId], references: [id], onDelete: SetNull)
+model TenantAccountJoin {
+  id        String            @id @default(uuid())
+  tenantId  String            @map("tenant_id")
+  accountId String            @map("account_id")
+  current   Boolean           @default(false)
+  role      TenantAccountRole @default(NORMAL)
+  invitedBy String?           @map("invited_by")
+  createdAt DateTime          @default(now()) @map("created_at")
+  updatedAt DateTime          @updatedAt @map("updated_at")
+  tenant    Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  account   Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  inviter   Account?          @relation("TenantAccountInviter", fields: [invitedBy], references: [id], onDelete: SetNull)
 
-  @@unique([tenantId, userId])
+  @@unique([tenantId, accountId], map: "unique_tenant_account_join")
+  @@index([tenantId], map: "tenant_account_join_tenant_id_idx")
+  @@index([accountId], map: "tenant_account_join_account_id_idx")
+  @@map("tenant_account_joins")
 }
 
-model Role {
-  id          String           @id @default(cuid())
-  tenantId    String?
-  name        String
-  isSystem    Boolean          @default(false)
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  tenant      Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  memberships Membership[]
-  permissions RolePermission[]
+model AccountIntegrate {
+  id             String   @id @default(uuid())
+  accountId      String   @map("account_id")
+  provider       String
+  openId         String   @map("open_id")
+  encryptedToken String   @map("encrypted_token")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  account        Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  @@unique([tenantId, name])
+  @@unique([accountId, provider], map: "unique_account_provider")
+  @@unique([provider, openId], map: "unique_provider_open_id")
+  @@map("account_integrates")
 }
 
-model Permission {
-  id          String           @id @default(cuid())
-  code        String           @unique
-  description String?
-  roles       RolePermission[]
-}
+model InvitationCode {
+  id              Int       @id @default(autoincrement())
+  batch           String
+  code            String
+  status          String    @default("unused")
+  usedAt          DateTime? @map("used_at")
+  usedByTenantId  String?   @map("used_by_tenant_id")
+  usedByAccountId String?   @map("used_by_account_id")
+  deprecatedAt    DateTime? @map("deprecated_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  usedByTenant    Tenant?   @relation("InvitationUsedByTenant", fields: [usedByTenantId], references: [id], onDelete: SetNull)
+  usedByAccount   Account?  @relation("InvitationUsedByAccount", fields: [usedByAccountId], references: [id], onDelete: SetNull)
 
-model RolePermission {
-  roleId       String
-  permissionId String
-  createdAt    DateTime   @default(now())
-  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
-  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
-
-  @@id([roleId, permissionId])
+  @@index([batch], map: "invitation_codes_batch_idx")
+  @@index([code, status], map: "invitation_codes_code_idx")
+  @@map("invitation_codes")
 }
 
 model Agent {
@@ -167,7 +211,7 @@ model Message {
   createdAt DateTime    @default(now())
   session   Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  author    User?       @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  author    Account?    @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   toolCalls ToolCall[]
 
   @@index([sessionId, createdAt])
@@ -324,7 +368,7 @@ model AuditLog {
   metadata    Json?
   createdAt   DateTime @default(now())
   tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  actor       User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actor       Account? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, createdAt])
   @@index([tenantId, action])
