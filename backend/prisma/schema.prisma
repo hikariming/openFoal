@@ -1,0 +1,344 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+enum RunJobType {
+  CHAT
+  SCHEDULED
+}
+
+enum RunJobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+enum SkillStatus {
+  DRAFT
+  PUBLISHED
+  DEPRECATED
+}
+
+enum SandboxStatus {
+  RUNNING
+  STOPPED
+  ERROR
+}
+
+model Tenant {
+  id          String         @id @default(cuid())
+  name        String
+  slug        String         @unique
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  memberships Membership[]
+  roles       Role[]
+  agents      Agent[]
+  sessions    Session[]
+  messages    Message[]
+  toolCalls   ToolCall[]
+  runJobs     RunJob[]
+  skills      Skill[]
+  skillBindings SkillBinding[]
+  sandboxes   Sandbox[]
+  sandboxLeases SandboxLease[]
+  sandboxEvents SandboxEvent[]
+  auditLogs   AuditLog[]
+  secrets     SecretRef[]
+}
+
+model User {
+  id          String       @id @default(cuid())
+  email       String       @unique
+  name        String
+  status      UserStatus   @default(INVITED)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  memberships Membership[]
+  messages    Message[]    @relation("MessageAuthor")
+  auditLogs   AuditLog[]   @relation("AuditActor")
+}
+
+model Membership {
+  id        String   @id @default(cuid())
+  tenantId  String
+  userId    String
+  roleId    String?
+  createdAt DateTime @default(now())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role?    @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, userId])
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  tenantId    String?
+  name        String
+  isSystem    Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  tenant      Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships Membership[]
+  permissions RolePermission[]
+
+  @@unique([tenantId, name])
+}
+
+model Permission {
+  id          String           @id @default(cuid())
+  code        String           @unique
+  description String?
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  createdAt    DateTime   @default(now())
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model Agent {
+  id          String    @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessions    Session[]
+  runJobs     RunJob[]
+
+  @@index([tenantId, updatedAt])
+}
+
+model Session {
+  id            String         @id @default(cuid())
+  tenantId      String
+  agentId       String?
+  title         String?
+  status        String         @default("active")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  endedAt       DateTime?
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent         Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  messages      Message[]
+  toolCalls     ToolCall[]
+  runJobs       RunJob[]
+  sandboxLeases SandboxLease[]
+
+  @@index([tenantId, updatedAt])
+}
+
+model Message {
+  id        String      @id @default(cuid())
+  sessionId String
+  tenantId  String
+  role      MessageRole
+  text      String?
+  content   Json?
+  authorId  String?
+  createdAt DateTime    @default(now())
+  session   Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author    User?       @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  toolCalls ToolCall[]
+
+  @@index([sessionId, createdAt])
+}
+
+model ToolCall {
+  id        String    @id @default(cuid())
+  sessionId String
+  tenantId  String
+  messageId String?
+  runJobId  String?
+  toolName  String
+  status    String
+  input     Json?
+  output    Json?
+  error     String?
+  startedAt DateTime  @default(now())
+  finishedAt DateTime?
+  session   Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  message   Message?  @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  runJob    RunJob?   @relation(fields: [runJobId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, startedAt])
+}
+
+model RunJob {
+  id            String         @id @default(cuid())
+  tenantId      String
+  agentId       String?
+  sessionId     String?
+  type          RunJobType     @default(CHAT)
+  status        RunJobStatus   @default(QUEUED)
+  triggeredBy   String
+  scheduleKey   String?
+  input         Json?
+  output        Json?
+  error         String?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent         Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  session       Session?       @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  toolCalls     ToolCall[]
+  sandboxLeases SandboxLease[]
+
+  @@index([tenantId, status, createdAt])
+}
+
+model Skill {
+  id          String         @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  status      SkillStatus    @default(DRAFT)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  versions    SkillVersion[]
+  bindings    SkillBinding[]
+
+  @@unique([tenantId, name])
+}
+
+model SkillVersion {
+  id             String   @id @default(cuid())
+  skillId         String
+  version         Int
+  promptTemplate  String?
+  changelog       String?
+  createdAt       DateTime @default(now())
+  skill           Skill    @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([skillId, version])
+}
+
+model SkillBinding {
+  id             String   @id @default(cuid())
+  tenantId       String
+  skillId        String
+  mcpServer      String?
+  sandboxProfile String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  skill          Skill    @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, mcpServer])
+}
+
+model Sandbox {
+  id              String         @id @default(cuid())
+  tenantId        String
+  name            String
+  image           String
+  runtime         String
+  region          String
+  status          SandboxStatus  @default(STOPPED)
+  autoStopEnabled Boolean        @default(true)
+  cpuCores        Int            @default(2)
+  memoryMb        Int            @default(4096)
+  lastActiveAt    DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  leases          SandboxLease[]
+  events          SandboxEvent[]
+
+  @@unique([tenantId, name])
+}
+
+model SandboxLease {
+  id        String    @id @default(cuid())
+  tenantId  String
+  sandboxId String
+  sessionId String?
+  runJobId  String?
+  leaseType String
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sandbox   Sandbox   @relation(fields: [sandboxId], references: [id], onDelete: Cascade)
+  session   Session?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  runJob    RunJob?   @relation(fields: [runJobId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, startedAt])
+}
+
+model SandboxEvent {
+  id        String   @id @default(cuid())
+  tenantId  String
+  sandboxId String
+  level     String   @default("info")
+  message   String
+  payload   Json?
+  createdAt DateTime @default(now())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sandbox   Sandbox  @relation(fields: [sandboxId], references: [id], onDelete: Cascade)
+
+  @@index([sandboxId, createdAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String
+  actorId     String?
+  action      String
+  resourceType String
+  resourceId  String?
+  result      String
+  ipAddress   String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actor       User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, action])
+}
+
+model SecretRef {
+  id             String   @id @default(cuid())
+  tenantId       String
+  key            String
+  provider       String   @default("minio")
+  encryptedValue String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key])
+}
