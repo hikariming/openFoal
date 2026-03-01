@@ -36,7 +36,7 @@ import {
   IconSidebar,
   IconUserGroup,
 } from '@douyinfe/semi-icons'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import './workbench.css'
 
 type SideMenu = 'new' | 'skills' | 'automations'
@@ -342,6 +342,7 @@ export default function UserPrototypePage() {
 function ChatPanel({ sessionTitle }: { sessionTitle: string }) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [inputValue, setInputValue] = useState('')
+  const messageSequenceRef = useRef(0)
 
   const handleSend = (quickText?: string) => {
     const text = (quickText ?? inputValue).trim()
@@ -349,7 +350,8 @@ function ChatPanel({ sessionTitle }: { sessionTitle: string }) {
       return
     }
 
-    const id = Date.now().toString()
+    const id = `msg-${messageSequenceRef.current}`
+    messageSequenceRef.current += 1
     setMessages((prev) => [
       ...prev,
       { id: `${id}-u`, role: 'user', text },

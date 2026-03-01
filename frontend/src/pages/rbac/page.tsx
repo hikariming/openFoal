@@ -31,13 +31,16 @@ export default function RbacPage() {
     { value: 'member', label: t('common.roles.member') },
   ]
 
-  const permissionCatalog = [
-    { code: 'tenant.manage', description: t('rbac.permissions.tenantManage') },
-    { code: 'member.manage', description: t('rbac.permissions.memberManage') },
-    { code: 'audit.read', description: t('rbac.permissions.auditRead') },
-    { code: 'billing.manage', description: t('rbac.permissions.billingManage') },
-    { code: 'sso.manage', description: t('rbac.permissions.ssoManage') },
-  ]
+  const permissionCatalog = useMemo(
+    () => [
+      { code: 'tenant.manage', description: t('rbac.permissions.tenantManage') },
+      { code: 'member.manage', description: t('rbac.permissions.memberManage') },
+      { code: 'audit.read', description: t('rbac.permissions.auditRead') },
+      { code: 'billing.manage', description: t('rbac.permissions.billingManage') },
+      { code: 'sso.manage', description: t('rbac.permissions.ssoManage') },
+    ],
+    [t],
+  )
 
   const rows = useMemo(
     () =>
